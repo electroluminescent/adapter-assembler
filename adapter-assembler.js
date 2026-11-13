@@ -2741,6 +2741,37 @@
       const order = frontOrder(), ext = { y0: Infinity, y1: -Infinity, z0: Infinity, z1: -Infinity };
       for (const sideK of [-1, 1]) {
       MS = sideK;
+      // behind everything, very light: each object's colour swept in to the axis (the far side of the part, seen
+      // through the middle), the innermost object on top, so the section reads as wrapping round the axis
+      {
+        const wrap = sv('g', { opacity: 0.09, 'pointer-events': 'none' }), items = [];
+        for (const id of order) {
+          const n = state.scene.nodes[id], xf = xfOf(state.scene, id);
+          if (!xf.id || roleOf(state.scene, id) === 'negative') continue;
+          const poly = sectionOutline(n, viewTheta());
+          if (poly.length < 3) continue;
+          items.push({ col: COLORS[n.type] || '#1f6feb', poly, inner: Math.min(...poly.map(p => p.y)) });
+        }
+        items.sort((p, q) => q.inner - p.inner);
+        for (const { col, poly } of items) {
+          // the object's inner edge (nearest the axis) at each height where it has a corner, then back along the axis
+          const zs = [...new Set(poly.map(p => +p.z.toFixed(9)))].sort((a, b) => a - b), N = poly.length, inner = [];
+          for (const z of zs) {
+            let yin = Infinity;
+            for (let i = 0; i < N; i++) {
+              const A = poly[i], B = poly[(i + 1) % N];
+              if ((A.z - z) * (B.z - z) > 1e-18) continue;
+              const y = Math.abs(B.z - A.z) < 1e-12 ? Math.min(A.y, B.y) : A.y + (B.y - A.y) * (z - A.z) / (B.z - A.z);
+              if (y < yin) yin = y;
+            }
+            if (isFinite(yin)) inner.push(toScreen(yin, z));
+          }
+          if (inner.length < 2) continue;
+          const pts = [toScreen(0, zs[0]), ...inner, toScreen(0, zs[zs.length - 1])];
+          wrap.append(sv('path', { d: 'M' + pts.map(p => p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join('L') + 'Z', fill: col }));
+        }
+        g.append(wrap);
+      }
       for (const id of order) {
         // the section at the view angle (copies in radial cloners are shown as their first copy)
         const n = state.scene.nodes[id], xf = xfOf(state.scene, id), local = outlineOf(n.pts, n.runs), poly = xf.id ? sectionOutline(n, viewTheta()) : taperClip(n, local).map(xf.fwd), role = roleOf(state.scene, id);
@@ -2918,14 +2949,17 @@
         const wpx = text.length * 6 + 6, x0 = anchor === 'middle' ? x - wpx / 2 : anchor === 'end' ? x - wpx + 3 : x - 3;
         g.append(sv('rect', { x: x0, y: y - 10, width: wpx, height: 13, fill: 'rgba(248,249,250,.97)' }), t);
       };
-      const radii = [ext.y1]; if (ext.y0 > 1e-9 && Math.abs(ext.y1 - ext.y0) * view.s > 30) radii.push(ext.y0);
-      for (const r of radii) for (const sgn of [-1, 1]) {
+      const radii = [ext.y1]; if (ext.y0 > 1e-9 && Math.abs(ext.y1 - ext.y0) * view.s > 4) radii.push(ext.y0);
+      // close together: the outer value reads outward, the inner one inward, so they do not overlap
+      const close = radii.length > 1 && Math.abs(ext.y1 - ext.y0) * view.s < 90;
+      radii.forEach((r, ri) => { for (const sgn of [-1, 1]) {
         const x = w / 2 + (sgn * r - view.cy) * view.s;
         if (x < AX_L || x > w) continue;
         g.append(sv('line', { x1: x, y1: h - AX_B - 5, x2: x, y2: h - AX_B + 7, stroke: '#000', 'stroke-width': 2 }));
-        tag(x, h - 4, num(mm(r), 3) + ' ' + UNIT_LABEL, 'middle');
-        tag(x, h - 17, 'Ø' + num(mm(2 * r), 3) + ' ' + UNIT_LABEL, 'middle');
-      }
+        const out = ri === 0, anchor = !close ? 'middle' : (out === (sgn > 0) ? 'start' : 'end'), xx = !close ? x : x + (anchor === 'start' ? 3 : -3);
+        tag(xx, h - 4, num(mm(r), 3) + ' ' + UNIT_LABEL, anchor);
+        tag(xx, h - 17, 'Ø' + num(mm(2 * r), 3) + ' ' + UNIT_LABEL, anchor);
+      } });
       for (const z of [ext.z0, ext.z1]) {
         const y = h / 2 - (z - view.cz) * view.s;
         if (y < 0 || y > h - AX_B) continue;
