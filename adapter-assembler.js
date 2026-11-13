@@ -2182,6 +2182,10 @@
     const view3d = el('div', { style: 'flex:1;position:relative;min-height:0;min-width:0' }, canvas, busyTag, toggles3d, hint3d);
     // minimizing panes: a pane shrinks to a bar; click the bar to bring it back
     root.append(el('style', null, '.aa-min>:not(.aa-minbar){display:none!important}.aa-minbar{display:none}.aa-min>.aa-minbar{display:flex!important}'));
+    // every text and number field alike: the same height, border and padding, with the up/down buttons inside the box
+    root.append(el('style', null, '.aa-editor input[type=number],.aa-editor input[type=text]{box-sizing:border-box;height:21px;padding:1px 1px 1px 4px;margin:0;border:1px solid #c4cad0;border-radius:3px;background:#fff;color:#1f2328;font-family:sans-serif;font-size:12px;line-height:1.2;vertical-align:middle}' +
+      '.aa-editor input[type=number]:focus,.aa-editor input[type=text]:focus{outline:1px solid #54aeff;outline-offset:0;border-color:#54aeff}' +
+      '.aa-editor input[type=number]::-webkit-inner-spin-button{margin:0 0 0 2px;height:17px;align-self:center}'));
     const minBtn = (key) => {
       const b = el('button', { type: 'button', title: 'Minimize', style: 'position:absolute;top:4px;right:4px;z-index:6;width:20px;height:18px;padding:0;border:1px solid #adb5bd;border-radius:3px;background:rgba(255,255,255,.88);cursor:pointer;font:bold 12px/14px sans-serif;color:#333' }, '–');
       b.addEventListener('click', (e) => { e.stopPropagation(); state[key] = true; saveSettings(); applyLayout(true); });
@@ -3669,12 +3673,14 @@
       const nameIn = el('input', { type: 'text', value: n.name || '', style: 'width:160px;box-sizing:border-box' });
       nameIn.addEventListener('change', () => { pushUndo(); n.name = nameIn.value; if (n.type === 'thread') for (const r of n.runs) r.label = n.name || 'Thread'; renderAll(); });
       const pc = parentChoices(n.id);
-      box.append(pgrid(2, ['Name', nameIn], ['Parent', selectInput(pc.value, pc.out, v => {
+      box.append(el('div', { style: 'font:700 10px/1.4 sans-serif;letter-spacing:.05em;text-transform:uppercase;color:#868e96' }, 'Object'), pgrid(2, ['Name', nameIn], ['Parent', selectInput(pc.value, pc.out, v => {
           const snap = clone(sc);
           const t = v === 'root' ? { parent: null, slot: null } : v.endsWith(':g') ? { parent: v.slice(0, -2), slot: null } : { parent: v.split(':')[0], slot: +v.split(':')[1] };
           if (moveNodeTo(sc, n.id, t)) { pushSnap(snap); markEdited(); recalc(); }
         }, 'max-width:180px')]));
       const note = (t) => ({ wide: el('div', { style: 'color:#666;font-size:11px' }, t) });
+      const sect = (title, ...kids) => el('div', { style: 'border-top:1px solid #e9ecef;margin-top:5px;padding-top:3px' },
+        el('div', { style: 'font:700 10px/1.4 sans-serif;letter-spacing:.05em;text-transform:uppercase;color:#868e96' }, title), ...kids.filter(k => k != null));
       // circle precision for this object (blank = the export setting)
       const precisionField = () => ['Circle precision (edges)', numInput(() => n.precision || '', v => {
         pushUndo(); n.precision = v == null ? null : Math.max(3, Math.min(300, Math.round(v))); markEdited(); recalc();
@@ -3683,24 +3689,25 @@
         el('button', { type: 'button', style: BTN2, onclick: () => { pushUndo(); regenNode(n); markEdited(); recalc(); } }, 'Regenerate from parameters')) } : null;
 
       if (n.type === 'boolean') {
-        box.append(pgrid(1, ['Operation', selectInput(n.op, [['union', 'Union (A ∪ B)'], ['difference', 'Difference (A − B)'], ['intersection', 'Intersection (A ∩ B)']], v => { pushUndo(); n.op = v; markEdited(); recalc(); }),
-          el('button', { type: 'button', style: BTN2, onclick: () => { pushUndo(); n.children.reverse(); markEdited(); recalc(); } }, 'Swap A ↔ B')]));
+        box.append(sect('Boolean', pgrid(1, ['Operation', selectInput(n.op, [['union', 'Union (A ∪ B)'], ['difference', 'Difference (A − B)'], ['intersection', 'Intersection (A ∩ B)']], v => { pushUndo(); n.op = v; markEdited(); recalc(); }),
+          el('button', { type: 'button', style: BTN2, onclick: () => { pushUndo(); n.children.reverse(); markEdited(); recalc(); } }, 'Swap A ↔ B')])));
         return box;
       }
-      if (n.type === 'group') { box.append(el('div', { style: 'color:#666' }, 'A group combines its objects (union). Drag objects in or out in the list.')); return box; }
+      if (n.type === 'group') { box.append(sect('Group', el('div', { style: 'color:#666' }, 'A group combines its objects (union). Drag objects in or out in the list.'))); return box; }
       if (n.type === 'cloner') {
         const q = n.params;
         const setC = (k, v) => { pushUndo(); q[k] = v; markEdited(); recalc(); };
-        box.append(pgrid(2,
+        box.append(sect('Copies', pgrid(2,
           ['Copies', numInput(() => q.count, v => setC('count', Math.max(1, Math.min(360, Math.round(v)))), { step: '1', min: 1, max: 360, digits: 0, width: 80 })],
           ['Orientation', selectInput(q.orient, [['axial', 'axial (parallel to the axis)'], ['radial', 'radial (pointing outward)']], v => setC('orient', v))],
-          ['Distance from axis (x' + UX, numInput(() => mm(q.radius), v => setC('radius', Math.max(0, v / UNIT_SCALE)), { min: 0 })],
-          q.orient === 'radial' ? ['Copies\' axis height (y' + UX, numInput(() => hDisp(q.height, zBase()), v => setC('height', v / UNIT_SCALE + zBase()))] : GBR,
           ['Angle offset (°)', numInput(() => q.angle, v => setC('angle', v), { step: '1', digits: 3, width: 80 })],
-          ['Spread (°)', numInput(() => q.spread, v => setC('spread', Math.max(0, Math.min(360, v))), { step: '5', min: 0, max: 360, digits: 3, width: 80 })],
-          note('Children are built around their own axis and copied around the main axis: 360° spreads the copies evenly, less spreads them from the first angle to the last. ' +
+          ['Spread (°)', numInput(() => q.spread, v => setC('spread', Math.max(0, Math.min(360, v))), { step: '5', min: 0, max: 360, digits: 3, width: 80 })])),
+          sect('Placement', pgrid(2,
+          ['Distance from axis (x' + UX, numInput(() => mm(q.radius), v => setC('radius', Math.max(0, v / UNIT_SCALE)), { min: 0 })],
+          q.orient === 'radial' ? ['Copies\' axis height (y' + UX, numInput(() => hDisp(q.height, zBase()), v => setC('height', v / UNIT_SCALE + zBase()))] : null)),
+          sect('Notes', pgrid(1, note('Children are built around their own axis and copied around the main axis: 360° spreads the copies evenly, less spreads them from the first angle to the last. ' +
             'Drag the orange diamond in the cross-section to set the distance from the axis' + (q.orient === 'radial' ? ' and the height' : '') + '. The cross-section shows the first copy (dashed: its other half). ' +
-            'For bolt holes, put a solid circle (inner radius 0) in an axial cloner and subtract the cloner in a boolean.')));
+            'For bolt holes, put a solid circle (inner radius 0) in an axial cloner and subtract the cloner in a boolean.'))));
         return box;
       }
       if (n.type === 'thread') {
@@ -3717,10 +3724,11 @@
         const backing = () => q.backing != null ? q.backing : q.wall / q.depth;
         const diam = () => (q.kind === 'internal' ? 'Minor Ø ' + num(mm(q.d - 2 * q.depth + 2 * (q.clearance || 0)), 3) + ', major Ø ' + num(mm(q.d + 2 * (q.clearance || 0)), 3)
           : 'Major Ø ' + num(mm(q.d - 2 * (q.clearance || 0)), 3) + ', minor Ø ' + num(mm(q.d - 2 * q.depth - 2 * (q.clearance || 0)), 3)) + ' ' + UNIT_LABEL + ' (basic sizes).';
-        box.append(pgrid(2,
+        box.append(sect('Standard', pgrid(2,
           ['Standard', presetSel], GBR,
           ['Gender', selectInput(q.kind, [['external', 'male (external)'], ['internal', 'female (internal)']], v => setT(t => { t.kind = v; }))],
-          ['Hand', selectInput(String(q.hand), [['1', 'right-hand'], ['-1', 'left-hand']], v => setT(t => { t.hand = +v; }))],
+          ['Hand', selectInput(String(q.hand), [['1', 'right-hand'], ['-1', 'left-hand']], v => setT(t => { t.hand = +v; }))])),
+          sect('Size', pgrid(2,
           ['Nominal Ø' + U, numInput(() => mm(q.d), v => setT(t => { t.d = Math.max(0.1 / UNIT_SCALE, v / UNIT_SCALE); t.preset = ''; }), { min: 0.1 })],
           ['Pitch' + U, numInput(() => mm(q.pitch), v => setT(t => {
             const P = Math.max(0.05 / UNIT_SCALE, v / UNIT_SCALE), std = isStd(t), L = t.turns * t.pitch;
@@ -3729,26 +3737,29 @@
           ['Profile', selectInput(q.profile, [['iso', 'ISO 60° (flats)'], ['v', 'sharp 60° V']], v => setT(t => { const std = isStd(t); t.profile = v; if (std) t.depth = stdOf(t.pitch, v); }))],
           ['Depth (x' + UX, numInput(() => mm(q.depth), v => setT(t => { t.depth = Math.max(0.01 / UNIT_SCALE, v / UNIT_SCALE); }), { step: '0.01', min: 0.01 }),
             el('button', { type: 'button', style: BTN2 + ';padding:2px 6px', onclick: () => setT(t => { t.depth = stdOf(t.pitch, t.profile); }), title: 'ISO basic depth 5H/8 = 0.541 × pitch, or H = 0.866 × pitch for a sharp V' }, 'standard')],
+          { wide: dyn(diam, 'color:#666;font-size:11px') })),
+          sect('Length and position', pgrid(2,
           ['Turns', numInput(() => q.turns, v => setT(t => { t.turns = Math.max(1, v); }), { step: '0.5', min: 1, digits: 3 })],
           ['Length (y' + UX, numInput(() => mm(q.turns * q.pitch), v => setT(t => { t.turns = Math.max(1, v / UNIT_SCALE / t.pitch); }), { step: '0.5' })],
+          ['Bottom y offset' + U, numInput(() => hDisp(q.z, zBase()), v => setT(t => { t.z = v / UNIT_SCALE + zBase(); }))])),
+          sect('Backing', pgrid(2,
           ['Solid backing (× depth)', numInput(backing, v => setT(t => { t.backing = Math.max(0.05, v); }), { step: '0.25', min: 0.05, digits: 3 })],
-          ['Backing (x' + UX, numInput(() => mm(backing() * q.depth), v => setT(t => { t.backing = Math.max(0.05, v / UNIT_SCALE / t.depth); }), { step: '0.1' })],
-          ['Bottom y offset' + U, numInput(() => hDisp(q.z, zBase()), v => setT(t => { t.z = v / UNIT_SCALE + zBase(); }))],
+          ['Backing (x' + UX, numInput(() => mm(backing() * q.depth), v => setT(t => { t.backing = Math.max(0.05, v / UNIT_SCALE / t.depth); }), { step: '0.1' })])),
+          sect('Ends and fit', pgrid(2,
           ['Lead-in taper', checkInput(() => q.taperBottom, v => setT(t => { t.taperBottom = v; }), 'bottom'), checkInput(() => q.taperTop, v => setT(t => { t.taperTop = v; }), 'top')],
-          ['Clearance (x' + UX, numInput(() => mm(q.clearance || 0), v => setT(t => { t.clearance = v / UNIT_SCALE; }), { step: '0.05', title: 'Shrinks a male thread / enlarges a female one, for printed fits' })],
-          precisionField(),
-          { wide: dyn(diam, 'color:#666;font-size:11px') },
-          note('Lead-in taper cuts the end of the thread, backing included, at the flank angle of the teeth, so it does not end in a sharp half tooth and starts easily. ' +
+          ['Clearance (x' + UX, numInput(() => mm(q.clearance || 0), v => setT(t => { t.clearance = v / UNIT_SCALE; }), { step: '0.05', title: 'Shrinks a male thread / enlarges a female one, for printed fits' })])),
+          sect('Detail', pgrid(2, precisionField())),
+          sect('Notes', pgrid(1, note('Lead-in taper cuts the end of the thread, backing included, at the flank angle of the teeth, so it does not end in a sharp half tooth and starts easily. ' +
             'Backing is the solid material ' + (q.kind === 'internal' ? 'outside' : 'inside') + ' the teeth. Dragging the thread, its backing wall or its ends in the cross-section updates these values.'),
-          handNote()));
+          handNote())));
         return box;
       }
       if (n.type === 'holes') {
-        box.append(el('div', { style: 'color:#666' }, (n.holes || []).length + ' hole(s) from an imported project, as one solid. Put it in the B slot of a difference boolean to cut them out. They are not drawn in the cross-section.'));
+        box.append(sect('Holes', el('div', { style: 'color:#666' }, (n.holes || []).length + ' hole(s) from an imported project, as one solid. Put it in the B slot of a difference boolean to cut them out. They are not drawn in the cross-section.')));
         return box;
       }
       if (n.type === 'source') {
-        box.append(pgrid(2, precisionField()), el('div', { style: 'color:#666;margin-top:4px' }, 'A profile from an imported project file: edit its points and edges in the cross-section.'));
+        box.append(sect('Detail', pgrid(2, precisionField())), sect('Notes', el('div', { style: 'color:#666' }, 'A profile from an imported project file: edit its points and edges in the cross-section.')));
         if ((n.holes || []).length) box.append(el('div', { style: 'color:#666' }, n.holes.length + ' hole(s) are cut out.'));
         return box;
       }
@@ -3759,25 +3770,27 @@
         if (k === 'rob' && t.linkOut) t.rot = t.rob;
       }), o);
       const ng = n.type === 'ngon';
-      box.append(pgrid(2,
-        ng ? ['Sides', numInput(() => q.sides, v => setP(t => { t.sides = Math.max(3, Math.min(256, Math.round(v))); }), { step: '1', min: 3, max: 256, digits: 0 })] : null,
-        ng ? ['Radius about', selectInput(q.about, [['faces', 'face centres'], ['edges', 'edges']], v => setP(t => { t.about = v; }))] : null,
-        ng ? ['Rotation (°)', numInput(() => q.rotation || 0, v => setP(t => { t.rotation = v; }), { step: '1', digits: 2 })] : null,
-        ng ? GBR : null,
+      appendKids(box, ng ? sect('N-sided', pgrid(2,
+        ['Sides', numInput(() => q.sides, v => setP(t => { t.sides = Math.max(3, Math.min(256, Math.round(v))); }), { step: '1', min: 3, max: 256, digits: 0 })],
+        ['Radius about', selectInput(q.about, [['faces', 'face centres'], ['edges', 'edges']], v => setP(t => { t.about = v; }))],
+        ['Rotation (°)', numInput(() => q.rotation || 0, v => setP(t => { t.rotation = v; }), { step: '1', digits: 2 })])) : null,
+        sect('Position and height', pgrid(2,
         ['Bottom y offset' + U, numInput(() => hDisp(q.z, zBase()), v => setP(t => { t.z = v / UNIT_SCALE + zBase(); }))],
-        ['Height' + U, len('h', { min: 0.01 })],
+        ['Height' + U, len('h', { min: 0.01 })])),
+        sect('Radii', pgrid(2,
         ['Inner bottom (x' + UX, len('rib', { min: 0 })],
         ['Inner top (x' + UX, len('rit', { min: 0, disabled: q.linkIn })],
         ['Outer bottom (x' + UX, len('rob', { min: 0 })],
         ['Outer top (x' + UX, len('rot', { min: 0, disabled: q.linkOut })],
         ['Linked inner', checkInput(() => q.linkIn, v => setP(t => { t.linkIn = v; t.rit = t.rib; }), 'top = bottom')],
-        ['Linked outer', checkInput(() => q.linkOut, v => setP(t => { t.linkOut = v; t.rot = t.rob; }), 'top = bottom')],
+        ['Linked outer', checkInput(() => q.linkOut, v => setP(t => { t.linkOut = v; t.rot = t.rob; }), 'top = bottom')])),
+        sect('Bevel', pgrid(2,
         ['Bevel radius' + U, len('bevel', { min: 0 })],
         ['Bevel edges', numInput(() => q.bevelSegs, v => setP(t => { t.bevelSegs = Math.max(1, Math.min(64, Math.round(v))); }), { step: '1', min: 1, max: 64, digits: 0 })],
-        ['Bevel shape', selectInput(q.bevelOut ? 'convex' : 'concave', [['convex', 'convex (rounded)'], ['concave', 'concave (cove)']], v => setP(t => { t.bevelOut = v === 'convex'; }))],
-        ng ? null : precisionField(),
-        note('Radii in ' + UNIT_LABEL + (ng ? ', measured ' + (q.about === 'faces' ? 'to the face centres' : 'to the edges') : '') + '. Editing the outline in the cross-section updates these values while it still matches them.'),
-        handNote()));
+        ['Bevel shape', selectInput(q.bevelOut ? 'convex' : 'concave', [['convex', 'convex (rounded)'], ['concave', 'concave (cove)']], v => setP(t => { t.bevelOut = v === 'convex'; }))])),
+        ng ? null : sect('Detail', pgrid(2, precisionField())),
+        sect('Notes', pgrid(1, note('Radii in ' + UNIT_LABEL + (ng ? ', measured ' + (q.about === 'faces' ? 'to the face centres' : 'to the edges') : '') + '. Editing the outline in the cross-section updates these values while it still matches them.'),
+        handNote())));
       return box;
     }
 
