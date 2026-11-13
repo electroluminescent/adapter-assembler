@@ -28,6 +28,7 @@
     wire: false,           // 3D view: wireframe
     ssao: true,            // 3D view: ambient occlusion
     lenUnit: 'mm',         // displayed lengths: 'mm' or 'in'
+    quality: 'high',       // 'high', or 'low': no animations and less detail (faster on slow machines)
     angUnit: 'deg',        // displayed angles: 'deg' or 'rad'
     ortho: false,          // 3D view: orthographic (true) or perspective projection
     flip: false,           // turn the part upside down (export and 3D view)
@@ -59,7 +60,7 @@
 
 
   // Settings remembered in this browser.
-  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'cut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts'];
+  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'quality', 'cut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts'];
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     for (const k of SAVED_SETTINGS) if (k in saved && typeof saved[k] === typeof state[k]) state[k] = saved[k];
@@ -71,6 +72,7 @@
   function applyUnits() {
     if (state.lenUnit !== 'in') state.lenUnit = 'mm';
     if (state.angUnit !== 'rad') state.angUnit = 'deg';
+    if (state.quality !== 'low') state.quality = 'high';
     UNIT_SCALE = state.lenUnit === 'in' ? 1 : MM; UNIT_LABEL = state.lenUnit;
     ANG_SCALE = state.angUnit === 'rad' ? Math.PI / 180 : 1; ANG_LABEL = state.angUnit === 'rad' ? ' rad' : '°';
   }
@@ -1861,7 +1863,8 @@
     return e;
   }
   // Small animations for menus and panels that appear or change with the selection.
-  const reduceMotion = () => { try { return matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (_) { return false; } };
+  const lowQuality = () => state.quality === 'low';
+  const reduceMotion = () => { if (lowQuality()) return true; try { return matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (_) { return false; } };
   function animIn(e, o = {}) {
     if (!e || !e.animate || reduceMotion()) return;
     e.animate([{ opacity: 0, transform: o.from || 'translateY(-6px)' }, { opacity: 1, transform: 'none' }], { duration: o.ms || 170, easing: 'cubic-bezier(.2,.8,.2,1)' });
@@ -2105,7 +2108,8 @@
     return el('div', null,
       el('div', null,
         selectRow('Lengths', state.lenUnit, [['mm', 'metric (mm)'], ['in', 'imperial (in)']], v => setUnit('lenUnit', v)),
-        selectRow('Angles', state.angUnit, [['deg', 'degrees (°)'], ['rad', 'radians']], v => setUnit('angUnit', v))),
+        selectRow('Angles', state.angUnit, [['deg', 'degrees (°)'], ['rad', 'radians']], v => setUnit('angUnit', v)),
+        selectRow('Quality', state.quality, [['high', 'high'], ['low', 'low (no animations, less detail)']], v => setUnit('quality', v))),
       checkRow('Flip upside down', () => state.flip, v => set('flip', v)),
       el('div', null,
         numRow('Circle precision (edges)', state.precision, v => set('precision', Math.max(8, Math.min(300, Math.round(v)))), { step: '1', min: 8, max: 300, digits: 0, width: 64 }),
@@ -2698,7 +2702,7 @@
       const lab = (x, y, text, o = {}) => { const t = sv('text', { x, y, 'font-size': 10, fill: o.fill || '#868e96', 'text-anchor': o.anchor || 'start', opacity: o.op == null ? 1 : o.op }); t.textContent = text; g.append(t); };
       const isMain = (v) => Math.abs(v / main - Math.round(v / main)) < 1e-6;
       const levels = [[main, 1, 1]];
-      if (aLine > 0.01) levels.unshift([fine, aLine, aLab]);
+      if (aLine > 0.01 && !lowQuality()) levels.unshift([fine, aLine, aLab]);
       for (const [st, aL] of levels) {
         for (let y = Math.ceil(ya / st) * st; y <= yb; y += st) {
           if (st !== main && isMain(y)) continue;
@@ -3016,7 +3020,8 @@
         objs.push({ n, col: COLORS[n.type] || '#1f6feb', turns: n.type === 'ngon' || (n.runs || []).some(r => r.hand) });
       }
       if (!objs.length) return;
-      const K = 24, MSw = MS, theta = state.viewAngle * Math.PI / 180;
+      const low = lowQuality(), K = low ? 6 : 24, MSw = MS, theta = state.viewAngle * Math.PI / 180;
+      wrapCanvas.style.opacity = low ? '0.05' : '1';
       // per side: the inner radius at the cut for each pixel row (to measure the fade), and the colour layers
       const wall = { 1: new Float32Array(H).fill(NaN), '-1': new Float32Array(H).fill(NaN) };
       for (const s of [1, -1]) {
@@ -3047,6 +3052,7 @@
       // opacity per pixel: 1.05× the base beside the part, falling off hyperbolically to 0.25× at the axis
       const BASE = 0.0675, c = 4, h0 = 1 / (1 + c), axisX = w / 2 - view.cy * view.s;
       const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+      if (low) return;
       const img = ctx.getImageData(0, 0, W, H), D = img.data;
       for (let row = 0; row < H; row++) {
         const rR = wall[1][row], rL = wall[-1][row];
@@ -3506,7 +3512,7 @@
       if (!fresh) return;
       const step = () => {
         const z = zoomAnim; if (!z || !view || !root.isConnected) { zoomAnim = null; return; }
-        const k = reduceMotion() ? 1 : 0.28, ls = Math.log(view.s), lt = Math.log(z.s), done = Math.abs(lt - ls) < 0.002;
+        const k = reduceMotion() ? 1 : 0.71, ls = Math.log(view.s), lt = Math.log(z.s), done = Math.abs(lt - ls) < 0.002;
         view.s = done ? z.s : Math.exp(ls + (lt - ls) * k);
         const { w, h } = size();
         view.cy = z.wy - (z.sx - w / 2) / view.s; view.cz = z.wz + (z.sy - h / 2) / view.s;
@@ -4486,7 +4492,7 @@
     }
     function draw3dNow() {
       if (!gl) return;
-      const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+      const dpr = lowQuality() ? 1 : (window.devicePixelRatio || 1), w = canvas.clientWidth, h = canvas.clientHeight;
       if (!w || !h) return;
       if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) { canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr); }
       const CW = canvas.width, CH = canvas.height;
@@ -4514,7 +4520,7 @@
       const M = new Array(16);
       for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0; for (let k = 0; k < 4; k++) s += P[k * 4 + r] * Vm[c * 4 + k]; M[c * 4 + r] = s; }
       lastM = M;
-      const wire = wireBox.checked && lineCount > 0, ssao = state.ssao;
+      const wire = wireBox.checked && lineCount > 0, ssao = state.ssao && !lowQuality();
       const T = (ssao || wire) ? targets(CW, CH) : null;
       const planes = cutPlanes();
       lastEye = eye;
