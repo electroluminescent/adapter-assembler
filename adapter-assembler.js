@@ -2744,7 +2744,7 @@
       // behind everything, very light: each object's colour swept in to the axis (the far side of the part, seen
       // through the middle), the innermost object on top, so the section reads as wrapping round the axis
       {
-        const wrap = sv('g', { opacity: 0.09, 'pointer-events': 'none' }), items = [];
+        const wrap = sv('g', { opacity: 0.0225, 'pointer-events': 'none' }), items = [];
         for (const id of order) {
           const n = state.scene.nodes[id], xf = xfOf(state.scene, id);
           if (!xf.id || roleOf(state.scene, id) === 'negative') continue;
@@ -4279,8 +4279,17 @@
       const floorNice = (x) => { const e = Math.pow(10, Math.floor(Math.log10(x))), m = x / e; return (m >= 5 ? 5 : m >= 2 ? 2 : 1) * e; };
       // the ground under the middle of the view, a little below centre
       const G = groundAt(0, -0.3, mn[2]), rG = G ? Math.hypot(G[0] - cx, G[1] - cy) : 0;
-      let Ra = Rpart;
-      if (Rpart * px > 0.46 * w || rG > Rpart) Ra = rG > 0.4 * w / px ? floorNice(rG) : floorNice(0.4 * Math.min(w, h * 1.4) / px);
+      // the angle scale goes on a major ring: the largest one that is (nearly) all in view, or, zoomed in,
+      // the major ring through the middle of the view
+      const H = canvas.clientHeight || 1, inView = (r) => {
+        let n = 0;
+        for (let i = 0; i < 48; i++) { const t = i / 48 * 2 * Math.PI, s = toScreen3([cx + Math.cos(t) * r, cy + Math.sin(t) * r, mn[2]]); if (s && s[0] >= 0 && s[1] >= 0 && s[0] <= w && s[1] <= H) n++; }
+        return n / 48;
+      };
+      let Ra = 0;
+      for (let k = 1; k <= 80; k++) { if (inView(k * major) >= 0.85) Ra = k * major; else if (Ra) break; }
+      if (!Ra) Ra = Math.max(major, Math.round(rG / major) * major);
+      void floorNice;
       const arc = (deg) => Ra * deg * Math.PI / 180 * px;
       const aMajor = ANGLE_MAJORS.slice().reverse().find(m => arc(m / 10) >= 5) || 90, aMinor = aMajor / 10;
       // how far the grid reaches: well past the view (low views look far along the ground)
