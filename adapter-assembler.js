@@ -3905,15 +3905,16 @@
         // spokes: the major angles beyond the first ring, the four quarters from the centre
         '  float ds = (a - spoke * floor(a / spoke + 0.5)) * 0.0174533 * r, dq = (a - 90.0 * floor(a / 90.0 + 0.5)) * 0.0174533 * r;',
         // a line's width in pixels: its distance divided by how fast that distance changes on screen
-        '  float ps = max(length(vec2(dFdx(ds), dFdy(ds))), 1e-9), pq = max(length(vec2(dFdx(dq), dFdy(dq))), 1e-9);',
-        '  if (r > minor) k = max(k, band(ds, ps, 0.8) * 0.18);',
-        '  k = max(k, band(dq, pq, 1.2) * 0.42);',
+        // (across a spoke: the sideways change of position, worked out from q so the 0°/360° seam does not matter)
+        '  vec2 qx = dFdx(q), qy = dFdy(q); float pt = max(length(vec2(q.x * qx.y - q.y * qx.x, q.x * qy.y - q.y * qy.x)) / max(r, 1e-9), 1e-9);',
+        '  if (r > minor) k = max(k, band(ds, pt, 0.8) * 0.18);',
+        '  k = max(k, band(dq, pt, 1.2) * 0.42);',
         // the rim, and ticks inside it: majors (every 10th) longest, every 5th middle, the rest short
         '  float rim = band(r - Ra, px, 1.2);',
         '  float i = floor(a / aMinor + 0.5), dt = (a - i * aMinor) * 0.0174533 * r;',
         '  float mj = abs(mod(i, 10.0)) < 0.5 ? 1.0 : 0.0, md = abs(mod(i, 5.0)) < 0.5 ? 1.0 : 0.0;',
         '  float len = mix(mix(4.0, 6.0, md), 8.0, mj) * px, inTick = step(Ra - len, r) * step(r, Ra);',
-        '  float tick = band(dt, max(length(vec2(dFdx(dt), dFdy(dt))), 1e-9), mix(0.8, 1.0, mj)) * inTick;',
+        '  float tick = band(dt, pt, mix(0.8, 1.0, mj)) * inTick;',
         '  float quarter = abs(i * aMinor - 90.0 * floor(i * aMinor / 90.0 + 0.5)) < 1e-4 ? 1.0 : 0.0;',
         '  float t = max(rim * 0.8, tick * mix(mix(0.42, 0.8, mj), 0.95, quarter));',
         '  if (t > k) { k = t; col = mix(vec3(0.81, 0.83, 0.85), vec3(0.97, 0.98, 1.0), quarter * tick); }',
@@ -4160,8 +4161,25 @@
       const f = cutFrame();
       if (!f || !camBasis || !lastM) return;
       const S = compassSpec(), px = Math.max(1e-9, S.px), cs = camBasis.x, up0 = camBasis.y;
-      const dir = [f.dirs.x, f.dirs.z].map(d => ({ d, h: d[0] * cs[0] + d[1] * cs[1] + d[2] * cs[2] })).sort((a, b) => Math.abs(b.h) - Math.abs(a.h))[0];
-      const rt = dir.h < 0 ? dir.d.map(c => -c) : dir.d;
+      // the distances run along the grid spoke (a line through the centre) that is most nearly level on screen
+      // among those that cross the view, so they stay readable and in sight
+      const W0 = canvas.clientWidth, H0 = canvas.clientHeight, gz0 = bbox.mn[2], step = Math.max(S.aMajor, 10), reach0 = Math.min(S.Rv, S.half * 6 + Math.hypot(S.cx - (S.G ? S.G[0] : S.cx), S.cy - (S.G ? S.G[1] : S.cy)));
+      let best = null;
+      for (let deg = 0; deg < 180 - 1e-9; deg += step) {
+        const t = deg * Math.PI / 180, d = [Math.cos(t), Math.sin(t), 0];
+        let vis = 0, first = null, last = null, prev = null;
+        for (let i = 0; i <= 120; i++) {
+          const s = -reach0 + 2 * reach0 * i / 120, p = toScreen3([S.cx + d[0] * s, S.cy + d[1] * s, gz0]);
+          const on = p && p[0] >= 0 && p[1] >= 0 && p[0] <= W0 && p[1] <= H0;
+          if (on) { if (prev) vis += Math.hypot(p[0] - prev[0], p[1] - prev[1]); if (!first) first = p; last = p; prev = p; } else prev = null;
+        }
+        if (!first || first === last) continue;
+        const dx = last[0] - first[0], dy = last[1] - first[1], hz = Math.abs(dx) / (Math.hypot(dx, dy) || 1);
+        const score = hz * Math.min(1, vis / (0.3 * W0));
+        if (!best || score > best.score) best = { score, d: dx < 0 ? d.map(c => -c) : d };
+      }
+      const rt = best ? best.d : f.dirs.x;
+      void cs;
       // text 'up': the camera's up, square to the reading direction
       const square = (r) => { const k = up0[0] * r[0] + up0[1] * r[1] + up0[2] * r[2]; const q = [up0[0] - r[0] * k, up0[1] - r[1] * k, up0[2] - r[2] * k], l = Math.hypot(...q) || 1; return q.map(c => c / l); };
       const up = square(rt);
