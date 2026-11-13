@@ -3017,8 +3017,8 @@
     function boldExtents(g, ext) {
       if (!isFinite(ext.y0)) return;
       const { w, h } = size(), base = sceneBase;
-      const tag = (x, y, text, anchor) => {
-        const t = sv('text', { x, y, 'font-size': 10, 'font-weight': 700, fill: '#000', 'text-anchor': anchor }); t.textContent = text;
+      const tag = (x, y, text, anchor, plain) => {
+        const t = sv('text', { x, y, 'font-size': 10, 'font-weight': plain ? 400 : 700, fill: plain ? '#495057' : '#000', 'text-anchor': anchor }); t.textContent = text;
         const wpx = text.length * 6 + 6, x0 = anchor === 'middle' ? x - wpx / 2 : anchor === 'end' ? x - wpx + 3 : x - 3;
         g.append(sv('rect', { x: x0, y: y - 10, width: wpx, height: 13, fill: 'rgba(248,249,250,.97)' }), t);
       };
@@ -3028,10 +3028,11 @@
       radii.forEach((r, ri) => { for (const sgn of [-1, 1]) {
         const x = w / 2 + (sgn * r - view.cy) * view.s;
         if (x < AX_L || x > w) continue;
-        g.append(sv('line', { x1: x, y1: h - AX_B - 5, x2: x, y2: h - AX_B + 7, stroke: '#000', 'stroke-width': 2 }));
-        const out = ri === 0, anchor = !close ? 'middle' : (out === (sgn > 0) ? 'start' : 'end'), xx = !close ? x : x + (anchor === 'start' ? 3 : -3);
-        tag(xx, h - 4, num(mm(r), 3) + ' ' + UNIT_LABEL, anchor);
-        tag(xx, h - 17, 'Ø' + num(mm(2 * r), 3) + ' ' + UNIT_LABEL, anchor);
+        const out = ri === 0;     // the largest radius in bold; the smallest plain
+        g.append(sv('line', { x1: x, y1: h - AX_B - 5, x2: x, y2: h - AX_B + 7, stroke: out ? '#000' : '#495057', 'stroke-width': out ? 2 : 1 }));
+        const anchor = !close ? 'middle' : (out === (sgn > 0) ? 'start' : 'end'), xx = !close ? x : x + (anchor === 'start' ? 3 : -3);
+        tag(xx, h - 4, num(mm(r), 3) + ' ' + UNIT_LABEL, anchor, !out);
+        tag(xx, h - 17, 'Ø' + num(mm(2 * r), 3) + ' ' + UNIT_LABEL, anchor, !out);
       } });
       for (const z of [ext.z0, ext.z1]) {
         const y = h / 2 - (z - view.cz) * view.s;
