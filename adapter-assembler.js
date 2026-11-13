@@ -1,6 +1,6 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.2.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.3.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
@@ -2234,15 +2234,14 @@
       }
       rightBar.append(wrap);
     });
-    // footer: saved models (a list that opens upward) and saving
-    const footer = el('div', { style: 'flex:0 0 auto;display:flex;align-items:center;gap:3px;height:26px;box-sizing:border-box;padding:0 6px;border-top:1px solid #dee2e6;background:#f1f3f5;font-size:11px;min-width:0' });
-    const libPop = el('div', { style: 'position:absolute;left:4px;right:4px;bottom:28px;z-index:7;display:none;max-height:60%;overflow:auto;background:#fff;border:1px solid #ced4da;border-radius:5px;box-shadow:0 -2px 12px rgba(0,0,0,.15);padding:4px 6px;font-size:12px' });
-    let libOpen = false;
+    // saved models: a list that drops down under the Objects header
+    const libPop = el('div', { style: 'position:absolute;left:4px;right:4px;top:0;z-index:7;display:none;max-height:60%;overflow:auto;background:#fff;border:1px solid #ced4da;border-radius:5px;box-shadow:0 4px 12px rgba(0,0,0,.15);padding:4px 6px;font-size:12px' });
+    let libOpen = false, libBtn = null;
     const toggleLib = (v) => { libOpen = v == null ? !libOpen : v; renderSide(); };
-    document.addEventListener('pointerdown', (e) => { if (libOpen && !libPop.contains(e.target) && !footer.contains(e.target)) toggleLib(false); }, true);
-    rightBar.append(footer, libPop);
+    document.addEventListener('pointerdown', (e) => { if (libOpen && !libPop.contains(e.target) && !(libBtn && libBtn.contains(e.target))) toggleLib(false); }, true);
+    rightBar.append(libPop);
     rightBar.append(minBtn('minSide'), minBar('minSide', 'Side bar', false));
-    rightBar.append(el('style', null, '.aa-icononly .aa-hl{display:none}'));
+    rightBar.append(el('style', null, '.aa-icononly .aa-hl{display:none}.aa-hov{box-shadow:inset 3px 0 0 #868e96;background-color:#f1f3f5}'));
     // header labels hide (icons stay) when a header has no room for them
     function fitHead(h, keep) {
       h.classList.remove('aa-icononly');
@@ -2251,7 +2250,7 @@
       const cs = getComputedStyle(h), room = h.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
       if (need > room) h.classList.add('aa-icononly');
     }
-    function fitHeads() { for (const k in panels) fitHead(panels[k].head, panels[k].extra); fitHead(footer, footer.querySelector('.aa-libmsg')); }
+    function fitHeads() { for (const k in panels) fitHead(panels[k].head, panels[k].extra); }
     function applyPanels(animate) {
       const ms = animate && !reduceMotion() ? 220 : 0;
       PANELS.forEach(([k], i) => {
@@ -2392,7 +2391,7 @@
     root.append(menu);
     container.append(root);
 
-    let view = null, drag = null, hoverEdge = null, previewMarks = [];
+    let view = null, drag = null, hoverEdge = null, hoverNode = null, previewMarks = [];
 
     // ---- keyboard ----
     const onKey = (e) => {
@@ -2719,6 +2718,7 @@
     const COLORS = { source: '#1f6feb', circle: '#2f9e44', ngon: '#7048e8', thread: '#e8590c', group: '#495057', boolean: '#495057', cloner: '#495057', holes: '#c92a2a' };
     const viewTheta = () => state.viewAngle * Math.PI / 180;
     function drawSection() {
+      for (const r of side.querySelectorAll('[data-node]')) r.classList.toggle('aa-hov', !drag && r.dataset.node === hoverNode);
       svg.textContent = '';
       if (!state.scene) return;
       if (!view) fit();
@@ -2738,7 +2738,9 @@
         if (!xf.id) g.append(sv('path', { d: pathOf(local.map(xf.mir)), fill: 'none', stroke: COLORS[n.type] || '#1f6feb', 'stroke-width': 1, 'stroke-dasharray': '3 3', opacity: 0.6 }));
         const col = COLORS[n.type] || '#1f6feb', crossing = polygonSelfIntersects(local), selected = selectedAncestorOf(id);
         const fill = role === 'negative' ? 'url(#aa-hatch)' : crossing ? 'rgba(220,38,38,.18)' : col + (role === 'intersect' ? '18' : '26');
-        g.append(sv('path', { d: pathOf(poly), fill, stroke: crossing || role === 'negative' ? '#e03131' : col, 'stroke-width': selected ? 2.8 : 1.4,
+        // the object under the pointer's point or edge: a soft halo round its section
+        if (id === hoverNode && !drag) g.append(sv('path', { d: pathOf(poly), fill: col + '1a', stroke: col, 'stroke-width': 7, 'stroke-opacity': 0.28, 'stroke-linejoin': 'round', 'pointer-events': 'none' }));
+        g.append(sv('path', { d: pathOf(poly), fill, stroke: crossing || role === 'negative' ? '#e03131' : col, 'stroke-width': selected ? 2.8 : (id === hoverNode && !drag ? 2.2 : 1.4),
           'stroke-dasharray': role === 'negative' ? '6 3' : 'none', 'stroke-linejoin': 'round' }));
         if (n.type === 'ngon') {
           // the range the section moves through as the view turns: face-centre radius (min) and edge radius (max)
@@ -3200,8 +3202,8 @@
       coord.textContent = 'x: radius ' + fmt(wy, 3) + ' / Ø ' + fmt(2 * wy, 3) + ' · y: height ' + num(hDisp(wz, sceneBase), 3) + ' ' + UNIT_LABEL;
       if (!drag) {
         drawCursor();
-        const he = e.target.__key ? null : edgeAt(sx, sy);
-        if (he !== hoverEdge) { hoverEdge = he; svg.style.cursor = he ? 'pointer' : ''; drawSection(); }
+        const he = e.target.__key ? null : edgeAt(sx, sy), hk = e.target.__key || he, hn = hk ? parseKey(hk).node : null;
+        if (he !== hoverEdge || hn !== hoverNode) { hoverEdge = he; hoverNode = hn; svg.style.cursor = he ? 'pointer' : ''; drawSection(); }
         return;
       }
       if (drag.type === 'pan') { view.cy = drag.cy - (sx - drag.sx) / view.s; view.cz = drag.cz + (sy - drag.sy) / view.s; drawSection(); return; }
@@ -3281,7 +3283,7 @@
     };
     svg.addEventListener('pointerup', endDrag);
     svg.addEventListener('pointercancel', endDrag);
-    svg.addEventListener('pointerleave', () => { cursorW = null; if (hoverEdge && !drag) { hoverEdge = null; drawSection(); } else drawCursor(); });
+    svg.addEventListener('pointerleave', () => { cursorW = null; if ((hoverEdge || hoverNode) && !drag) { hoverEdge = null; hoverNode = null; drawSection(); } else drawCursor(); });
     svg.addEventListener('wheel', (e) => {
       e.preventDefault();
       if (!view) return;
@@ -3417,6 +3419,7 @@
       const sc = state.scene, rows = el('div', { style: 'margin:4px 0' });
       const mkRow = (opts) => {
         const r = el('div', { style: opts.style, draggable: opts.id ? 'true' : null, title: opts.title || null }, ...opts.kids);
+        if (opts.id) r.dataset.node = opts.id;
         if (opts.id) {
           r.addEventListener('dragstart', (e) => { dragNodeId = opts.id; e.dataTransfer.setData('text/plain', opts.id); e.dataTransfer.effectAllowed = 'copyMove'; });
           r.addEventListener('dragend', () => { dragNodeId = null; });
@@ -3620,8 +3623,9 @@
 
     function libraryBlock() {
       const list = libLoad();
-      const box = el('div', null, el('div', { style: H }, 'Saved models (this browser)'));
-      if (!list.length) box.append(el('div', { style: 'color:#666' }, 'Nothing saved yet. Select objects and use Save (Properties header or right-click), or Save scene below.'));
+      const box = el('div', null, el('div', { style: H + ';display:flex;align-items:center;gap:6px' }, 'Saved models (this browser)',
+        list.length ? hbtn('json', 'Export all', () => exportModelsJson(list, 'saved-models'), { title: 'All saved models in one JSON file' }) : null));
+      if (!list.length) box.append(el('div', { style: 'color:#666' }, 'Nothing saved yet. Select objects and use Save (Properties header or right-click), or Save scene (Project header).'));
       for (const entry of list) {
         const nameIn = el('input', { type: 'text', value: entry.name, style: 'flex:1 1 120px;min-width:80px;font-size:12px' });
         nameIn.addEventListener('change', () => { const l = libLoad(), it = l.find(x => x.id === entry.id); if (it) { it.name = nameIn.value; libStore(l); } });
@@ -3666,11 +3670,14 @@
       appendKids(panels.project.tools,
         hbtn('undo', 'Undo', undo, { title: 'Undo (Ctrl+Z)', disabled: !state.undo.length }),
         hbtn('redo', 'Redo', redo, { title: 'Redo (Ctrl+Y or Ctrl+Shift+Z)', disabled: !state.redo.length }),
+        hbtn('save', 'Save scene', saveScene, { title: 'Save everything in the scene to Saved models', disabled: !(state.scene && state.scene.root.length) }),
         hbtn('download', 'Export', exportSceneJson, { title: 'Export the whole scene as a JSON file that Import can rebuild it from', disabled: !state.scene }),
         hbtn('upload', 'Import', pickJsonFile, { title: 'Import a scene or saved models from a JSON file' }),
         hbtn('fit', 'Fit', () => { fit(); drawSection(); }, { title: 'Fit the cross-section view' }));
       sideStatus.style.marginBottom = '4px';
-      appendKids(panels.project.body, sideStatus, dlBtn,
+      const msg = state.exportError || (state.exporting ? 'Exporting ' + state.exporting + '…' : state.libMessage) || '';
+      appendKids(panels.project.body, sideStatus,
+        msg ? el('div', { style: 'margin-bottom:4px;color:' + (state.exportError ? '#b42318' : '#1a7f37') }, msg) : null, dlBtn,
         el('div', { style: 'margin-top:5px;padding-top:4px;border-top:1px solid #e9ecef' }, settingsBlock()));
       panels.project.extra.textContent = s.ready ? (s.text.startsWith('✔') ? '✔ solid' : '✘ not solid') : s.text.startsWith('Error') ? 'error' : state.busy ? 'updating…' : '';
       panels.project.extra.style.color = s.color;
@@ -3683,7 +3690,10 @@
           hbtn('thread', 'Thread', () => addObject('thread', view), { title: 'Add a threaded ring, with standard sizes', color: COLORS.thread }),
           hbtn('cloner', 'Cloner', () => wrapSelection('cloner'), { title: nSel ? 'Put the selected objects in a radial cloner' : 'Add an empty radial cloner' }),
           hbtn('group', 'Group', () => wrapSelection('group'), { title: nSel ? 'Group the selected objects' : 'Add an empty group' }),
-          hbtn('boolean', 'Boolean', () => wrapSelection('boolean'), { title: 'Add a boolean: with one object selected it becomes A; with two, A and B' }));
+          hbtn('boolean', 'Boolean', () => wrapSelection('boolean'), { title: 'Add a boolean: with one object selected it becomes A; with two, A and B' }),
+          el('span', { style: 'width:1px;height:16px;background:#ced4da;margin:0 2px' }),
+          libBtn = hbtn('list', 'Saved models' + (libLoad().length ? ' (' + libLoad().length + ')' : ''), () => toggleLib(), { title: 'Show the saved models, to add one to the scene' }));
+        if (libOpen) { libBtn.style.background = '#ddf4ff'; libBtn.style.borderColor = '#54aeff'; }
         panels.objects.extra.textContent = Object.keys(state.scene.nodes).length + ' object' + (Object.keys(state.scene.nodes).length === 1 ? '' : 's');
         const pb = bare(propsBlock());
         if (sideSig !== null && sideSig !== selectionSig()) animIn(pb);
@@ -3702,17 +3712,7 @@
             hbtn('trash', 'Delete', () => deleteNodes(ids), { title: 'Delete', color: '#b42318' }));
         }
       }
-      // footer: saved models and saving
-      const lib = libLoad(), selIds = state.scene ? topSelected(state.scene) : [];
-      const msg = state.exportError || (state.exporting ? 'Exporting ' + state.exporting + '…' : state.libMessage) || '';
-      footer.textContent = '';
-      const listBtn = hbtn('list', 'Saved models' + (lib.length ? ' (' + lib.length + ')' : ''), () => toggleLib(), { title: 'Show the saved models' });
-      if (libOpen) { listBtn.style.background = '#ddf4ff'; listBtn.style.borderColor = '#54aeff'; }
-      appendKids(footer, listBtn,
-        selIds.length ? hbtn('save', 'Save selection', () => saveToLibrary(selIds), { title: 'Save the selected objects to Saved models' }) : null,
-        hbtn('save', 'Save scene', saveScene, { title: 'Save everything in the scene to Saved models', disabled: !(state.scene && state.scene.root.length) }),
-        lib.length ? hbtn('json', 'Export all', () => exportModelsJson(lib, 'saved-models'), { title: 'All saved models in one JSON file' }) : null,
-        el('span', { class: 'aa-libmsg', title: msg, style: 'flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-left:4px;color:' + (state.exportError ? '#b42318' : '#1a7f37') }, msg));
+      libPop.style.top = (panels.objects.wrap.offsetTop + 24) + 'px';
       libPop.style.display = libOpen ? 'block' : 'none';
       if (libOpen) { const t = libPop.scrollTop; libPop.textContent = ''; libPop.append(libraryBlock()); libPop.scrollTop = t; }
       requestAnimationFrame(fitHeads);
@@ -4034,45 +4034,57 @@
       gl.depthMask(true); gl.depthFunc(gl.LESS);
       gl.disableVertexAttribArray(aC);
     }
-    // Measurements at the major grid steps along the ground axis that runs most nearly left–right on screen:
-    // a small tick on the axis and the distance from the centre (mm), upright and facing the viewer.
+    // The scales' numbers, upright and facing the viewer: distances at the major steps along the ground axis that
+    // runs most nearly left–right on screen (with 9 minor ticks between), and the angles round the compass rim.
+    // Both run on as far as the view reaches; only what is on screen is drawn.
     let axisLblBuf = null;
     function drawAxisLabels() {
       const f = cutFrame();
       if (!f || !camBasis || !lastM) return;
       const S = compassSpec(), px = Math.max(1e-9, S.px), cs = camBasis.x, up0 = camBasis.y;
-      // the ground axis closest to the screen's horizontal, pointing to the right
       const dir = [f.dirs.x, f.dirs.z].map(d => ({ d, h: d[0] * cs[0] + d[1] * cs[1] + d[2] * cs[2] })).sort((a, b) => Math.abs(b.h) - Math.abs(a.h))[0];
       const rt = dir.h < 0 ? dir.d.map(c => -c) : dir.d;
-      // text 'up': the camera's up, made square to the axis
-      const k = up0[0] * rt[0] + up0[1] * rt[1] + up0[2] * rt[2];
-      let up = [up0[0] - rt[0] * k, up0[1] - rt[1] * k, up0[2] - rt[2] * k]; const ul = Math.hypot(...up) || 1; up = up.map(c => c / ul);
-      const gz = bbox.mn[2] - radius * 0.004, O = [f.O[0], f.O[1], gz], lw = (p) => p / px, hgt = lw(9), sw = lw(1.1);
-      const v = [], COL = [0.88, 0.9, 0.93, 0.95];
-      const quad = (a, b, w) => {      // a line of width w, facing the viewer
+      // text 'up': the camera's up, square to the reading direction
+      const square = (r) => { const k = up0[0] * r[0] + up0[1] * r[1] + up0[2] * r[2]; const q = [up0[0] - r[0] * k, up0[1] - r[1] * k, up0[2] - r[2] * k], l = Math.hypot(...q) || 1; return q.map(c => c / l); };
+      const up = square(rt);
+      const gz = bbox.mn[2] - radius * 0.004, cx = (bbox.mn[0] + bbox.mx[0]) / 2, cy = (bbox.mn[1] + bbox.mx[1]) / 2, O = [cx, cy, gz];
+      const lw = (p) => p / px, hgt = lw(9), sw = lw(1.1), W = canvas.clientWidth, H = canvas.clientHeight;
+      const v = [], COL = [0.88, 0.9, 0.93, 0.95], DIM = [0.8, 0.83, 0.86, 0.55];
+      const onScreen = (p, m) => { const s = toScreen3(p); return s && s[0] > -m && s[1] > -m && s[0] < W + m && s[1] < H + m; };
+      const quad = (a, b, w, col) => {      // a line of width w, facing the viewer
         const d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], z = camBasis.z;
         let s = [d[1] * z[2] - d[2] * z[1], d[2] * z[0] - d[0] * z[2], d[0] * z[1] - d[1] * z[0]]; const L = Math.hypot(...s); if (L < 1e-12) return;
         s = s.map(c => c / L * w / 2);
-        for (const p of [[a, -1], [a, 1], [b, 1], [a, -1], [b, 1], [b, -1]]) v.push(p[0][0] + s[0] * p[1], p[0][1] + s[1] * p[1], p[0][2] + s[2] * p[1], ...COL);
+        for (const p of [[a, -1], [a, 1], [b, 1], [a, -1], [b, 1], [b, -1]]) v.push(p[0][0] + s[0] * p[1], p[0][1] + s[1] * p[1], p[0][2] + s[2] * p[1], ...col);
       };
-      const at = (base, x, y) => [base[0] + rt[0] * x + up[0] * y, base[1] + rt[1] * x + up[1] * y, base[2] + rt[2] * x + up[2] * y];
-      const text = (txt, base) => {
-        const adv = (ch) => (ch === '.' ? 0.12 : ch === '1' ? 0.42 : ch === '-' ? 0.45 : 0.55) + 0.18;
+      const text = (txt, base, rgt, upv, col) => {
+        const at = (x, y) => [base[0] + rgt[0] * x + upv[0] * y, base[1] + rgt[1] * x + upv[1] * y, base[2] + rgt[2] * x + upv[2] * y];
+        const adv = (ch) => (ch === '.' ? 0.12 : ch === '1' ? 0.42 : ch === '-' ? 0.45 : ch === '°' ? 0.25 : 0.55) + 0.18;
         let pen = -([...txt].reduce((s, ch) => s + adv(ch), -0.18) * hgt) / 2;
         for (const ch of txt) {
           const g = ch === '-' ? [[[0.05, 0.5], [0.4, 0.5]]] : FONT[ch] || [];
-          for (const line of g) for (let i = 0; i + 1 < line.length; i++) quad(at(base, pen + line[i][0] * hgt, line[i][1] * hgt), at(base, pen + line[i + 1][0] * hgt, line[i + 1][1] * hgt), sw);
+          for (const line of g) for (let i = 0; i + 1 < line.length; i++) quad(at(pen + line[i][0] * hgt, line[i][1] * hgt), at(pen + line[i + 1][0] * hgt, line[i + 1][1] * hgt), sw, col);
           pen += adv(ch) * hgt;
         }
       };
-      const lim = f.ext.x, step = S.major, fmt1 = (r) => String(+r.toFixed(3));
-      // a ground tick across the axis at each step, the number just above it
-      const gnd = [-rt[1], rt[0], 0];
-      for (let s = -Math.floor(lim / step) * step; s <= lim + 1e-9; s += step) {
-        if (Math.abs(s) < step * 1e-6) continue;
-        const p = [O[0] + rt[0] * s, O[1] + rt[1] * s, gz];
-        quad([p[0] - gnd[0] * lw(4), p[1] - gnd[1] * lw(4), gz], [p[0] + gnd[0] * lw(4), p[1] + gnd[1] * lw(4), gz], lw(1.2));
-        text(fmt1(Math.abs(s)), at(p, 0, lw(5)));
+      const num = (x) => String(+x.toFixed(6));
+      // distances: along the axis both ways, as far as the grid reaches
+      const gnd = [-rt[1], rt[0], 0], { minor } = S, lim = S.Rv, kMax = Math.min(Math.floor(lim / minor), 4000);
+      for (let k = -kMax; k <= kMax; k++) {
+        if (!k) continue;
+        const s = k * minor, mj = k % 10 === 0, p = [O[0] + rt[0] * s, O[1] + rt[1] * s, gz];
+        if (!onScreen(p, 20)) continue;
+        const L = lw(mj ? 4 : 2);
+        quad([p[0] - gnd[0] * L, p[1] - gnd[1] * L, gz], [p[0] + gnd[0] * L, p[1] + gnd[1] * L, gz], lw(mj ? 1.2 : 0.8), mj ? COL : DIM);
+        if (mj) text(num(Math.abs(s)), [p[0] + up[0] * lw(5), p[1] + up[1] * lw(5), p[2] + up[2] * lw(5)], rt, up, COL);
+      }
+      // angles round the rim, each upright and read left to right on screen
+      const right = camBasis.x, upA = square(right), n = Math.round(360 / S.aMajor);
+      for (let i = 0; i < n; i++) {
+        const d = i * S.aMajor, t = d * Math.PI / 180, rr = S.Ra - lw(11) - hgt * 0.6;
+        const p = [cx + Math.cos(t) * rr, cy + Math.sin(t) * rr, gz];
+        if (!onScreen(p, 20)) continue;
+        text(num(d) + '°', [p[0] - upA[0] * hgt * 0.5, p[1] - upA[1] * hgt * 0.5, p[2] - upA[2] * hgt * 0.5], right, upA, Math.abs(d % 90) < 1e-9 ? [0.97, 0.98, 1, 0.95] : COL);
       }
       if (!v.length) return;
       if (!axisLblBuf) axisLblBuf = gl.createBuffer();
@@ -4118,20 +4130,25 @@
     };
     let compassKey = '';
     const niceStep = (x) => { const e = Math.pow(10, Math.floor(Math.log10(x))), m = x / e; return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * e; };
-    // The ground compass: a radial grid under the part (rings and spokes, minor and major), whose spacing follows the zoom,
-    // with degree ticks and numbers round its rim.
+    // The ground compass: a radial grid under the part that reaches as far as the view does (rings and spokes),
+    // with an angle scale round a rim. Spacing follows the zoom in base 10: 9 minor steps between majors.
+    const ANGLE_MAJORS = [90, 30, 10, 1, 0.1, 0.01];
     function compassSpec() {
-      const { mn, mx } = bbox, R = Math.max(mx[0] - mn[0], mx[1] - mn[1]) / 2 * 1.04, px = Math.max(1e-6, pxPerMm());
-      let minor = niceStep(14 / px);
-      while (R / minor > 160) minor = niceStep(minor * 1.5);
-      const mant = Math.round(minor / Math.pow(10, Math.floor(Math.log10(minor) + 1e-9))), major = minor * (mant === 5 ? 2 : 5);   // 1 → 5, 2 → 10, 5 → 10
-      const arc = (deg) => R * deg * Math.PI / 180 * px;                    // screen length of an arc of the rim
-      const tick = [1, 2, 5, 10].find(d => arc(d) >= 6) || 10, spoke = [5, 10, 15, 30].find(d => arc(d) >= 26) || 30;
-      return { R, px, minor, major, tick, spoke };
+      const { mn, mx } = bbox, Rpart = Math.max(mx[0] - mn[0], mx[1] - mn[1]) / 2 * 1.04, px = Math.max(1e-6, pxPerMm());
+      const w = canvas.clientWidth || 1, h = canvas.clientHeight || 1, half = Math.hypot(w, h) / 2 / px;
+      // how far the grid must reach: the view's size on the ground (generous, as low views look far), plus any pan
+      const Rv = Math.min(Rpart * 60 + half * 4, half * (projT < 0.5 ? 1.6 : 4) + Math.hypot(pan[0], pan[1]) + Rpart);
+      const minor = niceStep(10 / px), major = minor * 10;
+      // the angle scale: round the part, or nearer in when zoomed in so it stays in view
+      const floorNice = (x) => { const e = Math.pow(10, Math.floor(Math.log10(x))), m = x / e; return (m >= 5 ? 5 : m >= 2 ? 2 : 1) * e; };
+      const Ra = Rpart * px <= 0.46 * w ? Rpart : floorNice(0.42 * w / px);
+      const arc = (deg) => Ra * deg * Math.PI / 180 * px;
+      const aMajor = ANGLE_MAJORS.slice().reverse().find(m => arc(m / 10) >= 5) || 90, aMinor = aMajor / 10;
+      return { R: Rpart, Ra, Rv, px, minor, major, aMajor, aMinor };
     }
     function buildCompass(S) {
       const { mn, mx } = bbox, cx = (mn[0] + mx[0]) / 2, cy = (mn[1] + mx[1]) / 2, z = mn[2] - radius * 0.004;
-      const { R, px, minor, major, tick, spoke } = S;
+      const { Ra, Rv, px, minor, major, aMajor, aMinor } = S;
       const v = [], lw = (p) => p / px;                                     // a line width of p screen pixels
       const tri = (a, b, c, col) => { for (const p of [a, b, c]) v.push(p[0], p[1], z, col[0], col[1], col[2], col[3]); };
       const seg = (p, q, w, col) => {
@@ -4140,49 +4157,32 @@
         tri(a, b, c, col); tri(a, c, d, col);
       };
       const ring = (r, w, col) => {
-        const N = Math.max(64, Math.min(720, Math.ceil(2 * Math.PI * r * px / 8)));
+        const N = Math.max(64, Math.min(1440, Math.ceil(2 * Math.PI * r * px / 10)));
         for (let i = 0; i < N; i++) {
           const t0 = 2 * Math.PI * i / N, t1 = 2 * Math.PI * (i + 1) / N;
           const p = (rr, t) => [cx + Math.cos(t) * rr, cy + Math.sin(t) * rr];
           tri(p(r - w / 2, t0), p(r + w / 2, t0), p(r + w / 2, t1), col); tri(p(r - w / 2, t0), p(r + w / 2, t1), p(r - w / 2, t1), col);
         }
       };
-      const MINOR = [0.72, 0.75, 0.8, 0.22], MAJOR = [0.8, 0.83, 0.86, 0.5], GREY = [0.81, 0.83, 0.85, 0.8], WHITE = [0.97, 0.98, 1, 0.95];
-      // rings: minor and major radii
-      const ringMajor = (r) => Math.abs(r / major - Math.round(r / major)) < 1e-6;
-      for (let k = 1; k * minor < R * 0.985; k++) { const r = k * minor, mj = ringMajor(r); ring(r, lw(mj ? 1.3 : 0.8), mj ? MAJOR : MINOR); }
-      // spokes: minor from the first ring out, major (and the four quarters) from the centre
-      for (let d = 0; d < 360; d += spoke) {
-        const t = d * Math.PI / 180, c = Math.cos(t), s = Math.sin(t), q = d % 90 === 0, mj = d % (spoke * 3) === 0 || q;
-        const r0 = q ? 0 : mj ? minor : Math.max(minor, R * 0.25);
-        seg([cx + c * r0, cy + s * r0], [cx + c * R * 0.985, cy + s * R * 0.985], lw(q ? 1.3 : mj ? 1 : 0.7), q ? MAJOR : mj ? [MAJOR[0], MAJOR[1], MAJOR[2], 0.38] : MINOR);
+      const MINOR = [0.72, 0.75, 0.8, 0.16], MAJOR = [0.8, 0.83, 0.86, 0.42], GREY = [0.81, 0.83, 0.85, 0.8], WHITE = [0.97, 0.98, 1, 0.95];
+      // rings: 9 minor between majors, out to the edge of the view (minor ones only as far as they stay few)
+      const isMajor = (r) => Math.abs(r / major - Math.round(r / major)) < 1e-6;
+      const nMinor = Math.min(Math.floor(Rv / minor), 400), nMajor = Math.min(Math.floor(Rv / major), 400);
+      for (let k = 1; k <= nMinor; k++) { const r = k * minor; if (!isMajor(r)) ring(r, lw(0.7), MINOR); }
+      for (let k = 1; k <= nMajor; k++) ring(k * major, lw(1.1), MAJOR);
+      // spokes at the major angles (the four quarters brighter), out to the edge of the view
+      const spoke = Math.max(aMajor, 10);
+      for (let d = 0; d < 360 - 1e-9; d += spoke) {
+        const t = d * Math.PI / 180, c = Math.cos(t), s = Math.sin(t), q = Math.abs(d % 90) < 1e-9;
+        seg([cx + c * (q ? 0 : minor), cy + s * (q ? 0 : minor)], [cx + c * Rv, cy + s * Rv], lw(q ? 1.2 : 0.8), q ? MAJOR : MINOR);
       }
-      // the rim, with minor / major degree ticks
-      ring(R, lw(1.2), GREY);
-      const tMajor = tick < 5 ? 10 : tick < 10 ? 30 : 30;
-      for (let d = 0; d < 360; d += tick) {
-        const t = d * Math.PI / 180, mj = d % tMajor === 0, mid = !mj && d % (tick * 5) === 0 && tick < 5, c = Math.cos(t), s = Math.sin(t);
-        const len = mj ? 8 : mid ? 6 : 4;
-        seg([cx + c * (R - lw(len)), cy + s * (R - lw(len))], [cx + c * R, cy + s * R], lw(d % 90 === 0 ? 1.3 : mj ? 1 : 0.8), d % 90 === 0 ? WHITE : mj ? GREY : MAJOR);
-      }
-      // numbers: degrees round the rim, radii along the 0° spoke
-      const text = (txt, ox, oy, up, rt, hgt, col) => {
-        const adv = (ch) => (ch === '°' ? 0.25 : ch === '.' ? 0.12 : ch === '1' ? 0.42 : 0.55) + 0.18, sw = Math.min(hgt * 0.1, lw(1.1));
-        const width = [...txt].reduce((s, ch) => s + adv(ch), -0.18) * hgt;
-        let pen = -width / 2;
-        for (const ch of txt) {
-          for (const line of FONT[ch] || []) for (let i = 0; i + 1 < line.length; i++) {
-            const P = (q) => { const lx = pen + q[0] * hgt, ly = (q[1] - 0.5) * hgt; return [ox + rt[0] * lx + up[0] * ly, oy + rt[1] * lx + up[1] * ly]; };
-            seg(P(line[i]), P(line[i + 1]), sw, col);
-          }
-          pen += adv(ch) * hgt;
-        }
-      };
-      const hgt = Math.min(R * 0.05, lw(9)), lblStep = arc10 => arc10 >= 60 ? 10 : 30;   // angle and radius numbers: the same small size
-      const every = lblStep(R * 10 * Math.PI / 180 * px);
-      for (let d = 0; d < 360; d += every) {
-        const t = d * Math.PI / 180, rr = R - lw(11) - hgt * 0.6;
-        text(d + '°', cx + Math.cos(t) * rr, cy + Math.sin(t) * rr, [-Math.cos(t), -Math.sin(t)], [-Math.sin(t), Math.cos(t)], hgt, d % 90 === 0 ? WHITE : GREY);
+      // the angle scale's rim, with 9 minor ticks between the major ones
+      ring(Ra, lw(1.2), GREY);
+      const n = Math.round(360 / aMinor);
+      for (let i = 0; i < n; i++) {
+        const d = i * aMinor, t = d * Math.PI / 180, mj = i % 10 === 0, half5 = !mj && i % 5 === 0, c = Math.cos(t), s = Math.sin(t);
+        const len = mj ? 8 : half5 ? 6 : 4;
+        seg([cx + c * (Ra - lw(len)), cy + s * (Ra - lw(len))], [cx + c * Ra, cy + s * Ra], lw(Math.abs(d % 90) < 1e-9 ? 1.3 : mj ? 1 : 0.8), Math.abs(d % 90) < 1e-9 ? WHITE : mj ? GREY : MAJOR);
       }
       gl.bindBuffer(gl.ARRAY_BUFFER, compassBuf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(v), gl.STATIC_DRAW);
       return v.length / 7;
@@ -4190,7 +4190,7 @@
     let compassCount = 0;
     function drawCompass3d() {
       // rebuilt when the part or the grid's spacing changes, or the zoom has moved the line widths on noticeably
-      const S = compassSpec(), key = bbox.mn.join(',') + '|' + bbox.mx.join(',') + '|' + S.minor + '|' + S.tick + '|' + S.spoke + '|' + Math.round(Math.log2(S.px) * 6);
+      const S = compassSpec(), key = bbox.mn.join(',') + '|' + bbox.mx.join(',') + '|' + S.minor + '|' + S.aMinor + '|' + S.Ra + '|' + Math.round(Math.log2(S.Rv) * 4) + '|' + Math.round(Math.log2(S.px) * 6);
       if (compassDirty || key !== compassKey) { compassCount = buildCompass(S); compassKey = key; compassDirty = false; }
       gl.useProgram(texProg);
       gl.uniformMatrix4fv(gl.getUniformLocation(texProg, 'mvp'), false, new Float32Array(lastM));
