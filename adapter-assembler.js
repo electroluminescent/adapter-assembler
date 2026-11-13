@@ -21,7 +21,7 @@
     helical: true,         // rebuild the zig-zag thread rings as real helical threads
     optimize: true,        // weld coincident points / split T-junctions before export
     precision: 100,        // edges around a full circle
-    quads: false,          // OBJ faces / wireframe as quads where possible
+    faces: 'ngons',        // OBJ faces / wireframe: 'ngons' (flat regions as one polygon), 'quads' or 'tris'
     format: 'stl',         // 'stl' | 'obj'
     cut: true,             // 3D view: cut away half
     wire: false,           // 3D view: wireframe
@@ -56,13 +56,14 @@
 
 
   // Settings remembered in this browser.
-  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'quads', 'format', 'cut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts'];
+  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'cut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts'];
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     for (const k of SAVED_SETTINGS) if (k in saved && typeof saved[k] === typeof state[k]) state[k] = saved[k];
   } catch (_) { /* storage unavailable */ }
   // always on: true helical threads, and welding / T-junction repair of the exported mesh
   state.helical = true; state.optimize = true;
+  if (!['ngons', 'quads', 'tris'].includes(state.faces)) state.faces = 'ngons';
   state.sidePanels = state.sidePanels && typeof state.sidePanels === 'object' ? state.sidePanels : {};
   function saveSettings() {
     try { const o = {}; for (const k of SAVED_SETTINGS) o[k] = state[k]; localStorage.setItem(SETTINGS_KEY, JSON.stringify(o)); } catch (_) { /* ignore */ }
@@ -248,7 +249,7 @@
 
     // Quads: pair each triangle with a coplanar neighbour across its longest shared edge.
     const pairOf = new Int32Array(count).fill(-1);
-    if (opts.quads) {
+    if (opts.faces === 'quads') {
       const edgeTri = new Map(), nU = uniq.length;
       for (let t = 0; t < count; t++)
         for (let k = 0; k < 3; k++) {
@@ -268,9 +269,9 @@
         if (best >= 0) { pairOf[t] = best; pairOf[best] = t; }
       }
     }
-    // faces: [a,b,c] or [a,b,c,d]
-    const faces = [];
-    for (let t = 0; t < count; t++) {
+    // faces: [a,b,c], [a,b,c,d] or n-gons
+    const faces = opts.faces === 'ngons' ? ngonFaces(tris, uniq, nrm, count, opts.tolerance) : [];
+    for (let t = 0; opts.faces !== 'ngons' && t < count; t++) {
       const o = pairOf[t];
       if (o < 0) { faces.push([tris[t * 3], tris[t * 3 + 1], tris[t * 3 + 2]]); continue; }
       if (o < t) continue;
@@ -300,10 +301,10 @@
         lines[lw++] = P[0]; lines[lw++] = P[1]; lines[lw++] = P[2]; lines[lw++] = Q[0]; lines[lw++] = Q[1]; lines[lw++] = Q[2];
       }
 
-    // File: binary STL (always triangles) or OBJ (triangles or quads).
+    // File: binary STL (always triangles) or OBJ (triangles, quads or n-gons).
     let buffer, ext;
     if (opts.format === 'obj') {
-      const out = ['# Adapter Assembler, units: ' + opts.unitLabel + (opts.quads ? ', quads' : ', triangles')];
+      const out = ['# Adapter Assembler, units: ' + opts.unitLabel + ', ' + (opts.faces === 'ngons' ? 'n-gons' : opts.faces === 'quads' ? 'quads' : 'triangles')];
       for (const P of uniq) out.push('v ' + P[0].toFixed(6) + ' ' + P[1].toFixed(6) + ' ' + P[2].toFixed(6));
       for (const f of faces) out.push('f ' + f.map(i => i + 1).join(' '));
       buffer = new TextEncoder().encode(out.join('\n') + '\n').buffer;
@@ -344,7 +345,92 @@
       },
     };
   }
-
+  // ---------------------------------------------------------------------------
+  // 3a. N-gon faces for OBJ export and the wireframe: connected flat regions of the triangle mesh
+  //     (same plane within the weld tolerance), each written as one polygon along its outline.
+  //     A region with holes (an annulus, say) is split across the middle until every piece has a
+  //     single outline; whatever cannot be split cleanly stays triangles. Points on an outline are
+  //     all kept, so faces still meet edge to edge (no T-junctions).
+  // ---------------------------------------------------------------------------
+  function ngonFaces(tris, uniq, nrm, count, tolerance) {
+    const nU = uniq.length, owner = new Map();
+    for (let t = 0; t < count; t++) for (let k = 0; k < 3; k++) owner.set(tris[t * 3 + k] * nU + tris[t * 3 + (k + 1) % 3], t);
+    const region = new Int32Array(count).fill(-1), tolP = Math.max(tolerance || 0, 1e-7) * 2, faces = [];
+    const triFace = (t) => [tris[t * 3], tris[t * 3 + 1], tris[t * 3 + 2]];
+    // the outlines of a set of triangles: closed loops of directed edges, or null if a point is pinched
+    const outlines = (list) => {
+      const inSet = new Set(), next = new Map();
+      for (const t of list) for (let k = 0; k < 3; k++) inSet.add(tris[t * 3 + k] * nU + tris[t * 3 + (k + 1) % 3]);
+      for (const t of list) for (let k = 0; k < 3; k++) {
+        const a = tris[t * 3 + k], b = tris[t * 3 + (k + 1) % 3];
+        if (inSet.has(b * nU + a)) continue;
+        if (next.has(a)) return null;
+        next.set(a, b);
+      }
+      const loops = [], used = new Set();
+      for (const s of next.keys()) {
+        if (used.has(s)) continue;
+        const loop = [];
+        let v = s;
+        while (!used.has(v)) { used.add(v); loop.push(v); v = next.get(v); if (v === undefined) return null; }
+        if (v !== s) return null;
+        loops.push(loop);
+      }
+      return loops;
+    };
+    // pieces of a set of triangles that hang together across shared edges
+    const components = (list) => {
+      const inList = new Map(list.map((t, i) => [t, i])), seen = new Uint8Array(list.length), out = [];
+      for (let i = 0; i < list.length; i++) {
+        if (seen[i]) continue;
+        seen[i] = 1;
+        const comp = [list[i]];
+        for (let q = 0; q < comp.length; q++) {
+          const t = comp[q];
+          for (let k = 0; k < 3; k++) {
+            const o = owner.get(tris[t * 3 + (k + 1) % 3] * nU + tris[t * 3 + k]), j = o === undefined ? undefined : inList.get(o);
+            if (j !== undefined && !seen[j]) { seen[j] = 1; comp.push(o); }
+          }
+        }
+        out.push(comp);
+      }
+      return out;
+    };
+    const emit = (list, n, depth) => {
+      if (list.length === 1) { faces.push(triFace(list[0])); return; }
+      const loops = outlines(list);
+      if (loops && loops.length === 1 && loops[0].length >= 3) { faces.push(loops[0]); return; }
+      if (depth >= 10) { for (const t of list) faces.push(triFace(t)); return; }
+      // split across the middle, alternating between two directions in the face's plane
+      const ax = Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+      let u = [n[1] * ax[2] - n[2] * ax[1], n[2] * ax[0] - n[0] * ax[2], n[0] * ax[1] - n[1] * ax[0]];
+      if (depth % 2) u = [n[1] * u[2] - n[2] * u[1], n[2] * u[0] - n[0] * u[2], n[0] * u[1] - n[1] * u[0]];
+      const cen = (t) => { const A = uniq[tris[t * 3]], B = uniq[tris[t * 3 + 1]], C = uniq[tris[t * 3 + 2]]; return ((A[0] + B[0] + C[0]) * u[0] + (A[1] + B[1] + C[1]) * u[1] + (A[2] + B[2] + C[2]) * u[2]) / 3; };
+      const cs = list.map(cen), mid = cs.reduce((s, c) => s + c, 0) / cs.length;
+      const lo = list.filter((t, i) => cs[i] < mid), hi = list.filter((t, i) => cs[i] >= mid);
+      if (!lo.length || !hi.length) { if (depth % 2 === 0) { emit(list, n, depth + 1); return; } for (const t of list) faces.push(triFace(t)); return; }
+      for (const half of [lo, hi]) for (const comp of components(half)) emit(comp, n, depth + 1);
+    };
+    for (let s = 0; s < count; s++) {
+      if (region[s] >= 0) continue;
+      region[s] = s;
+      const n = [nrm[s * 3], nrm[s * 3 + 1], nrm[s * 3 + 2]], A = uniq[tris[s * 3]], d0 = n[0] * A[0] + n[1] * A[1] + n[2] * A[2], list = [s];
+      for (let q = 0; q < list.length; q++) {
+        const t = list[q];
+        for (let k = 0; k < 3; k++) {
+          const o = owner.get(tris[t * 3 + (k + 1) % 3] * nU + tris[t * 3 + k]);
+          if (o === undefined || region[o] >= 0) continue;
+          if (n[0] * nrm[o * 3] + n[1] * nrm[o * 3 + 1] + n[2] * nrm[o * 3 + 2] < 1 - 1e-6) continue;
+          let flat = true;
+          for (let c = 0; c < 3 && flat; c++) { const V = uniq[tris[o * 3 + c]]; flat = Math.abs(n[0] * V[0] + n[1] * V[1] + n[2] * V[2] - d0) <= tolP; }
+          if (!flat) continue;
+          region[o] = s; list.push(o);
+        }
+      }
+      emit(list, n, 0);
+    }
+    return faces;
+  }
   // ---------------------------------------------------------------------------
   // 3b. Outline checks (page).
   // ---------------------------------------------------------------------------
@@ -817,7 +903,7 @@
   function getWorker() {
     if (worker || workerFailed) return worker;
     try {
-      const src = [processMesh, bevelReach, cornerPoints, toothPattern, toothAt, threadProfile, taperMesh, expandProfile, runVertices, revolve, holeMesh, nodeMesh, evaluateScene, soup, runJob]
+      const src = [processMesh, ngonFaces, bevelReach, cornerPoints, toothPattern, toothAt, threadProfile, taperMesh, expandProfile, runVertices, revolve, holeMesh, nodeMesh, evaluateScene, soup, runJob]
         .map(f => f.toString()).join('\n') +
         '\nself.onmessage = async function (e) {' +
         '  try { const r = await runJob(e.data); self.postMessage({ job: e.data.job, result: r }, [r.buffer, r.preview.tris.buffer, r.preview.lines.buffer, r.preview.bad.buffer]); }' +
@@ -842,7 +928,7 @@
 
   function haveInput() { return !!(state.scene && state.scene.root.length); }
   function jobOpts(fast) {
-    return { flip: state.flip, optimize: fast ? false : state.optimize, unitScale: UNIT_SCALE, unitLabel: UNIT_LABEL, tolerance: WELD_TOLERANCE_IN * UNIT_SCALE, format: state.format, quads: state.quads };
+    return { flip: state.flip, optimize: fast ? false : state.optimize, unitScale: UNIT_SCALE, unitLabel: UNIT_LABEL, tolerance: WELD_TOLERANCE_IN * UNIT_SCALE, format: state.format, faces: state.faces };
   }
   function jobSettings() { return { precision: state.precision, helical: state.helical, manifoldUrl: W.__aaManifoldUrl || MANIFOLD_URL }; }
 
@@ -2007,9 +2093,9 @@
       checkRow('Flip upside down', () => state.flip, v => set('flip', v)),
       el('div', null,
         numRow('Circle precision (edges)', state.precision, v => set('precision', Math.max(8, Math.min(2000, Math.round(v)))), { step: '1', min: 8, max: 2000, digits: 0, width: 64, noLive: true }),
-        selectRow('Faces', state.quads ? 'quads' : 'tris', [['tris', 'Triangles'], ['quads', 'Quads']], v => set('quads', v === 'quads')),
+        selectRow('Faces', state.faces, [['ngons', 'N-gons'], ['quads', 'Quads'], ['tris', 'Triangles']], v => set('faces', v)),
         selectRow('Format', state.format, [['stl', 'STL'], ['obj', 'OBJ']], v => set('format', v))),
-      state.quads && state.format === 'stl' ? el('div', { style: 'color:#666;font-size:11px' }, 'STL files only hold triangles; quads apply to OBJ export and the wireframe.') : null);
+      state.faces !== 'tris' && state.format === 'stl' ? el('div', { style: 'color:#666;font-size:11px' }, 'STL files only hold triangles; ' + (state.faces === 'ngons' ? 'n-gons' : 'quads') + ' apply to OBJ export and the wireframe.') : null);
   }
 
   function statusText() {
