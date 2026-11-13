@@ -1,6 +1,6 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.1.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.2.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
@@ -3743,6 +3743,7 @@
       shown = result;
       const firstMesh = !triCount;
       const t = result.preview.tris, l = result.preview.lines;
+      meshTris = t; cutEdgeCache = null;
       gl.bindBuffer(gl.ARRAY_BUFFER, triBuf); gl.bufferData(gl.ARRAY_BUFFER, t, gl.STATIC_DRAW); triCount = t.length / 6;
       const lv = new Float32Array(l.length * 2);
       for (let i = 0, j = 0; i < l.length; i += 3) { lv[j++] = l[i]; lv[j++] = l[i + 1]; lv[j++] = l[i + 2]; lv[j++] = 0; lv[j++] = 0; lv[j++] = 1; }
@@ -3883,6 +3884,70 @@
       void nSheet; void nGhost;
     }
     // edges that keep the part from being solid, drawn on top in magenta
+    // The outline where each active cut plane meets the part, as a bright line in that plane's colour
+    // (cut back by the other planes). The crossings are found once per mesh and plane position.
+    let meshTris = null, cutEdgeCache = null, cutEdgeBuf = null;
+    const EDGE_COL = { x: [1, 0.28, 0.28, 1], y: [0.3, 1, 0.38, 1], z: [0.32, 0.62, 1, 1] };
+    function cutSegments(planes) {
+      const key = planes.map(p => p.on ? p.n.join(',') + ':' + p.w : '-').join('|');
+      if (cutEdgeCache && cutEdgeCache.key === key && cutEdgeCache.mesh === meshTris) return cutEdgeCache.segs;
+      const t = meshTris, segs = [];
+      planes.forEach((p, i) => {
+        if (!p.on || !t) return;
+        const [nx, ny, nz] = p.n, w = p.w, others = planes.filter((q, j) => j !== i && q.on);
+        const dOf = (o) => nx * t[o] + ny * t[o + 1] + nz * t[o + 2] - w;
+        const out = [];
+        for (let o = 0; o + 17 < t.length; o += 18) {
+          const d = [dOf(o), dOf(o + 6), dOf(o + 12)];
+          if ((d[0] > 0 && d[1] > 0 && d[2] > 0) || (d[0] < 0 && d[1] < 0 && d[2] < 0)) continue;
+          const pts = [];
+          for (let e = 0; e < 3; e++) {
+            const a = e, b = (e + 1) % 3, da = d[a], db = d[b];
+            if ((da < 0) !== (db < 0) && da !== db) {
+              const k = da / (da - db), A = o + a * 6, B = o + b * 6;
+              pts.push([t[A] + (t[B] - t[A]) * k, t[A + 1] + (t[B + 1] - t[A + 1]) * k, t[A + 2] + (t[B + 2] - t[A + 2]) * k]);
+            }
+          }
+          if (pts.length < 2) continue;
+          // keep only the part of the segment the other planes leave
+          let [P, Q] = pts, ok = true;
+          for (const q of others) {
+            const dp = q.n[0] * P[0] + q.n[1] * P[1] + q.n[2] * P[2] - q.w, dq = q.n[0] * Q[0] + q.n[1] * Q[1] + q.n[2] * Q[2] - q.w;
+            if (dp > 0 && dq > 0) { ok = false; break; }
+            if (dp > 0 || dq > 0) { const k = dp / (dp - dq), X = [P[0] + (Q[0] - P[0]) * k, P[1] + (Q[1] - P[1]) * k, P[2] + (Q[2] - P[2]) * k]; if (dp > 0) P = X; else Q = X; }
+          }
+          if (ok) out.push(P, Q);
+        }
+        segs.push({ col: EDGE_COL[p.key] || [1, 1, 1, 1], pts: out });
+      });
+      cutEdgeCache = { key, mesh: meshTris, segs };
+      return segs;
+    }
+    function drawCutEdges() {
+      const planes = cutPlanes();
+      if (!meshTris || !camBasis || !planes.some(p => p.on)) return;
+      const segs = cutSegments(planes), px = Math.max(1e-9, pxPerMm()), hw = 1.2 / px, lift = 0.6 / px, z = camBasis.z, v = [];
+      for (const { col, pts } of segs) for (let i = 0; i + 1 < pts.length; i += 2) {
+        const P = pts[i], Q = pts[i + 1], d = [Q[0] - P[0], Q[1] - P[1], Q[2] - P[2]];
+        let s = [d[1] * z[2] - d[2] * z[1], d[2] * z[0] - d[0] * z[2], d[0] * z[1] - d[1] * z[0]];
+        const L = Math.hypot(s[0], s[1], s[2]); if (L < 1e-12) continue;
+        s = [s[0] / L * hw, s[1] / L * hw, s[2] / L * hw];
+        const at = (p, k) => [p[0] + s[0] * k + z[0] * lift, p[1] + s[1] * k + z[1] * lift, p[2] + s[2] * k + z[2] * lift];
+        for (const p of [at(P, -1), at(P, 1), at(Q, 1), at(P, -1), at(Q, 1), at(Q, -1)]) v.push(p[0], p[1], p[2], col[0], col[1], col[2], col[3]);
+      }
+      if (!v.length) return;
+      if (!cutEdgeBuf) cutEdgeBuf = gl.createBuffer();
+      gl.useProgram(texProg);
+      gl.uniformMatrix4fv(gl.getUniformLocation(texProg, 'mvp'), false, new Float32Array(lastM));
+      gl.bindBuffer(gl.ARRAY_BUFFER, cutEdgeBuf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(v), gl.DYNAMIC_DRAW);
+      const aP = gl.getAttribLocation(texProg, 'pos'), aC = gl.getAttribLocation(texProg, 'col');
+      gl.enableVertexAttribArray(aP); gl.enableVertexAttribArray(aC);
+      gl.vertexAttribPointer(aP, 3, gl.FLOAT, false, 28, 0); gl.vertexAttribPointer(aC, 4, gl.FLOAT, false, 28, 12);
+      gl.depthFunc(gl.LEQUAL); gl.depthMask(false);
+      gl.drawArrays(gl.TRIANGLES, 0, v.length / 7);
+      gl.depthMask(true); gl.depthFunc(gl.LESS);
+      gl.disableVertexAttribArray(aC);
+    }
     function drawBadEdges() {
       if (!badCount) return;
       gl.useProgram(texProg);
@@ -4118,7 +4183,7 @@
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, T && ssao ? T.bT : null);
       drawPart(prog, (U) => { gl.uniform1i(U('aoTex'), 0); gl.uniform1f(U('aoOn'), T && ssao ? 1 : 0); gl.uniform2f(U('res'), CW, CH); });
       // the compass, lying on the ground plane under the part and turning with it; the cut axes; problem edges
-      if (bbox && texProg) { drawCompass3d(); drawGizmo(); drawBadEdges(); }
+      if (bbox && texProg) { drawCompass3d(); drawCutEdges(); drawGizmo(); drawBadEdges(); }
       // 5. the wireframe: 1 device pixel, not smoothed
       if (wire) {
         if (T) {
