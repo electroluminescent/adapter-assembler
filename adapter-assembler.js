@@ -2441,9 +2441,14 @@
         y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y);
       }
       const { w, h } = size();
-      view = { cy: (y0 + y1) / 2, cz: (z0 + z1) / 2, s: Math.min(w / ((y1 - y0) * 1.2 || 1), h / ((z1 - z0) * 1.2 || 1)) };
+      const R = Math.max(Math.abs(y0), Math.abs(y1), 1e-6);    // both sides of the axis
+      view = { cy: 0, cz: (z0 + z1) / 2, s: Math.min(w / (2 * R * 1.15), h / ((z1 - z0) * 1.2 || 1)) };
     }
-    const toScreen = (y, z) => { const { w, h } = size(); return [w / 2 + (y - view.cy) * view.s, h / 2 - (z - view.cz) * view.s]; };
+    // The cross-section shows both sides of the axis: the section at the view angle on the right, and the one
+    // opposite it (view angle + 180°) mirrored on the left, which works just the same. MS is the side being drawn
+    // or worked on (1 right, -1 left); radii stay positive on both sides.
+    let MS = 1, dragSide = 1;
+    const toScreen = (y, z) => { const { w, h } = size(); return [w / 2 + (MS * y - view.cy) * view.s, h / 2 - (z - view.cz) * view.s]; };
     const toWorld = (sx, sy) => { const { w, h } = size(); return [view.cy + (sx - w / 2) / view.s, view.cz - (sy - h / 2) / view.s]; };
     const local = (e) => { const r = svg.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
     const pathOf = (poly) => poly.map((p, i) => (i ? 'L' : 'M') + toScreen(p.y, p.z).map(v => v.toFixed(1)).join(' ')).join(' ') + 'Z';
@@ -2465,7 +2470,7 @@
     // how far the teeth of a helical run sit from their drawn place in the section at the view angle (within ± half a pitch)
     function runShift(r) {
       if (!state.helical || !r.hand || !(r.pitch > 0)) return 0;
-      const P = r.pitch, s = r.hand * P * (state.viewAngle * Math.PI / 180) / (2 * Math.PI);
+      const P = r.pitch, s = r.hand * P * viewTheta() / (2 * Math.PI);
       return s - P * Math.round(s / P);
     }
     function edgesOf(id, sc = state.scene) {
@@ -2669,8 +2674,8 @@
         const [x] = toScreen(y, 0);
         if (x < AX_L) continue;
         g.append(sv('line', { x1: x, y1: h - AX_B, x2: x, y2: h - AX_B + 4, stroke: '#adb5bd' }));
-        lab(x, h - 4, num(mm(y), 2) + ' ' + UNIT_LABEL, { anchor: 'middle' });                 // radius
-        lab(x, h - 17, 'Ø' + num(mm(2 * y), 2) + ' ' + UNIT_LABEL, { anchor: 'middle', fill: '#adb5bd' });  // diameter
+        lab(x, h - 4, num(mm(Math.abs(y)), 2) + ' ' + UNIT_LABEL, { anchor: 'middle' });                 // radius (positive on both sides)
+        lab(x, h - 17, 'Ø' + num(mm(2 * Math.abs(y)), 2) + ' ' + UNIT_LABEL, { anchor: 'middle', fill: '#adb5bd' });  // diameter
       }
       for (let zr = Math.ceil((za - base) / st) * st; zr <= zb - base; zr += st) {
         const [, y] = toScreen(0, base + zr);
@@ -2688,7 +2693,9 @@
       if (!state.scene || !view) return;
       const P = drag && drag.cur ? drag.cur : cursorW;
       if (!P) return;
+      const MSc = MS; MS = drag ? dragSide : (cursorW && cursorW.side) || 1;
       const { w, h } = size(), base = drag && drag.base != null ? drag.base : sceneBase, [x, y] = toScreen(P.y, P.z);
+      MS = MSc;
       const g = sv('g', { id: 'aa-cursor', 'pointer-events': 'none' });
       const col = drag && drag.cur ? '#e03131' : '#1f6feb';
       if (x >= AX_L && x <= w) {
@@ -2716,7 +2723,7 @@
     }
     let sceneBase = 0;
     const COLORS = { source: '#1f6feb', circle: '#2f9e44', ngon: '#7048e8', thread: '#e8590c', group: '#495057', boolean: '#495057', cloner: '#495057', holes: '#c92a2a' };
-    const viewTheta = () => state.viewAngle * Math.PI / 180;
+    const viewTheta = () => state.viewAngle * Math.PI / 180 + (MS < 0 ? Math.PI : 0);
     function drawSection() {
       for (const r of side.querySelectorAll('[data-node]')) r.classList.toggle('aa-hov', !drag && r.dataset.node === hoverNode);
       svg.textContent = '';
@@ -2728,12 +2735,17 @@
       defs.append(pat); svg.append(defs);
       const g = sv('g'); svg.append(g);
       sceneBase = drag && drag.base != null ? drag.base : zBase();
+      const MS0 = MS; MS = 1;
       grid(g, sceneBase);
       // selected objects are drawn last (on top), so their points and edges can be picked over others
-      const order = frontOrder();
+      const order = frontOrder(), ext = { y0: Infinity, y1: -Infinity, z0: Infinity, z1: -Infinity };
+      for (const sideK of [-1, 1]) {
+      MS = sideK;
       for (const id of order) {
         // the section at the view angle (copies in radial cloners are shown as their first copy)
         const n = state.scene.nodes[id], xf = xfOf(state.scene, id), local = outlineOf(n.pts, n.runs), poly = xf.id ? sectionOutline(n, viewTheta()) : taperClip(n, local).map(xf.fwd), role = roleOf(state.scene, id);
+        if (MS < 0 && !xf.id) continue;     // copies in radial cloners: their opposite copy is drawn faintly from the right side
+        if (MS > 0) for (const p of poly) { ext.y0 = Math.min(ext.y0, p.y); ext.y1 = Math.max(ext.y1, p.y); ext.z0 = Math.min(ext.z0, p.z); ext.z1 = Math.max(ext.z1, p.z); }
         // a cloned object: show the other half of its section faintly
         if (!xf.id) g.append(sv('path', { d: pathOf(local.map(xf.mir)), fill: 'none', stroke: COLORS[n.type] || '#1f6feb', 'stroke-width': 1, 'stroke-dasharray': '3 3', opacity: 0.6 }));
         const col = COLORS[n.type] || '#1f6feb', crossing = polygonSelfIntersects(local), selected = selectedAncestorOf(id);
@@ -2760,13 +2772,13 @@
           const hot = drag && drag.type === 'bevel' && drag.node === id && drag.i === i;
           g.append(sv('path', { d, fill: 'none', stroke: hot ? '#f08c00' : 'rgba(250,176,5,.55)', 'stroke-width': hot ? 3 : 2, 'stroke-linecap': 'round', 'pointer-events': 'none' }));
           const hit = sv('path', { d, fill: 'none', stroke: 'transparent', 'stroke-width': 12, style: 'cursor:nwse-resize' });
-          hit.__bevel = { node: id, i };
+          hit.__bevel = { node: id, i }; hit.__side = MS;
           const tip = sv('title'); tip.textContent = 'Drag to change this bevel'; hit.append(tip);
           g.append(hit);
         }
       }
       // radial cloners in the selection: the copies' axis, with a handle for its distance from the main axis
-      for (const id of Object.keys(state.scene.nodes)) {
+      for (const id of MS > 0 ? Object.keys(state.scene.nodes) : []) {
         const hp = clonerHandle(id); if (!hp) continue;
         const [x1, y1] = toScreen(hp.a.y, hp.a.z), [x2, y2] = toScreen(hp.b.y, hp.b.z), [hx, hy] = toScreen(hp.at.y, hp.at.z);
         const hot = drag && drag.type === 'cloner' && drag.id === id;
@@ -2832,11 +2844,14 @@
           if (dx || dy) svg.append(sv('line', { x1: x0.toFixed(1), y1: y0.toFixed(1), x2: x.toFixed(1), y2: y.toFixed(1), stroke: '#868e96', 'stroke-width': 1, 'pointer-events': 'none' }));
           const c = sv('circle', { cx: x.toFixed(1), cy: y.toFixed(1), r: on ? 5.5 : 4,
             fill: on ? '#e03131' : hd.run ? '#d9480f' : (COLORS[n.type] || '#1f6feb'), stroke: hd.bevel ? '#fab005' : '#fff', 'stroke-width': hd.bevel ? 2.2 : 1.4, style: 'cursor:move' });
-          c.__key = hd.key;
+          c.__key = hd.key; c.__side = MS;
           const tip = sv('title'); tip.textContent = (n.name || id) + ': r ' + fmt(hd.y, 3) + ', z ' + fmt(hd.z, 3) + ' ' + UNIT_LABEL + (hd.bevel ? ' (bevelled)' : ''); c.append(tip);
           svg.append(c);
         }
       }
+      }
+      MS = 1;
+      boldExtents(g, ext);
       // coordinates beside each selected point (x = radius, y = height from the lowest point)
       const selHandles = [];
       for (const id of order) for (const hd of handlesOf(id)) if (state.sel.has(hd.key)) selHandles.push(hd);
@@ -2867,6 +2882,7 @@
         const [x, y] = toScreen(p.y, p.z);
         svg.append(sv('circle', { cx: x, cy: y, r: 5, fill: 'rgba(250,176,5,.35)', stroke: '#f08c00', 'stroke-width': 1.5, 'stroke-dasharray': '2 2', 'pointer-events': 'none' }));
       }
+      MS = drag ? dragSide : 1;
       if (drag && drag.guides && drag.guides.length) {
         const ext = 60 / view.s;
         for (const gd of drag.guides) {
@@ -2882,6 +2898,7 @@
         if (drag.markMid) svg.append(sv('path', { d: 'M' + x + ' ' + (y - 7) + 'L' + (x + 7) + ' ' + (y + 5) + 'L' + (x - 7) + ' ' + (y + 5) + 'Z', fill: 'none', stroke: '#f08c00', 'stroke-width': 1.5, 'pointer-events': 'none' }));
         else svg.append(sv('rect', { x: x - 6, y: y - 6, width: 12, height: 12, fill: 'none', stroke: '#f08c00', 'stroke-width': 1.5, 'pointer-events': 'none' }));
       }
+      MS = 1;
       if (drag && drag.type === 'box') {
         const x0 = Math.min(drag.sx, drag.cx), y0 = Math.min(drag.sy, drag.cy);
         svg.append(sv('rect', { x: x0, y: y0, width: Math.abs(drag.cx - drag.sx), height: Math.abs(drag.cy - drag.sy), fill: 'rgba(31,111,235,.08)', stroke: '#1f6feb', 'stroke-dasharray': '4 3' }));
@@ -2890,6 +2907,31 @@
       drawCursor();
       syncThreadBoxes();
       renderSelBox();
+      MS = MS0;
+    }
+    // the model's smallest and largest radius (both sides) and its lowest and highest point, in bold on the axes
+    function boldExtents(g, ext) {
+      if (!isFinite(ext.y0)) return;
+      const { w, h } = size(), base = sceneBase;
+      const tag = (x, y, text, anchor) => {
+        const t = sv('text', { x, y, 'font-size': 10, 'font-weight': 700, fill: '#000', 'text-anchor': anchor }); t.textContent = text;
+        const wpx = text.length * 6 + 6, x0 = anchor === 'middle' ? x - wpx / 2 : anchor === 'end' ? x - wpx + 3 : x - 3;
+        g.append(sv('rect', { x: x0, y: y - 10, width: wpx, height: 13, fill: 'rgba(248,249,250,.97)' }), t);
+      };
+      const radii = [ext.y1]; if (ext.y0 > 1e-9 && Math.abs(ext.y1 - ext.y0) * view.s > 30) radii.push(ext.y0);
+      for (const r of radii) for (const sgn of [-1, 1]) {
+        const x = w / 2 + (sgn * r - view.cy) * view.s;
+        if (x < AX_L || x > w) continue;
+        g.append(sv('line', { x1: x, y1: h - AX_B - 5, x2: x, y2: h - AX_B + 7, stroke: '#000', 'stroke-width': 2 }));
+        tag(x, h - 4, num(mm(r), 3) + ' ' + UNIT_LABEL, 'middle');
+        tag(x, h - 17, 'Ø' + num(mm(2 * r), 3) + ' ' + UNIT_LABEL, 'middle');
+      }
+      for (const z of [ext.z0, ext.z1]) {
+        const y = h / 2 - (z - view.cz) * view.s;
+        if (y < 0 || y > h - AX_B) continue;
+        g.append(sv('line', { x1: AX_L - 7, y1: y, x2: AX_L + 5, y2: y, stroke: '#000', 'stroke-width': 2 }));
+        tag(AX_L - 6, y + 3, num(hDisp(z, base), 3) + ' ' + UNIT_LABEL, 'end');
+      }
     }
 
     // ---- thread data boxes with editable values (live) ----
@@ -3134,7 +3176,9 @@
     svg.addEventListener('pointerdown', (e) => {
       if (!state.scene) return;
       hideMenu();
-      const [sx, sy] = local(e), [wy, wz] = toWorld(sx, sy);
+      const [sx, sy] = local(e), raw = toWorld(sx, sy), side = e.target.__side || (raw[0] < 0 ? -1 : 1);
+      MS = dragSide = side;
+      const wy = side * raw[0], wz = raw[1];
       const key = e.target.__key || (!e.target.__key ? edgeAt(sx, sy) : null);
       const add = e.shiftKey || e.ctrlKey || e.metaKey;
       if (e.button === 2) {
@@ -3197,8 +3241,10 @@
     });
     svg.addEventListener('pointermove', (e) => {
       if (!state.scene) return;
-      const [sx, sy] = local(e), [wy, wz] = toWorld(sx, sy);
-      cursorW = { y: wy, z: wz };
+      const [sx, sy] = local(e), raw = toWorld(sx, sy), side = drag ? dragSide : (e.target.__side || (raw[0] < 0 ? -1 : 1));
+      MS = side;
+      const wy = side * raw[0], wz = raw[1];
+      cursorW = { y: wy, z: wz, side };
       coord.textContent = 'x: radius ' + fmt(wy, 3) + ' / Ø ' + fmt(2 * wy, 3) + ' · y: height ' + num(hDisp(wz, sceneBase), 3) + ' ' + UNIT_LABEL;
       if (!drag) {
         drawCursor();
@@ -3264,7 +3310,13 @@
         if (d.moved) {
           const [y0, z1] = toWorld(Math.min(d.sx, d.cx), Math.min(d.sy, d.cy)), [y1, z0] = toWorld(Math.max(d.sx, d.cx), Math.max(d.sy, d.cy));
           if (!d.add) state.sel = new Set();
-          for (const id of leafOrder(state.scene)) for (const hd of handlesOf(id)) if (hd.y >= y0 && hd.y <= y1 && hd.z >= z0 && hd.z <= z1) state.sel.add(hd.key);
+          const MSb = MS;
+          for (const s of [1, -1]) {
+            MS = s;
+            const lo = s > 0 ? y0 : -y1, hi = s > 0 ? y1 : -y0;
+            for (const id of leafOrder(state.scene)) for (const hd of handlesOf(id)) if (hd.y >= lo && hd.y <= hi && hd.z >= z0 && hd.z <= z1) state.sel.add(hd.key);
+          }
+          MS = MSb;
         } else if (d.hit) {
           // click on an object: select it (Shift/Ctrl toggles it in the selection)
           state.sel = d.add ? state.sel : new Set();
@@ -3642,13 +3694,19 @@
     }
 
     const dlBtn = el('button', { type: 'button', style: BTN, onclick: download });
-    let sideStatus = null, sideSig = null;
+    let sideSig = null;
     // A block from the old single panel, shown bare inside its own view (its own title row dropped).
     function bare(b, keepHead) {
       if (!b) return null;
       Object.assign(b.style, { border: '0', padding: '0', margin: '0', background: 'none', boxShadow: 'none' });
       if (!keepHead && b.firstChild && b.firstChild.nodeType === 1) b.firstChild.remove();
       return b;
+    }
+    // the project's state, short, beside the Project header (the full text on hover)
+    function headStatus(s) {
+      const x = panels.project.extra;
+      x.textContent = s.ready ? (s.text.startsWith('✔') ? '✔ solid' : '✘ not solid') : s.text.startsWith('Error') ? '✘ error' : state.busy ? 'updating…' : '';
+      x.style.color = s.color; x.title = s.text;
     }
     function renderSide() {
       const fe = document.activeElement;
@@ -3659,13 +3717,12 @@
         // keep the other fields up to date while one is being edited
         for (const i of side.querySelectorAll('input')) if (i !== document.activeElement && i.__get) i.value = i.__get();
         for (const t of side.querySelectorAll('span')) if (t.__text) t.textContent = t.__text();
-        if (sideStatus) { sideStatus.textContent = s.text; sideStatus.style.color = s.color; }
+        headStatus(s);
         return;
       }
       const tops = {};
       pgridMaxCols = rightBar.clientWidth && rightBar.clientWidth < 560 ? 1 : 2;
       for (const k in panels) { tops[k] = panels[k].body.scrollTop; panels[k].body.textContent = ''; }
-      sideStatus = el('div', { role: 'status', style: 'color:' + s.color + ';margin-bottom:6px' }, s.text);
       for (const k in panels) panels[k].tools.textContent = '';
       appendKids(panels.project.tools,
         hbtn('undo', 'Undo', undo, { title: 'Undo (Ctrl+Z)', disabled: !state.undo.length }),
@@ -3674,13 +3731,11 @@
         hbtn('download', 'Export', exportSceneJson, { title: 'Export the whole scene as a JSON file that Import can rebuild it from', disabled: !state.scene }),
         hbtn('upload', 'Import', pickJsonFile, { title: 'Import a scene or saved models from a JSON file' }),
         hbtn('fit', 'Fit', () => { fit(); drawSection(); }, { title: 'Fit the cross-section view' }));
-      sideStatus.style.marginBottom = '4px';
       const msg = state.exportError || (state.exporting ? 'Exporting ' + state.exporting + '…' : state.libMessage) || '';
-      appendKids(panels.project.body, sideStatus,
+      appendKids(panels.project.body,
         msg ? el('div', { style: 'margin-bottom:4px;color:' + (state.exportError ? '#b42318' : '#1a7f37') }, msg) : null, dlBtn,
         el('div', { style: 'margin-top:5px;padding-top:4px;border-top:1px solid #e9ecef' }, settingsBlock()));
-      panels.project.extra.textContent = s.ready ? (s.text.startsWith('✔') ? '✔ solid' : '✘ not solid') : s.text.startsWith('Error') ? 'error' : state.busy ? 'updating…' : '';
-      panels.project.extra.style.color = s.color;
+      headStatus(s);
       if (state.scene) {
         panels.objects.body.append(bare(treeBlock()));
         const nSel = state.selNodes.size;
@@ -4047,7 +4102,7 @@
       // text 'up': the camera's up, square to the reading direction
       const square = (r) => { const k = up0[0] * r[0] + up0[1] * r[1] + up0[2] * r[2]; const q = [up0[0] - r[0] * k, up0[1] - r[1] * k, up0[2] - r[2] * k], l = Math.hypot(...q) || 1; return q.map(c => c / l); };
       const up = square(rt);
-      const gz = bbox.mn[2] - radius * 0.004, cx = (bbox.mn[0] + bbox.mx[0]) / 2, cy = (bbox.mn[1] + bbox.mx[1]) / 2, O = [cx, cy, gz];
+      const gz = bbox.mn[2], cx = (bbox.mn[0] + bbox.mx[0]) / 2, cy = (bbox.mn[1] + bbox.mx[1]) / 2, O = [cx, cy, gz];
       const lw = (p) => p / px, hgt = lw(9), sw = lw(1.1), W = canvas.clientWidth, H = canvas.clientHeight;
       const v = [], COL = [0.88, 0.9, 0.93, 0.95], DIM = [0.8, 0.83, 0.86, 0.55];
       const onScreen = (p, m) => { const s = toScreen3(p); return s && s[0] > -m && s[1] > -m && s[0] < W + m && s[1] < H + m; };
@@ -4147,7 +4202,7 @@
       return { R: Rpart, Ra, Rv, px, minor, major, aMajor, aMinor };
     }
     function buildCompass(S) {
-      const { mn, mx } = bbox, cx = (mn[0] + mx[0]) / 2, cy = (mn[1] + mx[1]) / 2, z = mn[2] - radius * 0.004;
+      const { mn, mx } = bbox, cx = (mn[0] + mx[0]) / 2, cy = (mn[1] + mx[1]) / 2, z = mn[2];   // on the part's lowest point
       const { Ra, Rv, px, minor, major, aMajor, aMinor } = S;
       const v = [], lw = (p) => p / px;                                     // a line width of p screen pixels
       const tri = (a, b, c, col) => { for (const p of [a, b, c]) v.push(p[0], p[1], z, col[0], col[1], col[2], col[3]); };
@@ -4199,7 +4254,9 @@
       gl.enableVertexAttribArray(aP); gl.enableVertexAttribArray(aC);
       gl.vertexAttribPointer(aP, 3, gl.FLOAT, false, 28, 0); gl.vertexAttribPointer(aC, 4, gl.FLOAT, false, 28, 12);
       gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);
+      gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(2, 2);
       gl.drawArrays(gl.TRIANGLES, 0, compassCount);
+      gl.disable(gl.POLYGON_OFFSET_FILL);
       gl.depthMask(true); gl.disable(gl.BLEND);
       gl.disableVertexAttribArray(aC);
     }
@@ -4497,7 +4554,7 @@
       loading.style.display = state.scene ? 'none' : 'flex';
       if (state.scene) pruneSelection();
       if (!drag) drawSection();
-      if (!drag || !drag.moved) renderSide(); else if (sideStatus) { const s = statusText(); sideStatus.textContent = s.text; sideStatus.style.color = s.color; }
+      if (!drag || !drag.moved) renderSide(); else headStatus(statusText());
       busyTag.textContent = state.busy ? 'Updating…' : '';
       if (state.preview) setMesh(state.preview);
       else if (triCount) { triCount = 0; lineCount = 0; shown = null; bbox = null; draw3d(); }
