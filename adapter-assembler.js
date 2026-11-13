@@ -2741,8 +2741,9 @@
       const order = frontOrder(), ext = { y0: Infinity, y1: -Infinity, z0: Infinity, z1: -Infinity };
       for (const sideK of [-1, 1]) {
       MS = sideK;
-      // behind everything, very light: each object's colour swept in to the axis (the far side of the part, seen
-      // through the middle), the innermost object on top, so the section reads as wrapping round the axis
+      // behind everything, very light: at each height, the colour of whatever is nearest the axis there, swept in
+      // to the axis (the far side of the part, seen through the middle), so the section reads as wrapping round it.
+      // Redrawn with the section, so it follows every edit and view turn as it happens.
       {
         const wrap = sv('g', { opacity: 0.0675, 'pointer-events': 'none' }), items = [];
         for (const id of order) {
@@ -2750,26 +2751,59 @@
           if (!xf.id || roleOf(state.scene, id) === 'negative') continue;
           const poly = sectionOutline(n, viewTheta());
           if (poly.length < 3) continue;
-          items.push({ col: COLORS[n.type] || '#1f6feb', poly, inner: Math.min(...poly.map(p => p.y)) });
-        }
-        items.sort((p, q) => q.inner - p.inner);
-        for (const { col, poly } of items) {
-          // the object's inner edge (nearest the axis) at each height where it has a corner, then back along the axis
-          const zs = [...new Set(poly.map(p => +p.z.toFixed(9)))].sort((a, b) => a - b), N = poly.length, inner = [];
-          for (const z of zs) {
+          // the inner edge as a profile: at each corner height, the inner radius just below and just above it
+          const N = poly.length, zs = [...new Set(poly.map(p => p.z))].sort((a, b) => a - b), span = (zs[zs.length - 1] - zs[0]) || 1, e = span * 1e-7;
+          const innerAt = (z) => {
             let yin = Infinity;
             for (let i = 0; i < N; i++) {
               const A = poly[i], B = poly[(i + 1) % N];
-              if ((A.z - z) * (B.z - z) > 1e-18) continue;
-              const y = Math.abs(B.z - A.z) < 1e-12 ? Math.min(A.y, B.y) : A.y + (B.y - A.y) * (z - A.z) / (B.z - A.z);
+              if ((A.z - z) * (B.z - z) > 0 || A.z === B.z) continue;
+              const y = A.y + (B.y - A.y) * (z - A.z) / (B.z - A.z);
               if (y < yin) yin = y;
             }
-            if (isFinite(yin)) inner.push(toScreen(yin, z));
-          }
-          if (inner.length < 2) continue;
-          const pts = [toScreen(0, zs[0]), ...inner, toScreen(0, zs[zs.length - 1])];
-          wrap.append(sv('path', { d: 'M' + pts.map(p => p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join('L') + 'Z', fill: col }));
+            return yin;
+          };
+          const prof = zs.map(z => ({ z, dn: innerAt(z - e), up: innerAt(z + e) }));
+          items.push({ col: COLORS[n.type] || '#1f6feb', prof });
         }
+        // the inner radius of an item at height z, inside one of its own spans (Infinity where it is not)
+        const yIn = (it, z) => {
+          const P = it.prof;
+          if (z <= P[0].z || z >= P[P.length - 1].z) return Infinity;
+          let lo = 0, hi = P.length - 1;
+          while (hi - lo > 1) { const m = (lo + hi) >> 1; if (P[m].z <= z) lo = m; else hi = m; }
+          const a = P[lo], b = P[hi], t = (z - a.z) / (b.z - a.z);
+          return a.up + (b.dn - a.up) * t;
+        };
+        const yAt = (it, z, zm) => {     // at a slab's end, along the span that holds the slab's middle
+          const P = it.prof; let lo = 0, hi = P.length - 1;
+          while (hi - lo > 1) { const m = (lo + hi) >> 1; if (P[m].z <= zm) lo = m; else hi = m; }
+          const a = P[lo], b = P[hi]; return a.up + (b.dn - a.up) * (z - a.z) / (b.z - a.z);
+        };
+        const cuts = [...new Set(items.flatMap(it => it.prof.map(p => p.z)))].sort((a, b) => a - b);
+        let run = null;
+        const paths = new Map();          // one path per colour, so touching pieces show no seams
+        const flush = () => {
+          if (!run) return;
+          const pts = [toScreen(0, run.z0), ...run.pts.map(p => toScreen(p.y, p.z)), toScreen(0, run.z1)];
+          paths.set(run.it.col, (paths.get(run.it.col) || '') + 'M' + pts.map(p => p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join('L') + 'Z');
+          run = null;
+        };
+        for (let k = 0; k + 1 < cuts.length; k++) {
+          const a = cuts[k], b = cuts[k + 1], zm = (a + b) / 2;
+          if (b - a < 1e-12) continue;
+          let best = null, by = Infinity;
+          for (const it of items) { const y = yIn(it, zm); if (y < by) { by = y; best = it; } }
+          // a tie (e.g. a thread's root on its ring's wall): keep the colour already running, so there are no stripes
+          if (run && best !== run.it && Math.abs(yIn(run.it, zm) - by) < 1e-7) best = run.it;
+          if (!best || !isFinite(by)) { flush(); continue; }
+          const ya = yAt(best, a, zm), yb = yAt(best, b, zm);
+          if (run && (run.it !== best || Math.abs(run.pts[run.pts.length - 1].y - ya) > 1e-9 || Math.abs(run.z1 - a) > 1e-12)) flush();
+          if (!run) run = { it: best, z0: a, z1: b, pts: [{ y: ya, z: a }, { y: yb, z: b }] };
+          else { run.pts.push({ y: yb, z: b }); run.z1 = b; }
+        }
+        flush();
+        for (const [col, d] of paths) wrap.append(sv('path', { d, fill: col }));
         g.append(wrap);
       }
       for (const id of order) {
