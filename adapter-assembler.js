@@ -3948,6 +3948,59 @@
       gl.depthMask(true); gl.depthFunc(gl.LESS);
       gl.disableVertexAttribArray(aC);
     }
+    // Measurements at the major grid steps along the ground axis that runs most nearly left–right on screen:
+    // a small tick on the axis and the distance from the centre (mm), upright and facing the viewer.
+    let axisLblBuf = null;
+    function drawAxisLabels() {
+      const f = cutFrame();
+      if (!f || !camBasis || !lastM) return;
+      const S = compassSpec(), px = Math.max(1e-9, S.px), cs = camBasis.x, up0 = camBasis.y;
+      // the ground axis closest to the screen's horizontal, pointing to the right
+      const dir = [f.dirs.x, f.dirs.z].map(d => ({ d, h: d[0] * cs[0] + d[1] * cs[1] + d[2] * cs[2] })).sort((a, b) => Math.abs(b.h) - Math.abs(a.h))[0];
+      const rt = dir.h < 0 ? dir.d.map(c => -c) : dir.d;
+      // text 'up': the camera's up, made square to the axis
+      const k = up0[0] * rt[0] + up0[1] * rt[1] + up0[2] * rt[2];
+      let up = [up0[0] - rt[0] * k, up0[1] - rt[1] * k, up0[2] - rt[2] * k]; const ul = Math.hypot(...up) || 1; up = up.map(c => c / ul);
+      const gz = bbox.mn[2] - radius * 0.004, O = [f.O[0], f.O[1], gz], lw = (p) => p / px, hgt = lw(9), sw = lw(1.1);
+      const v = [], COL = [0.88, 0.9, 0.93, 0.95];
+      const quad = (a, b, w) => {      // a line of width w, facing the viewer
+        const d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], z = camBasis.z;
+        let s = [d[1] * z[2] - d[2] * z[1], d[2] * z[0] - d[0] * z[2], d[0] * z[1] - d[1] * z[0]]; const L = Math.hypot(...s); if (L < 1e-12) return;
+        s = s.map(c => c / L * w / 2);
+        for (const p of [[a, -1], [a, 1], [b, 1], [a, -1], [b, 1], [b, -1]]) v.push(p[0][0] + s[0] * p[1], p[0][1] + s[1] * p[1], p[0][2] + s[2] * p[1], ...COL);
+      };
+      const at = (base, x, y) => [base[0] + rt[0] * x + up[0] * y, base[1] + rt[1] * x + up[1] * y, base[2] + rt[2] * x + up[2] * y];
+      const text = (txt, base) => {
+        const adv = (ch) => (ch === '.' ? 0.12 : ch === '1' ? 0.42 : ch === '-' ? 0.45 : 0.55) + 0.18;
+        let pen = -([...txt].reduce((s, ch) => s + adv(ch), -0.18) * hgt) / 2;
+        for (const ch of txt) {
+          const g = ch === '-' ? [[[0.05, 0.5], [0.4, 0.5]]] : FONT[ch] || [];
+          for (const line of g) for (let i = 0; i + 1 < line.length; i++) quad(at(base, pen + line[i][0] * hgt, line[i][1] * hgt), at(base, pen + line[i + 1][0] * hgt, line[i + 1][1] * hgt), sw);
+          pen += adv(ch) * hgt;
+        }
+      };
+      const lim = f.ext.x, step = S.major, fmt1 = (r) => String(+r.toFixed(3));
+      // a ground tick across the axis at each step, the number just above it
+      const gnd = [-rt[1], rt[0], 0];
+      for (let s = -Math.floor(lim / step) * step; s <= lim + 1e-9; s += step) {
+        if (Math.abs(s) < step * 1e-6) continue;
+        const p = [O[0] + rt[0] * s, O[1] + rt[1] * s, gz];
+        quad([p[0] - gnd[0] * lw(4), p[1] - gnd[1] * lw(4), gz], [p[0] + gnd[0] * lw(4), p[1] + gnd[1] * lw(4), gz], lw(1.2));
+        text(fmt1(Math.abs(s)), at(p, 0, lw(5)));
+      }
+      if (!v.length) return;
+      if (!axisLblBuf) axisLblBuf = gl.createBuffer();
+      gl.useProgram(texProg);
+      gl.uniformMatrix4fv(gl.getUniformLocation(texProg, 'mvp'), false, new Float32Array(lastM));
+      gl.bindBuffer(gl.ARRAY_BUFFER, axisLblBuf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(v), gl.DYNAMIC_DRAW);
+      const aP = gl.getAttribLocation(texProg, 'pos'), aC = gl.getAttribLocation(texProg, 'col');
+      gl.enableVertexAttribArray(aP); gl.enableVertexAttribArray(aC);
+      gl.vertexAttribPointer(aP, 3, gl.FLOAT, false, 28, 0); gl.vertexAttribPointer(aC, 4, gl.FLOAT, false, 28, 12);
+      gl.disable(gl.DEPTH_TEST); gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.drawArrays(gl.TRIANGLES, 0, v.length / 7);
+      gl.disable(gl.BLEND); gl.enable(gl.DEPTH_TEST);
+      gl.disableVertexAttribArray(aC);
+    }
     function drawBadEdges() {
       if (!badCount) return;
       gl.useProgram(texProg);
@@ -4045,8 +4098,6 @@
         const t = d * Math.PI / 180, rr = R - lw(11) - hgt * 0.6;
         text(d + '°', cx + Math.cos(t) * rr, cy + Math.sin(t) * rr, [-Math.cos(t), -Math.sin(t)], [-Math.sin(t), Math.cos(t)], hgt, d % 90 === 0 ? WHITE : GREY);
       }
-      const fmtR = (r) => String(+r.toFixed(3)), hr = hgt;
-      for (let r = major; r < R - lw(14) - hgt * 2.5; r += major) text(fmtR(r), cx + r, cy - hr * 0.9, [0, 1], [1, 0], hr, [MAJOR[0], MAJOR[1], MAJOR[2], 0.8]);
       gl.bindBuffer(gl.ARRAY_BUFFER, compassBuf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(v), gl.STATIC_DRAW);
       return v.length / 7;
     }
@@ -4183,7 +4234,7 @@
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, T && ssao ? T.bT : null);
       drawPart(prog, (U) => { gl.uniform1i(U('aoTex'), 0); gl.uniform1f(U('aoOn'), T && ssao ? 1 : 0); gl.uniform2f(U('res'), CW, CH); });
       // the compass, lying on the ground plane under the part and turning with it; the cut axes; problem edges
-      if (bbox && texProg) { drawCompass3d(); drawCutEdges(); drawGizmo(); drawBadEdges(); }
+      if (bbox && texProg) { drawCompass3d(); drawCutEdges(); drawGizmo(); drawAxisLabels(); drawBadEdges(); }
       // 5. the wireframe: 1 device pixel, not smoothed
       if (wire) {
         if (T) {
