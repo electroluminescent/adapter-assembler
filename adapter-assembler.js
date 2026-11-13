@@ -3780,7 +3780,7 @@
     // own texture against that depth (so it stays 1 px and aliased), (3) ambient occlusion (SSAO) from
     // the normals and depth, blurred, (4) the shaded part with the occlusion applied, (5) the wireframe.
     const gl = canvas.getContext('webgl', { antialias: true, stencil: true });
-    let prog = null, gProg = null, aoProg = null, blurProg = null, copyProg = null, texProg = null, quadBuf = null, fb = null, compassBuf = null, compassDirty = true, bbox = null;
+    let gridProg = null, gridBuf = null, prog = null, gProg = null, aoProg = null, blurProg = null, copyProg = null, texProg = null, quadBuf = null, fb = null, bbox = null;
     let triBuf = null, lineBuf = null, capBuf = null, triCount = 0, lineCount = 0, center = [0, 0, 0], radius = 1, yaw = (state.viewAngle - 90) * Math.PI / 180, pitchA = 0.5, dist = 3, shown = null, pan = [0, 0, 0];
     if (gl) {
       const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.warn('[adapter-assembler] shader', gl.getShaderInfoLog(s)); return s; };
@@ -3855,7 +3855,37 @@
       copyProg = program(QVS, 'precision highp float; varying vec2 uv; uniform sampler2D t; void main(){ gl_FragColor = texture2D(t, uv); }');
       texProg = program('attribute vec3 pos; attribute vec4 col; uniform mat4 mvp; varying vec4 vC; void main(){ vC = col; gl_Position = mvp * vec4(pos, 1.0); }',
         'precision highp float; varying vec4 vC; void main(){ gl_FragColor = vC; }');
-      compassBuf = gl.createBuffer();
+      // the ground compass, drawn per pixel (any extent and zoom costs the same): rings every minor step
+      // (9 minor between majors), spokes at the major angles, and the angle scale's rim with its ticks
+      if (gl.getExtension('OES_standard_derivatives')) gridProg = program('attribute vec3 pos; uniform mat4 mvp; varying vec2 vXY; void main(){ vXY = pos.xy; gl_Position = mvp * vec4(pos, 1.0); }', [
+        '#extension GL_OES_standard_derivatives : enable',
+        'precision highp float; varying vec2 vXY; uniform vec2 C; uniform float minor; uniform float major; uniform float spoke; uniform float Ra; uniform float aMinor;',
+        'float band(float d, float px, float wpx){ return 1.0 - smoothstep(max(wpx * 0.5 - 0.5, 0.0) * px, (wpx * 0.5 + 0.5) * px, abs(d)); }',
+        'void main(){',
+        '  vec2 q = vXY - C; float r = length(q); float px = max(length(vec2(dFdx(r), dFdy(r))), 1e-9);',
+        '  float a = degrees(atan(q.y, q.x)); if (a < 0.0) a += 360.0;',
+        '  float k = 0.0; vec3 col = vec3(0.78, 0.81, 0.85);',
+        '  float fMin = 1.0 - smoothstep(minor / 12.0, minor / 5.0, px), fMaj = 1.0 - smoothstep(major / 12.0, major / 5.0, px);',
+        '  k = max(k, band(r - minor * floor(r / minor + 0.5), px, 0.7) * 0.16 * fMin);',
+        '  k = max(k, band(r - major * floor(r / major + 0.5), px, 1.1) * 0.42 * fMaj);',
+        // spokes: the major angles beyond the first ring, the four quarters from the centre
+        '  float ds = (a - spoke * floor(a / spoke + 0.5)) * 0.0174533 * r, dq = (a - 90.0 * floor(a / 90.0 + 0.5)) * 0.0174533 * r;',
+        // a line's width in pixels: its distance divided by how fast that distance changes on screen
+        '  float ps = max(length(vec2(dFdx(ds), dFdy(ds))), 1e-9), pq = max(length(vec2(dFdx(dq), dFdy(dq))), 1e-9);',
+        '  if (r > minor) k = max(k, band(ds, ps, 0.8) * 0.18);',
+        '  k = max(k, band(dq, pq, 1.2) * 0.42);',
+        // the rim, and ticks inside it: majors (every 10th) longest, every 5th middle, the rest short
+        '  float rim = band(r - Ra, px, 1.2);',
+        '  float i = floor(a / aMinor + 0.5), dt = (a - i * aMinor) * 0.0174533 * r;',
+        '  float mj = abs(mod(i, 10.0)) < 0.5 ? 1.0 : 0.0, md = abs(mod(i, 5.0)) < 0.5 ? 1.0 : 0.0;',
+        '  float len = mix(mix(4.0, 6.0, md), 8.0, mj) * px, inTick = step(Ra - len, r) * step(r, Ra);',
+        '  float tick = band(dt, max(length(vec2(dFdx(dt), dFdy(dt))), 1e-9), mix(0.8, 1.0, mj)) * inTick;',
+        '  float quarter = abs(i * aMinor - 90.0 * floor(i * aMinor / 90.0 + 0.5)) < 1e-4 ? 1.0 : 0.0;',
+        '  float t = max(rim * 0.8, tick * mix(mix(0.42, 0.8, mj), 0.95, quarter));',
+        '  if (t > k) { k = t; col = mix(vec3(0.81, 0.83, 0.85), vec3(0.97, 0.98, 1.0), quarter * tick); }',
+        '  if (k < 0.004) discard;',
+        '  gl_FragColor = vec4(col, k);',
+        '}'].join('\n'));
       gl.useProgram(aoProg); gl.uniform3fv(gl.getUniformLocation(aoProg, 'K'), new Float32Array(kernel));
       quadBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]), gl.STATIC_DRAW);
       triBuf = gl.createBuffer(); lineBuf = gl.createBuffer(); capBuf = gl.createBuffer();
@@ -3897,7 +3927,6 @@
       for (let i = 0; i < t.length; i += 6) for (let c = 0; c < 3; c++) { if (t[i + c] < mn[c]) mn[c] = t[i + c]; if (t[i + c] > mx[c]) mx[c] = t[i + c]; }
       const nr = Math.hypot(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]) / 2 || 1;
       if (firstMesh || Math.abs(nr - radius) / nr > 0.25) { dist = nr * 2.2; pan = [0, 0, 0]; }
-      compassDirty = true;
       center = [0, 1, 2].map(c => (mn[c] + mx[c]) / 2); radius = nr; bbox = { mn, mx };
       draw3d();
     }
@@ -4102,7 +4131,7 @@
       // text 'up': the camera's up, square to the reading direction
       const square = (r) => { const k = up0[0] * r[0] + up0[1] * r[1] + up0[2] * r[2]; const q = [up0[0] - r[0] * k, up0[1] - r[1] * k, up0[2] - r[2] * k], l = Math.hypot(...q) || 1; return q.map(c => c / l); };
       const up = square(rt);
-      const gz = bbox.mn[2], cx = (bbox.mn[0] + bbox.mx[0]) / 2, cy = (bbox.mn[1] + bbox.mx[1]) / 2, O = [cx, cy, gz];
+      const gz = bbox.mn[2], { cx, cy } = S, O = [cx, cy, gz];
       const lw = (p) => p / px, hgt = lw(9), sw = lw(1.1), W = canvas.clientWidth, H = canvas.clientHeight;
       const v = [], COL = [0.88, 0.9, 0.93, 0.95], DIM = [0.8, 0.83, 0.86, 0.55];
       const onScreen = (p, m) => { const s = toScreen3(p); return s && s[0] > -m && s[1] > -m && s[0] < W + m && s[1] < H + m; };
@@ -4124,18 +4153,28 @@
       };
       const num = (x) => String(+x.toFixed(6));
       // distances: along the axis both ways, as far as the grid reaches
-      const gnd = [-rt[1], rt[0], 0], { minor } = S, lim = S.Rv, kMax = Math.min(Math.floor(lim / minor), 4000);
-      for (let k = -kMax; k <= kMax; k++) {
+      // along the axis: only the stretch the view can show (round the ground point under the view)
+      const gnd = [-rt[1], rt[0], 0], { minor } = S, G = S.G || [cx, cy], mid = (G[0] - cx) * rt[0] + (G[1] - cy) * rt[1], reach = S.half * 3;
+      const k0 = Math.ceil((mid - reach) / minor), k1 = Math.min(Math.floor((mid + reach) / minor), k0 + 600);
+      for (let k = k0; k <= k1; k++) {
         if (!k) continue;
         const s = k * minor, mj = k % 10 === 0, p = [O[0] + rt[0] * s, O[1] + rt[1] * s, gz];
         if (!onScreen(p, 20)) continue;
+        // far along a low view the steps crowd together: drop the minor ticks (then the numbers) where they would merge
+        const sp = toScreen3(p), sq = toScreen3([p[0] + rt[0] * minor, p[1] + rt[1] * minor, gz]), gap = sp && sq ? Math.hypot(sq[0] - sp[0], sq[1] - sp[1]) : 0;
+        if (!mj && gap < 8) continue;
+        if (mj && gap * 10 < 28) continue;
         const L = lw(mj ? 4 : 2);
         quad([p[0] - gnd[0] * L, p[1] - gnd[1] * L, gz], [p[0] + gnd[0] * L, p[1] + gnd[1] * L, gz], lw(mj ? 1.2 : 0.8), mj ? COL : DIM);
         if (mj) text(num(Math.abs(s)), [p[0] + up[0] * lw(5), p[1] + up[1] * lw(5), p[2] + up[2] * lw(5)], rt, up, COL);
       }
       // angles round the rim, each upright and read left to right on screen
+      // round the rim: only the angles near the part of it in view
       const right = camBasis.x, upA = square(right), n = Math.round(360 / S.aMajor);
-      for (let i = 0; i < n; i++) {
+      const aG = S.G ? Math.atan2(S.G[1] - cy, S.G[0] - cx) : 0, span = Math.min(Math.PI, S.half * 3 / Math.max(S.Ra, 1e-9));
+      const i0 = span >= Math.PI ? 0 : Math.floor((aG - span) * 180 / Math.PI / S.aMajor), i1 = span >= Math.PI ? n - 1 : Math.ceil((aG + span) * 180 / Math.PI / S.aMajor);
+      for (let ii = i0; ii <= Math.min(i1, i0 + 720); ii++) {
+        const i = ((ii % n) + n) % n;
         const d = i * S.aMajor, t = d * Math.PI / 180, rr = S.Ra - lw(11) - hgt * 0.6;
         const p = [cx + Math.cos(t) * rr, cy + Math.sin(t) * rr, gz];
         if (!onScreen(p, 20)) continue;
@@ -4183,84 +4222,64 @@
       '9': [[...ell(0.27, 0.45, 0.27, 0.45, -Math.PI * 0.72, 0, 8).slice(0, -1), ...ell(0.275, 0.72, 0.265, 0.28, 0, 2 * Math.PI, 16)]],
       '°': [ell(0.12, 0.86, 0.1, 0.12, 0, 2 * Math.PI, 10)], '.': [[[0.06, 0], [0.06, 0.07]]],
     };
-    let compassKey = '';
     const niceStep = (x) => { const e = Math.pow(10, Math.floor(Math.log10(x))), m = x / e; return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * e; };
     // The ground compass: a radial grid under the part that reaches as far as the view does (rings and spokes),
     // with an angle scale round a rim. Spacing follows the zoom in base 10: 9 minor steps between majors.
+    // The angle scale sits round the part when the part fits the view; zoomed in, it moves to a round radius
+    // that passes through the middle of the view, so its ticks and numbers stay on screen.
     const ANGLE_MAJORS = [90, 30, 10, 1, 0.1, 0.01];
+    let lastCam = null;
+    // where a point on the screen (-1…1 both ways) meets the ground plane z = gz
+    function groundAt(nx, ny, gz) {
+      const c = lastCam; if (!c) return null;
+      const d = [0, 1, 2].map(i => -c.z[i] + nx * c.tanH * c.a * c.x[i] + ny * c.tanH * c.y[i]);
+      if (Math.abs(d[2]) < 1e-12) return null;
+      const t = (gz - c.eye[2]) / d[2];
+      return t > 0 ? [c.eye[0] + d[0] * t, c.eye[1] + d[1] * t] : null;
+    }
     function compassSpec() {
       const { mn, mx } = bbox, Rpart = Math.max(mx[0] - mn[0], mx[1] - mn[1]) / 2 * 1.04, px = Math.max(1e-6, pxPerMm());
       const w = canvas.clientWidth || 1, h = canvas.clientHeight || 1, half = Math.hypot(w, h) / 2 / px;
-      // how far the grid must reach: the view's size on the ground (generous, as low views look far), plus any pan
-      const Rv = Math.min(Rpart * 60 + half * 4, half * (projT < 0.5 ? 1.6 : 4) + Math.hypot(pan[0], pan[1]) + Rpart);
+      const cx = (mn[0] + mx[0]) / 2, cy = (mn[1] + mx[1]) / 2;
       const minor = niceStep(10 / px), major = minor * 10;
-      // the angle scale: round the part, or nearer in when zoomed in so it stays in view
       const floorNice = (x) => { const e = Math.pow(10, Math.floor(Math.log10(x))), m = x / e; return (m >= 5 ? 5 : m >= 2 ? 2 : 1) * e; };
-      const Ra = Rpart * px <= 0.46 * w ? Rpart : floorNice(0.42 * w / px);
+      // the ground under the middle of the view, a little below centre
+      const G = groundAt(0, -0.3, mn[2]), rG = G ? Math.hypot(G[0] - cx, G[1] - cy) : 0;
+      let Ra = Rpart;
+      if (Rpart * px > 0.46 * w || rG > Rpart) Ra = rG > 0.4 * w / px ? floorNice(rG) : floorNice(0.4 * Math.min(w, h * 1.4) / px);
       const arc = (deg) => Ra * deg * Math.PI / 180 * px;
       const aMajor = ANGLE_MAJORS.slice().reverse().find(m => arc(m / 10) >= 5) || 90, aMinor = aMajor / 10;
-      return { R: Rpart, Ra, Rv, px, minor, major, aMajor, aMinor };
+      // how far the grid reaches: well past the view (low views look far along the ground)
+      const Rv = Math.max(Rpart, Ra) * 1.5 + half * 6 + Math.hypot(pan[0], pan[1]);
+      return { R: Rpart, Ra, Rv, px, minor, major, aMajor, aMinor, cx, cy, G, half };
     }
-    function buildCompass(S) {
-      const { mn, mx } = bbox, cx = (mn[0] + mx[0]) / 2, cy = (mn[1] + mx[1]) / 2, z = mn[2];   // on the part's lowest point
-      const { Ra, Rv, px, minor, major, aMajor, aMinor } = S;
-      const v = [], lw = (p) => p / px;                                     // a line width of p screen pixels
-      const tri = (a, b, c, col) => { for (const p of [a, b, c]) v.push(p[0], p[1], z, col[0], col[1], col[2], col[3]); };
-      const seg = (p, q, w, col) => {
-        const dx = q[0] - p[0], dy = q[1] - p[1], L = Math.hypot(dx, dy) || 1, ux = dx / L * w / 2, uy = dy / L * w / 2, nx = -uy, ny = ux;
-        const a = [p[0] - ux + nx, p[1] - uy + ny], b = [p[0] - ux - nx, p[1] - uy - ny], c = [q[0] + ux - nx, q[1] + uy - ny], d = [q[0] + ux + nx, q[1] + uy + ny];
-        tri(a, b, c, col); tri(a, c, d, col);
-      };
-      const ring = (r, w, col) => {
-        const N = Math.max(64, Math.min(1440, Math.ceil(2 * Math.PI * r * px / 10)));
-        for (let i = 0; i < N; i++) {
-          const t0 = 2 * Math.PI * i / N, t1 = 2 * Math.PI * (i + 1) / N;
-          const p = (rr, t) => [cx + Math.cos(t) * rr, cy + Math.sin(t) * rr];
-          tri(p(r - w / 2, t0), p(r + w / 2, t0), p(r + w / 2, t1), col); tri(p(r - w / 2, t0), p(r + w / 2, t1), p(r - w / 2, t1), col);
-        }
-      };
-      const MINOR = [0.72, 0.75, 0.8, 0.16], MAJOR = [0.8, 0.83, 0.86, 0.42], GREY = [0.81, 0.83, 0.85, 0.8], WHITE = [0.97, 0.98, 1, 0.95];
-      // rings: 9 minor between majors, out to the edge of the view (minor ones only as far as they stay few)
-      const isMajor = (r) => Math.abs(r / major - Math.round(r / major)) < 1e-6;
-      const nMinor = Math.min(Math.floor(Rv / minor), 400), nMajor = Math.min(Math.floor(Rv / major), 400);
-      for (let k = 1; k <= nMinor; k++) { const r = k * minor; if (!isMajor(r)) ring(r, lw(0.7), MINOR); }
-      for (let k = 1; k <= nMajor; k++) ring(k * major, lw(1.1), MAJOR);
-      // spokes at the major angles (the four quarters brighter), out to the edge of the view
-      const spoke = Math.max(aMajor, 10);
-      for (let d = 0; d < 360 - 1e-9; d += spoke) {
-        const t = d * Math.PI / 180, c = Math.cos(t), s = Math.sin(t), q = Math.abs(d % 90) < 1e-9;
-        seg([cx + c * (q ? 0 : minor), cy + s * (q ? 0 : minor)], [cx + c * Rv, cy + s * Rv], lw(q ? 1.2 : 0.8), q ? MAJOR : MINOR);
-      }
-      // the angle scale's rim, with 9 minor ticks between the major ones
-      ring(Ra, lw(1.2), GREY);
-      const n = Math.round(360 / aMinor);
-      for (let i = 0; i < n; i++) {
-        const d = i * aMinor, t = d * Math.PI / 180, mj = i % 10 === 0, half5 = !mj && i % 5 === 0, c = Math.cos(t), s = Math.sin(t);
-        const len = mj ? 8 : half5 ? 6 : 4;
-        seg([cx + c * (Ra - lw(len)), cy + s * (Ra - lw(len))], [cx + c * Ra, cy + s * Ra], lw(Math.abs(d % 90) < 1e-9 ? 1.3 : mj ? 1 : 0.8), Math.abs(d % 90) < 1e-9 ? WHITE : mj ? GREY : MAJOR);
-      }
-      gl.bindBuffer(gl.ARRAY_BUFFER, compassBuf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(v), gl.STATIC_DRAW);
-      return v.length / 7;
-    }
-    let compassCount = 0;
     function drawCompass3d() {
-      // rebuilt when the part or the grid's spacing changes, or the zoom has moved the line widths on noticeably
-      const S = compassSpec(), key = bbox.mn.join(',') + '|' + bbox.mx.join(',') + '|' + S.minor + '|' + S.aMinor + '|' + S.Ra + '|' + Math.round(Math.log2(S.Rv) * 4) + '|' + Math.round(Math.log2(S.px) * 6);
-      if (compassDirty || key !== compassKey) { compassCount = buildCompass(S); compassKey = key; compassDirty = false; }
-      gl.useProgram(texProg);
-      gl.uniformMatrix4fv(gl.getUniformLocation(texProg, 'mvp'), false, new Float32Array(lastM));
-      gl.bindBuffer(gl.ARRAY_BUFFER, compassBuf);
-      const aP = gl.getAttribLocation(texProg, 'pos'), aC = gl.getAttribLocation(texProg, 'col');
-      gl.enableVertexAttribArray(aP); gl.enableVertexAttribArray(aC);
-      gl.vertexAttribPointer(aP, 3, gl.FLOAT, false, 28, 0); gl.vertexAttribPointer(aC, 4, gl.FLOAT, false, 28, 12);
+      if (!gridProg) return;
+      const S = compassSpec(), z = bbox.mn[2], { cx, cy } = S, E = S.Rv;
+      if (!gridBuf) gridBuf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, gridBuf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([cx - E, cy - E, z, cx + E, cy - E, z, cx + E, cy + E, z, cx - E, cy - E, z, cx + E, cy + E, z, cx - E, cy + E, z]), gl.DYNAMIC_DRAW);
+      gl.useProgram(gridProg);
+      const U = (n) => gl.getUniformLocation(gridProg, n);
+      gl.uniformMatrix4fv(U('mvp'), false, new Float32Array(lastM));
+      gl.uniform2f(U('C'), cx, cy); gl.uniform1f(U('minor'), S.minor); gl.uniform1f(U('major'), S.major);
+      gl.uniform1f(U('spoke'), Math.max(S.aMajor, 10)); gl.uniform1f(U('Ra'), S.Ra); gl.uniform1f(U('aMinor'), S.aMinor);
+      const aP = gl.getAttribLocation(gridProg, 'pos');
+      gl.enableVertexAttribArray(aP); gl.vertexAttribPointer(aP, 3, gl.FLOAT, false, 12, 0);
       gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);
       gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(2, 2);
-      gl.drawArrays(gl.TRIANGLES, 0, compassCount);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
       gl.disable(gl.POLYGON_OFFSET_FILL);
       gl.depthMask(true); gl.disable(gl.BLEND);
-      gl.disableVertexAttribArray(aC);
     }
+    // redraws are gathered into one per screen refresh (a burst of wheel or pointer events draws once)
+    let draw3dQueued = false;
     function draw3d() {
+      if (draw3dQueued) return;
+      draw3dQueued = true;
+      requestAnimationFrame(() => { draw3dQueued = false; draw3dNow(); });
+    }
+    function draw3dNow() {
       if (!gl) return;
       const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
       if (!w || !h) return;
@@ -4285,6 +4304,7 @@
       const nm = (p) => { const l = Math.hypot(p[0], p[1], p[2]); return [p[0] / l, p[1] / l, p[2] / l]; }, dt = (p, q) => p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
       const z = nm(sub(eye, target)), x = nm(cr([0, 0, 1], z)), y = cr(z, x);
       camBasis = { x, y, z };
+      lastCam = { eye, x, y, z, tanH, a };
       const Vm = [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, -dt(x, eye), -dt(y, eye), -dt(z, eye), 1];
       const M = new Array(16);
       for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0; for (let k = 0; k < 4; k++) s += P[k * 4 + r] * Vm[c * 4 + k]; M[c * 4 + r] = s; }
@@ -4366,7 +4386,7 @@
         if (ssao) {
           gl.bindFramebuffer(gl.FRAMEBUFFER, T.aF);
           gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, T.gT);
-          quad(aoProg, (U) => { gl.uniform1i(U('g'), 0); gl.uniform2f(U('proj'), f / a, f); gl.uniform1f(U('far'), fr); gl.uniform1f(U('dn'), nr); gl.uniform1f(U('R'), Math.max(0.04, Math.min(0.6, radius * 0.02))); });   // mm
+          quad(aoProg, (U) => { gl.uniform1i(U('g'), 0); gl.uniform2f(U('proj'), f / a, f); gl.uniform1f(U('far'), fr); gl.uniform1f(U('dn'), nr); gl.uniform1f(U('R'), Math.min(Math.max(0.04, Math.min(0.6, radius * 0.02)), 20 / Math.max(1e-9, pxPerMm()))); });   // mm
           gl.bindFramebuffer(gl.FRAMEBUFFER, T.bF);
           gl.bindTexture(gl.TEXTURE_2D, T.aT);
           quad(blurProg, (U) => { gl.uniform1i(U('t'), 0); gl.uniform2f(U('px'), 1 / CW, 1 / CH); });
@@ -4531,7 +4551,6 @@
         x.strokeStyle = '#e8590c'; x.lineWidth = 2; x.beginPath(); x.moveTo(cx, 0); x.lineTo(cx, H1); x.stroke(); x.lineWidth = 1;
         x.fillStyle = '#e8590c'; x.font = 'bold 10px sans-serif'; x.fillText(A.toFixed(1) + '°', cx + 22, H1 - 4);
       }
-      compassDirty = true;
     }
     {
       let d1 = null;
