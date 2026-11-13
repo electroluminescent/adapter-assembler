@@ -2744,7 +2744,7 @@
       // behind everything, very light: each object's colour swept in to the axis (the far side of the part, seen
       // through the middle), the innermost object on top, so the section reads as wrapping round the axis
       {
-        const wrap = sv('g', { opacity: 0.0225, 'pointer-events': 'none' }), items = [];
+        const wrap = sv('g', { opacity: 0.0675, 'pointer-events': 'none' }), items = [];
         for (const id of order) {
           const n = state.scene.nodes[id], xf = xfOf(state.scene, id);
           if (!xf.id || roleOf(state.scene, id) === 'negative') continue;
