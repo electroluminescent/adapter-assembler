@@ -3897,13 +3897,20 @@
     }
     // The compass on the ground plane, built from shapes (rings, ticks, stroke-font numbers, needle)
     // so it stays sharp at any zoom.
+    // a thin stroke font for the compass numbers (x 0…0.55, y 0…1)
+    const ell = (cx, cy, rx, ry, a0 = 0, a1 = 2 * Math.PI, n = 20) => Array.from({ length: n + 1 }, (_, k) => { const t = a0 + (a1 - a0) * k / n; return [cx + rx * Math.cos(t), cy + ry * Math.sin(t)]; });
     const FONT = {
-      '0': [[[0, 0], [0.6, 0], [0.6, 1], [0, 1], [0, 0]]], '1': [[[0.15, 0.82], [0.32, 1], [0.32, 0]]],
-      '2': [[[0, 1], [0.6, 1], [0.6, 0.5], [0, 0.5], [0, 0], [0.6, 0]]], '3': [[[0, 1], [0.6, 1], [0.6, 0], [0, 0]], [[0.08, 0.5], [0.6, 0.5]]],
-      '4': [[[0, 1], [0, 0.45], [0.6, 0.45]], [[0.48, 0.75], [0.48, 0]]], '5': [[[0.6, 1], [0, 1], [0, 0.5], [0.6, 0.5], [0.6, 0], [0, 0]]],
-      '6': [[[0.6, 1], [0, 1], [0, 0], [0.6, 0], [0.6, 0.5], [0, 0.5]]], '7': [[[0, 1], [0.6, 1], [0.22, 0]]],
-      '8': [[[0, 0], [0.6, 0], [0.6, 1], [0, 1], [0, 0]], [[0, 0.5], [0.6, 0.5]]], '9': [[[0.6, 0.5], [0, 0.5], [0, 1], [0.6, 1], [0.6, 0], [0, 0]]],
-      '°': [[[0, 1], [0.26, 1], [0.26, 0.74], [0, 0.74], [0, 1]]], '.': [[[0.04, 0], [0.04, 0.08]]],
+      '0': [ell(0.275, 0.5, 0.265, 0.5)],
+      '1': [[[0.1, 0.78], [0.3, 1], [0.3, 0]]],
+      '2': [[...ell(0.27, 0.73, 0.26, 0.27, Math.PI * 0.95, -Math.PI * 0.18, 12), [0, 0], [0.55, 0]]],
+      '3': [ell(0.26, 0.76, 0.24, 0.24, Math.PI * 0.85, -Math.PI / 2, 12), ell(0.26, 0.26, 0.27, 0.26, Math.PI / 2, -Math.PI * 0.85, 12)],
+      '4': [[[0.42, 0], [0.42, 1], [0, 0.3], [0.55, 0.3]]],
+      '5': [[[0.5, 1], [0.08, 1], [0.04, 0.55], ...ell(0.26, 0.31, 0.28, 0.31, Math.PI * 0.72, -Math.PI * 0.85, 14)]],
+      '6': [[...ell(0.28, 0.55, 0.27, 0.45, Math.PI * 0.28, Math.PI, 8).slice(0, -1), ...ell(0.275, 0.28, 0.265, 0.28, Math.PI, 3 * Math.PI, 16)]],
+      '7': [[[0, 1], [0.55, 1], [0.18, 0]]],
+      '8': [ell(0.275, 0.76, 0.22, 0.24), ell(0.275, 0.26, 0.265, 0.26)],
+      '9': [[...ell(0.27, 0.45, 0.27, 0.45, -Math.PI * 0.72, 0, 8).slice(0, -1), ...ell(0.275, 0.72, 0.265, 0.28, 0, 2 * Math.PI, 16)]],
+      '°': [ell(0.12, 0.86, 0.1, 0.12, 0, 2 * Math.PI, 10)], '.': [[[0.06, 0], [0.06, 0.07]]],
     };
     let compassKey = '';
     const niceStep = (x) => { const e = Math.pow(10, Math.floor(Math.log10(x))), m = x / e; return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * e; };
@@ -3947,17 +3954,17 @@
         seg([cx + c * r0, cy + s * r0], [cx + c * R * 0.985, cy + s * R * 0.985], lw(q ? 1.3 : mj ? 1 : 0.7), q ? MAJOR : mj ? [MAJOR[0], MAJOR[1], MAJOR[2], 0.38] : MINOR);
       }
       // the rim, with minor / major degree ticks
-      ring(R, lw(2), GREY);
+      ring(R, lw(1.2), GREY);
       const tMajor = tick < 5 ? 10 : tick < 10 ? 30 : 30;
       for (let d = 0; d < 360; d += tick) {
         const t = d * Math.PI / 180, mj = d % tMajor === 0, mid = !mj && d % (tick * 5) === 0 && tick < 5, c = Math.cos(t), s = Math.sin(t);
-        const len = mj ? 12 : mid ? 8 : 5;
-        seg([cx + c * (R - lw(len)), cy + s * (R - lw(len))], [cx + c * R, cy + s * R], lw(mj ? 1.6 : 1), d % 90 === 0 ? WHITE : GREY);
+        const len = mj ? 8 : mid ? 6 : 4;
+        seg([cx + c * (R - lw(len)), cy + s * (R - lw(len))], [cx + c * R, cy + s * R], lw(d % 90 === 0 ? 1.3 : mj ? 1 : 0.8), d % 90 === 0 ? WHITE : mj ? GREY : MAJOR);
       }
       // numbers: degrees round the rim, radii along the 0° spoke
       const text = (txt, ox, oy, up, rt, hgt, col) => {
-        const adv = (ch) => (ch === '°' ? 0.3 : ch === '.' ? 0.1 : 0.6) + 0.25, sw = hgt * 0.13;
-        const width = [...txt].reduce((s, ch) => s + adv(ch), -0.25) * hgt;
+        const adv = (ch) => (ch === '°' ? 0.25 : ch === '.' ? 0.12 : ch === '1' ? 0.42 : 0.55) + 0.18, sw = Math.min(hgt * 0.1, lw(1.1));
+        const width = [...txt].reduce((s, ch) => s + adv(ch), -0.18) * hgt;
         let pen = -width / 2;
         for (const ch of txt) {
           for (const line of FONT[ch] || []) for (let i = 0; i + 1 < line.length; i++) {
@@ -3967,14 +3974,14 @@
           pen += adv(ch) * hgt;
         }
       };
-      const hgt = Math.min(R * 0.07, lw(16)), lblStep = arc10 => arc10 >= 70 ? 10 : 30;
+      const hgt = Math.min(R * 0.05, lw(9)), lblStep = arc10 => arc10 >= 60 ? 10 : 30;   // angle and radius numbers: the same small size
       const every = lblStep(R * 10 * Math.PI / 180 * px);
       for (let d = 0; d < 360; d += every) {
-        const t = d * Math.PI / 180, rr = R - lw(14) - hgt * 0.6;
-        text(d + '°', cx + Math.cos(t) * rr, cy + Math.sin(t) * rr, [-Math.cos(t), -Math.sin(t)], [-Math.sin(t), Math.cos(t)], hgt, d % 30 === 0 ? WHITE : GREY);
+        const t = d * Math.PI / 180, rr = R - lw(11) - hgt * 0.6;
+        text(d + '°', cx + Math.cos(t) * rr, cy + Math.sin(t) * rr, [-Math.cos(t), -Math.sin(t)], [-Math.sin(t), Math.cos(t)], hgt, d % 90 === 0 ? WHITE : GREY);
       }
-      const fmtR = (r) => String(+r.toFixed(3)), hr = Math.min(hgt * 0.75, lw(12));
-      for (let r = major; r < R * 0.9; r += major) text(fmtR(r), cx + r, cy - hr * 0.9, [0, 1], [1, 0], hr, [MAJOR[0], MAJOR[1], MAJOR[2], 0.8]);
+      const fmtR = (r) => String(+r.toFixed(3)), hr = hgt;
+      for (let r = major; r < R - lw(14) - hgt * 2.5; r += major) text(fmtR(r), cx + r, cy - hr * 0.9, [0, 1], [1, 0], hr, [MAJOR[0], MAJOR[1], MAJOR[2], 0.8]);
       gl.bindBuffer(gl.ARRAY_BUFFER, compassBuf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(v), gl.STATIC_DRAW);
       return v.length / 7;
     }
