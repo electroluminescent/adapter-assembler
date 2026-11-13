@@ -64,6 +64,7 @@
   // always on: true helical threads, and welding / T-junction repair of the exported mesh
   state.helical = true; state.optimize = true;
   if (!['ngons', 'quads', 'tris'].includes(state.faces)) state.faces = 'ngons';
+  state.precision = Math.max(8, Math.min(300, Math.round(+state.precision) || 100));   // circle precision: 8…300 edges
   state.sidePanels = state.sidePanels && typeof state.sidePanels === 'object' ? state.sidePanels : {};
   function saveSettings() {
     try { const o = {}; for (const k of SAVED_SETTINGS) o[k] = state[k]; localStorage.setItem(SETTINGS_KEY, JSON.stringify(o)); } catch (_) { /* ignore */ }
@@ -753,7 +754,7 @@
       if (q.taperTop) pts.push({ y: rOut, z: z1 - dz }, { y: rWall, z: z1 }, { y: rWall, z: z1 + e }); else pts.push({ y: rOut, z: z1 + e });
       pts.push({ y: 0, z: z1 + e });
     }
-    return revolve(expandProfile(pts.map(p => ({ y: p.y, z: p.z, bevel: null })), []), { segments: node.precision > 2 ? node.precision : settings.precision });
+    return revolve(expandProfile(pts.map(p => ({ y: p.y, z: p.z, bevel: null })), []), { segments: Math.min(300, node.precision > 2 ? node.precision : settings.precision) });
   }
 
   // Outline of a thread object: a ring with an ISO-style (or plain V) thread on its outside
@@ -781,14 +782,14 @@
   // Mesh for one leaf node of the scene.
   function nodeMesh(node, settings) {
     if (node.type === 'source' || node.type === 'thread') {
-      return revolve(expandProfile(node.pts, node.runs), { segments: node.precision > 2 ? node.precision : settings.precision, helical: settings.helical });
+      return revolve(expandProfile(node.pts, node.runs), { segments: Math.min(300, node.precision > 2 ? node.precision : settings.precision), helical: settings.helical });
     }
     const items = expandProfile(node.pts, []);
     if (node.type === 'ngon') {
       const n = Math.max(3, node.params.sides | 0);
       return revolve(items, { segments: n, scale: node.params.about === 'faces' ? 1 / Math.cos(Math.PI / n) : 1, phase: (node.params.rotation || 0) * Math.PI / 180 });
     }
-    return revolve(items, { segments: node.precision > 2 ? node.precision : settings.precision });
+    return revolve(items, { segments: Math.min(300, node.precision > 2 ? node.precision : settings.precision) });
   }
 
   // Evaluate the scene (worker). Booleans, holes and several objects need the
@@ -2092,7 +2093,7 @@
     return el('div', null,
       checkRow('Flip upside down', () => state.flip, v => set('flip', v)),
       el('div', null,
-        numRow('Circle precision (edges)', state.precision, v => set('precision', Math.max(8, Math.min(2000, Math.round(v)))), { step: '1', min: 8, max: 2000, digits: 0, width: 64, noLive: true }),
+        numRow('Circle precision (edges)', state.precision, v => set('precision', Math.max(8, Math.min(300, Math.round(v)))), { step: '1', min: 8, max: 300, digits: 0, width: 64 }),
         selectRow('Faces', state.faces, [['ngons', 'N-gons'], ['quads', 'Quads'], ['tris', 'Triangles']], v => set('faces', v)),
         selectRow('Format', state.format, [['stl', 'STL'], ['obj', 'OBJ']], v => set('format', v))),
       state.faces !== 'tris' && state.format === 'stl' ? el('div', { style: 'color:#666;font-size:11px' }, 'STL files only hold triangles; ' + (state.faces === 'ngons' ? 'n-gons' : 'quads') + ' apply to OBJ export and the wireframe.') : null);
@@ -2145,8 +2146,10 @@
       el('span', { style: 'color:#666;font-size:12px' }, 'Click points, edges or objects (Shift/Ctrl adds); drag a box to select points. Drag to move — hold Ctrl to snap (points, midpoints, grid), Shift to lock a direction. Drag a bevel (yellow) to resize it. Right-click for more. Middle/right-drag pans, scroll zooms, double-click fits.'));
 
     // left: cross-section
-    const svg = sv('svg', { style: 'width:100%;height:100%;display:block;touch-action:none;background:#fbfbfc;user-select:none;-webkit-user-select:none' });
-    const left = el('div', { style: 'flex:0 0 ' + state.paneLeft + '%;position:relative;min-width:0' }, svg);
+    const svg = sv('svg', { style: 'position:relative;width:100%;height:100%;display:block;touch-action:none;background:transparent;user-select:none;-webkit-user-select:none' });
+    // the inside of the part seen through the middle, painted behind the cross-section
+    const wrapCanvas = el('canvas', { style: 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none' });
+    const left = el('div', { style: 'flex:0 0 ' + state.paneLeft + '%;position:relative;min-width:0;background:#fbfbfc' }, wrapCanvas, svg);
     const coord = el('div', { style: 'position:absolute;right:30px;top:6px;font-size:11px;color:#555;background:rgba(255,255,255,.9);padding:2px 6px;border-radius:3px;pointer-events:none' });
     const legend = el('div', { style: 'position:absolute;left:70px;top:6px;font-size:11px;color:#555;background:rgba(255,255,255,.9);padding:3px 6px;border-radius:3px;pointer-events:none;line-height:1.5' });
     legend.innerHTML = 'Cross-section: x = radius / diameter →, y = height (offset from the lowest point) ↑, in ' + UNIT_LABEL + '<br>' +
@@ -2736,76 +2739,12 @@
       const g = sv('g'); svg.append(g);
       sceneBase = drag && drag.base != null ? drag.base : zBase();
       const MS0 = MS; MS = 1;
+      drawWrap();
       grid(g, sceneBase);
       // selected objects are drawn last (on top), so their points and edges can be picked over others
       const order = frontOrder(), ext = { y0: Infinity, y1: -Infinity, z0: Infinity, z1: -Infinity };
       for (const sideK of [-1, 1]) {
       MS = sideK;
-      // behind everything, very light: at each height, the colour of whatever is nearest the axis there, swept in
-      // to the axis (the far side of the part, seen through the middle), so the section reads as wrapping round it.
-      // Redrawn with the section, so it follows every edit and view turn as it happens.
-      {
-        const wrap = sv('g', { opacity: 0.0675, 'pointer-events': 'none' }), items = [];
-        for (const id of order) {
-          const n = state.scene.nodes[id], xf = xfOf(state.scene, id);
-          if (!xf.id || roleOf(state.scene, id) === 'negative') continue;
-          const poly = sectionOutline(n, viewTheta());
-          if (poly.length < 3) continue;
-          // the inner edge as a profile: at each corner height, the inner radius just below and just above it
-          const N = poly.length, zs = [...new Set(poly.map(p => p.z))].sort((a, b) => a - b), span = (zs[zs.length - 1] - zs[0]) || 1, e = span * 1e-7;
-          const innerAt = (z) => {
-            let yin = Infinity;
-            for (let i = 0; i < N; i++) {
-              const A = poly[i], B = poly[(i + 1) % N];
-              if ((A.z - z) * (B.z - z) > 0 || A.z === B.z) continue;
-              const y = A.y + (B.y - A.y) * (z - A.z) / (B.z - A.z);
-              if (y < yin) yin = y;
-            }
-            return yin;
-          };
-          const prof = zs.map(z => ({ z, dn: innerAt(z - e), up: innerAt(z + e) }));
-          items.push({ col: COLORS[n.type] || '#1f6feb', prof });
-        }
-        // the inner radius of an item at height z, inside one of its own spans (Infinity where it is not)
-        const yIn = (it, z) => {
-          const P = it.prof;
-          if (z <= P[0].z || z >= P[P.length - 1].z) return Infinity;
-          let lo = 0, hi = P.length - 1;
-          while (hi - lo > 1) { const m = (lo + hi) >> 1; if (P[m].z <= z) lo = m; else hi = m; }
-          const a = P[lo], b = P[hi], t = (z - a.z) / (b.z - a.z);
-          return a.up + (b.dn - a.up) * t;
-        };
-        const yAt = (it, z, zm) => {     // at a slab's end, along the span that holds the slab's middle
-          const P = it.prof; let lo = 0, hi = P.length - 1;
-          while (hi - lo > 1) { const m = (lo + hi) >> 1; if (P[m].z <= zm) lo = m; else hi = m; }
-          const a = P[lo], b = P[hi]; return a.up + (b.dn - a.up) * (z - a.z) / (b.z - a.z);
-        };
-        const cuts = [...new Set(items.flatMap(it => it.prof.map(p => p.z)))].sort((a, b) => a - b);
-        let run = null;
-        const paths = new Map();          // one path per colour, so touching pieces show no seams
-        const flush = () => {
-          if (!run) return;
-          const pts = [toScreen(0, run.z0), ...run.pts.map(p => toScreen(p.y, p.z)), toScreen(0, run.z1)];
-          paths.set(run.it.col, (paths.get(run.it.col) || '') + 'M' + pts.map(p => p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join('L') + 'Z');
-          run = null;
-        };
-        for (let k = 0; k + 1 < cuts.length; k++) {
-          const a = cuts[k], b = cuts[k + 1], zm = (a + b) / 2;
-          if (b - a < 1e-12) continue;
-          let best = null, by = Infinity;
-          for (const it of items) { const y = yIn(it, zm); if (y < by) { by = y; best = it; } }
-          // a tie (e.g. a thread's root on its ring's wall): keep the colour already running, so there are no stripes
-          if (run && best !== run.it && Math.abs(yIn(run.it, zm) - by) < 1e-7) best = run.it;
-          if (!best || !isFinite(by)) { flush(); continue; }
-          const ya = yAt(best, a, zm), yb = yAt(best, b, zm);
-          if (run && (run.it !== best || Math.abs(run.pts[run.pts.length - 1].y - ya) > 1e-9 || Math.abs(run.z1 - a) > 1e-12)) flush();
-          if (!run) run = { it: best, z0: a, z1: b, pts: [{ y: ya, z: a }, { y: yb, z: b }] };
-          else { run.pts.push({ y: yb, z: b }); run.z1 = b; }
-        }
-        flush();
-        for (const [col, d] of paths) wrap.append(sv('path', { d, fill: col }));
-        g.append(wrap);
-      }
       for (const id of order) {
         // the section at the view angle (copies in radial cloners are shown as their first copy)
         const n = state.scene.nodes[id], xf = xfOf(state.scene, id), local = outlineOf(n.pts, n.runs), poly = xf.id ? sectionOutline(n, viewTheta()) : taperClip(n, local).map(xf.fwd), role = roleOf(state.scene, id);
@@ -2973,6 +2912,106 @@
       syncThreadBoxes();
       renderSelBox();
       MS = MS0;
+    }
+    // The far inside of the part, seen through the middle behind the cut, very lightly in the colour of whatever is
+    // nearest the axis. A screen point at distance x from the axis sees the inside wall where it turns away from the
+    // cut by α = acos(x / r): so the shading is built in layers of α (even steps of x / r), each layer being the inner
+    // edge of the section at that angle (threads' teeth shift with it, n-sided walls move), squeezed toward the axis
+    // by cos α. Strongest beside the part, fading off hyperbolically toward the axis. Redrawn with every edit and turn.
+    function innerRuns(polys) {
+      // per height: the colour nearest the axis and its inner radius, as runs of { col, pts: [{y, z}], z0, z1 }
+      const items = [];
+      for (const { col, poly } of polys) {
+        const N = poly.length, zs = [...new Set(poly.map(p => p.z))].sort((a, b) => a - b);
+        if (zs.length < 2) continue;
+        const e = ((zs[zs.length - 1] - zs[0]) || 1) * 1e-7, dn = zs.map(() => Infinity), up = zs.map(() => Infinity);
+        const lb = (z) => { let lo = 0, hi = zs.length; while (lo < hi) { const m = (lo + hi) >> 1; if (zs[m] < z) lo = m + 1; else hi = m; } return lo; };
+        for (let i = 0; i < N; i++) {
+          const A = poly[i], B = poly[(i + 1) % N];
+          if (A.z === B.z) continue;
+          const z0 = Math.min(A.z, B.z), z1 = Math.max(A.z, B.z), at = (z) => A.y + (B.y - A.y) * (z - A.z) / (B.z - A.z);
+          for (let k = lb(z0); k < zs.length && zs[k] <= z1; k++) {
+            if (zs[k] > z0) { const y = at(zs[k] - e); if (y < dn[k]) dn[k] = y; }
+            if (zs[k] < z1) { const y = at(zs[k] + e); if (y < up[k]) up[k] = y; }
+          }
+        }
+        items.push({ col, prof: zs.map((z, k) => ({ z, dn: dn[k], up: up[k] })) });
+      }
+      const span = (it, zm) => { const P = it.prof; if (zm <= P[0].z || zm >= P[P.length - 1].z) return -1; let lo = 0, hi = P.length - 1; while (hi - lo > 1) { const m = (lo + hi) >> 1; if (P[m].z <= zm) lo = m; else hi = m; } return lo; };
+      const yOn = (it, s, z) => { const a = it.prof[s], b = it.prof[s + 1]; return a.up + (b.dn - a.up) * (z - a.z) / (b.z - a.z); };
+      const cuts = [...new Set(items.flatMap(it => it.prof.map(p => p.z)))].sort((a, b) => a - b), runs = [];
+      let run = null;
+      for (let k = 0; k + 1 < cuts.length; k++) {
+        const a = cuts[k], b = cuts[k + 1], zm = (a + b) / 2;
+        if (b - a < 1e-12) continue;
+        let best = null, bs = -1, by = Infinity;
+        for (const it of items) { const s = span(it, zm); if (s < 0) continue; const y = yOn(it, s, zm); if (y < by) { by = y; best = it; bs = s; } }
+        // a tie (a thread's root on its ring's wall): keep the colour already running, so there are no stripes
+        if (run && best && best !== run.it) { const s = span(run.it, zm); if (s >= 0 && Math.abs(yOn(run.it, s, zm) - by) < 1e-7) { best = run.it; bs = s; } }
+        if (!best || !isFinite(by)) { run = null; continue; }
+        const ya = yOn(best, bs, a), yb = yOn(best, bs, b);
+        if (!run || run.it !== best || Math.abs(run.pts[run.pts.length - 1].y - ya) > 1e-9 || Math.abs(run.z1 - a) > 1e-12) { run = { it: best, col: best.col, z0: a, z1: b, pts: [{ y: ya, z: a }, { y: yb, z: b }] }; runs.push(run); }
+        else { run.pts.push({ y: yb, z: b }); run.z1 = b; }
+      }
+      return runs;
+    }
+    function drawWrap() {
+      // drawn at one canvas pixel per screen pixel (a soft shading needs no more), then the opacity is worked out per
+      // pixel from how far it is from the part toward the axis, with ordered dithering so the faint gradient has no bands
+      const ctx = wrapCanvas.getContext('2d', { willReadFrequently: true }), { w, h } = size(), W = Math.max(1, Math.round(w)), H = Math.max(1, Math.round(h));
+      if (wrapCanvas.width !== W || wrapCanvas.height !== H) { wrapCanvas.width = W; wrapCanvas.height = H; }
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalCompositeOperation = 'source-over'; ctx.clearRect(0, 0, W, H);
+      if (!state.scene || !view) return;
+      const objs = [];
+      for (const id of leafOrder(state.scene)) {
+        const n = state.scene.nodes[id], xf = xfOf(state.scene, id);
+        if (!xf.id || roleOf(state.scene, id) === 'negative') continue;
+        objs.push({ n, col: COLORS[n.type] || '#1f6feb', turns: n.type === 'ngon' || (n.runs || []).some(r => r.hand) });
+      }
+      if (!objs.length) return;
+      const K = 24, MSw = MS, theta = state.viewAngle * Math.PI / 180;
+      // per side: the inner radius at the cut for each pixel row (to measure the fade), and the colour layers
+      const wall = { 1: new Float32Array(H).fill(NaN), '-1': new Float32Array(H).fill(NaN) };
+      for (const s of [1, -1]) {
+        MS = s;
+        const still = new Map();
+        for (let k = 0; k < K; k++) {
+          const u = 1 - k / K, alpha = Math.acos(u), az = s > 0 ? theta + alpha : theta + Math.PI - alpha;
+          const polys = objs.map(o => {
+            if (!o.turns) { if (!still.has(o)) still.set(o, sectionOutline(o.n, az)); return { col: o.col, poly: still.get(o) }; }
+            return { col: o.col, poly: sectionOutline(o.n, az) };
+          }).filter(p => p.poly.length >= 3);
+          const runs = innerRuns(polys);
+          if (k === 0) for (const run of runs) for (let q = 0; q + 1 < run.pts.length; q++) {
+            const A = run.pts[q], B = run.pts[q + 1], ya = toScreen(0, A.z)[1], yb = toScreen(0, B.z)[1];
+            for (let row = Math.max(0, Math.ceil(Math.min(ya, yb))); row <= Math.min(H - 1, Math.floor(Math.max(ya, yb))); row++) {
+              const t = yb === ya ? 0 : (row - ya) / (yb - ya), r = A.y + (B.y - A.y) * t, cur = wall[s][row];
+              if (!(cur <= r)) wall[s][row] = r;
+            }
+          }
+          for (const run of runs) {
+            const pts = [toScreen(0, run.z0), ...run.pts.map(p => toScreen(p.y * u, p.z)), toScreen(0, run.z1)];
+            ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath();
+            ctx.fillStyle = run.col; ctx.fill();       // opaque: nearer the axis (further round the inside) covers what is under it
+          }
+        }
+      }
+      MS = MSw;
+      // opacity per pixel: 1.05× the base beside the part, falling off hyperbolically to 0.25× at the axis
+      const BASE = 0.0675, c = 4, h0 = 1 / (1 + c), axisX = w / 2 - view.cy * view.s;
+      const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+      const img = ctx.getImageData(0, 0, W, H), D = img.data;
+      for (let row = 0; row < H; row++) {
+        const rR = wall[1][row], rL = wall[-1][row];
+        for (let col = 0, o = row * W * 4; col < W; col++, o += 4) {
+          const a0 = D[o + 3]; if (!a0) continue;
+          const X = (col + 0.5 - axisX) / view.s, r = X >= 0 ? rR : rL;
+          const uu = r > 0 ? Math.min(1, Math.abs(X) / r) : 1, t = 1 - uu, hy = (1 / (1 + c * t) - h0) / (1 - h0);
+          const a = BASE * (0.25 + 0.8 * hy) * (a0 / 255) * 255 + (BAYER[(col & 3) + (row & 3) * 4] + 0.5) / 16 - 0.5;
+          D[o + 3] = a < 0 ? 0 : a > 255 ? 255 : Math.round(a);
+        }
+      }
+      ctx.putImageData(img, 0, 0);
     }
     // the model's smallest and largest radius (both sides) and its lowest and highest point, in bold on the axes
     function boldExtents(g, ext) {
@@ -3637,8 +3676,8 @@
       const note = (t) => ({ wide: el('div', { style: 'color:#666;font-size:11px' }, t) });
       // circle precision for this object (blank = the export setting)
       const precisionField = () => ['Circle precision (edges)', numInput(() => n.precision || '', v => {
-        pushUndo(); n.precision = v == null ? null : Math.max(3, Math.min(2000, Math.round(v))); markEdited(); recalc();
-      }, { step: '1', min: 3, max: 2000, digits: 0, width: 96, allowEmpty: true, noLive: true, placeholder: 'default ' + state.precision, title: 'Edges around a full circle for this object; leave blank to use the export setting' })];
+        pushUndo(); n.precision = v == null ? null : Math.max(3, Math.min(300, Math.round(v))); markEdited(); recalc();
+      }, { step: '1', min: 3, max: 300, digits: 0, width: 96, allowEmpty: true, placeholder: 'default ' + state.precision, title: 'Edges around a full circle for this object; leave blank to use the export setting' })];
       const handNote = () => n.custom ? { wide: el('div', { style: 'color:#9a6700;margin-top:2px' }, 'Outline edited by hand — parameter changes are applied on top of your edits. ',
         el('button', { type: 'button', style: BTN2, onclick: () => { pushUndo(); regenNode(n); markEdited(); recalc(); } }, 'Regenerate from parameters')) } : null;
 
