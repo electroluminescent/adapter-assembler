@@ -1,12 +1,13 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.3.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.4.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
-  // Model files are in inches; most slicers read STL as millimetres.
-  const UNIT_SCALE = 25.4;          // set to 1 to keep inches
-  const UNIT_LABEL = UNIT_SCALE === 1 ? 'in' : 'mm';
+  // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
+  const MM = 25.4;
+  // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
+  let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
   // Points within this distance of each other (in inches, the model's units) are
   // welded into one when "Optimize" is on: 0.00001 in = 0.000254 mm.
   const WELD_TOLERANCE_IN = 0.00001;
@@ -26,6 +27,8 @@
     cut: true,             // 3D view: cut away half
     wire: false,           // 3D view: wireframe
     ssao: true,            // 3D view: ambient occlusion
+    lenUnit: 'mm',         // displayed lengths: 'mm' or 'in'
+    angUnit: 'deg',        // displayed angles: 'deg' or 'rad'
     ortho: false,          // 3D view: orthographic (true) or perspective projection
     flip: false,           // turn the part upside down (export and 3D view)
     paneLeft: 40,          // editor layout: cross-section width (% of the editor)
@@ -56,7 +59,7 @@
 
 
   // Settings remembered in this browser.
-  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'cut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts'];
+  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'cut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts'];
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     for (const k of SAVED_SETTINGS) if (k in saved && typeof saved[k] === typeof state[k]) state[k] = saved[k];
@@ -65,6 +68,13 @@
   state.helical = true; state.optimize = true;
   if (!['ngons', 'quads', 'tris'].includes(state.faces)) state.faces = 'ngons';
   state.precision = Math.max(8, Math.min(300, Math.round(+state.precision) || 100));   // circle precision: 8…300 edges
+  function applyUnits() {
+    if (state.lenUnit !== 'in') state.lenUnit = 'mm';
+    if (state.angUnit !== 'rad') state.angUnit = 'deg';
+    UNIT_SCALE = state.lenUnit === 'in' ? 1 : MM; UNIT_LABEL = state.lenUnit;
+    ANG_SCALE = state.angUnit === 'rad' ? Math.PI / 180 : 1; ANG_LABEL = state.angUnit === 'rad' ? ' rad' : '°';
+  }
+  applyUnits();
   state.sidePanels = state.sidePanels && typeof state.sidePanels === 'object' ? state.sidePanels : {};
   function saveSettings() {
     try { const o = {}; for (const k of SAVED_SETTINGS) o[k] = state[k]; localStorage.setItem(SETTINGS_KEY, JSON.stringify(o)); } catch (_) { /* ignore */ }
@@ -929,7 +939,7 @@
 
   function haveInput() { return !!(state.scene && state.scene.root.length); }
   function jobOpts(fast) {
-    return { flip: state.flip, optimize: fast ? false : state.optimize, unitScale: UNIT_SCALE, unitLabel: UNIT_LABEL, tolerance: WELD_TOLERANCE_IN * UNIT_SCALE, format: state.format, faces: state.faces };
+    return { flip: state.flip, optimize: fast ? false : state.optimize, unitScale: MM, unitLabel: 'mm', tolerance: WELD_TOLERANCE_IN * MM, format: state.format, faces: state.faces };
   }
   function jobSettings() { return { precision: state.precision, helical: state.helical, manifoldUrl: W.__aaManifoldUrl || MANIFOLD_URL }; }
 
@@ -998,7 +1008,7 @@
   // ---- Adapter assembler: thread A at the bottom, thread B at the top, joined by a transition ----
   // spec: { a: {male, d, pitch, len}, b: {...}, length, wall, steep, angle } (mm); returns { scene, notes }.
   function buildAdapter(spec) {
-    const U = 1 / UNIT_SCALE, notes = [], H = spec.length, wall = Math.max(0.4, spec.wall || 2.5);
+    const U = 1 / MM, notes = [], H = spec.length, wall = Math.max(0.4, spec.wall || 2.5);
     const side = (s) => {
       const depth = ISO_DEPTH * s.pitch, rRoot = s.male ? s.d / 2 - depth : s.d / 2;
       return { ...s, depth, rRoot,
@@ -1202,8 +1212,8 @@
   const singleSel = () => state.selNodes.size === 1 ? state.scene.nodes[[...state.selNodes][0]] : null;
 
   function defaultParams(view) {
-    const cy = view ? view.cy : 1, cz = view ? view.cz : 0, w = 3 / UNIT_SCALE;
-    return { z: cz - 2.5 / UNIT_SCALE, h: 5 / UNIT_SCALE, rib: Math.max(0, cy - w), rit: Math.max(0, cy - w), rob: cy + w, rot: cy + w,
+    const cy = view ? view.cy : 1, cz = view ? view.cz : 0, w = 3 / MM;
+    return { z: cz - 2.5 / MM, h: 5 / MM, rib: Math.max(0, cy - w), rit: Math.max(0, cy - w), rob: cy + w, rot: cy + w,
       linkIn: true, linkOut: true, bevel: 0, bevelOut: true, bevelSegs: 4, sides: 6, about: 'faces', rotation: 0 };
   }
   // Where a new object goes: into the single selected group, or the selected boolean's empty slot.
@@ -1287,8 +1297,8 @@
     typeof p === 'string' ? [k, label, d * 25.4, 25.4 / parseFloat(p), g] : [k, label, d, p, g]));
   const ISO_DEPTH = 5 * Math.sqrt(3) / 16, V_DEPTH = Math.sqrt(3) / 2;   // × pitch: ISO basic profile (5H/8), sharp 60° V (H)
   function threadDefaults(view) {
-    const pr = THREAD_PRESETS.find(p => p[0] === 'M48x0.75'), P = pr[3] / UNIT_SCALE;
-    return { preset: pr[0], kind: 'external', profile: 'iso', d: pr[2] / UNIT_SCALE, pitch: P, depth: ISO_DEPTH * P, turns: 8, backing: 1,
+    const pr = THREAD_PRESETS.find(p => p[0] === 'M48x0.75'), P = pr[3] / MM;
+    return { preset: pr[0], kind: 'external', profile: 'iso', d: pr[2] / MM, pitch: P, depth: ISO_DEPTH * P, turns: 8, backing: 1,
       z: view ? view.cz : 0, hand: 1, clearance: 0, taperTop: true, taperBottom: true };
   }
   // ---- Parametric objects (circle, n-sided, thread) ----
@@ -1357,7 +1367,7 @@
       if (!keep.every(i => near(g.pts[i].y, P[i].y) && near(g.pts[i].z, P[i].z))) return null;
       if (!RUN_POS.every(k => near(gr[k], r[k])) || !near(gr.flatA, r.flatA || 0) || !near(gr.flatB, r.flatB || 0)) return null;
       const pr = THREAD_PRESETS.find(p => p[0] === f.preset);
-      if (pr && !(near(pr[2] / UNIT_SCALE, f.d) && near(pr[3] / UNIT_SCALE, f.pitch))) f.preset = '';
+      if (pr && !(near(pr[2] / MM, f.d) && near(pr[3] / MM, f.pitch))) f.preset = '';
       return f;
     }
     if (P.length !== 4 || !near(P[0].z, P[1].z) || !near(P[2].z, P[3].z) || P[2].z - P[0].z <= 1e-9) return null;
@@ -2090,7 +2100,12 @@
 
   function settingsBlock() {
     const set = (k, v) => { state[k] = v; saveSettings(); recalc(); };
+    // units: everything shown and typed follows them (files stay in millimetres)
+    const setUnit = (k, v) => { state[k] = v; applyUnits(); saveSettings(); remountEditor(); };
     return el('div', null,
+      el('div', null,
+        selectRow('Lengths', state.lenUnit, [['mm', 'metric (mm)'], ['in', 'imperial (in)']], v => setUnit('lenUnit', v)),
+        selectRow('Angles', state.angUnit, [['deg', 'degrees (°)'], ['rad', 'radians']], v => setUnit('angUnit', v))),
       checkRow('Flip upside down', () => state.flip, v => set('flip', v)),
       el('div', null,
         numRow('Circle precision (edges)', state.precision, v => set('precision', Math.max(8, Math.min(300, Math.round(v)))), { step: '1', min: 8, max: 300, digits: 0, width: 64 }),
@@ -2106,7 +2121,7 @@
     if (state.busy || !r) return { text: 'Updating…', color: '#444', ready: false };
     if (r.error) return { text: 'Error: ' + r.error.split('\n')[0], color: '#b42318', ready: false };
     const rep = r.report;
-    const dims = rep.size[0].toFixed(1) + ' × ' + rep.size[1].toFixed(1) + ' ' + UNIT_LABEL;
+    const k = UNIT_SCALE / MM, dg = UNIT_SCALE === MM ? 1 : 3, dims = (rep.size[0] * k).toFixed(dg) + ' × ' + (rep.size[1] * k).toFixed(dg) + ' ' + UNIT_LABEL;
     const fixes = [];
     if (rep.optimize && rep.weldedPoints) fixes.push(rep.weldedPoints.toLocaleString() + ' overlapping points welded');
     if (rep.optimize && rep.tjunctionsFixed) fixes.push(rep.tjunctionsFixed.toLocaleString() + ' T-junctions split');
@@ -2136,6 +2151,13 @@
     editor = createEditor(container);
     window.dispatchEvent(new Event('resize'));
     renderAll();
+  }
+  // rebuild the editor in place (after a change of units): labels, boxes and fields all redrawn
+  function remountEditor() {
+    if (!editor) return;
+    const host = editor.root.parentElement;
+    if (host) mountEditor(host);
+    recalc();
   }
 
   function createEditor(container) {
@@ -2336,16 +2358,17 @@
       const g = selectInput(init.male ? 'male' : 'female', [['male', 'male (external)'], ['female', 'female (internal)']], () => {});
       const std = el('select', { style: 'font-size:12px;max-width:260px' }, el('option', { value: '' }, 'custom'),
         ...THREAD_GROUPS.map(([gr, list]) => el('optgroup', { label: gr }, ...list.map(([k, label]) => el('option', { value: k }, label)))));
-      const dIn = el('input', { type: 'number', step: '0.1', min: '0.5', value: String(init.d), style: 'width:80px' });
-      const pIn = el('input', { type: 'number', step: '0.05', min: '0.1', value: String(init.pitch), style: 'width:80px' });
+      const k = MM / UNIT_SCALE, show = (mmv) => String(+(mmv / k).toFixed(UNIT_SCALE === MM ? 4 : 5));   // mm per shown unit
+      const dIn = el('input', { type: 'number', step: UNIT_SCALE === MM ? '0.1' : '0.005', min: '0', value: show(init.d), style: 'width:80px' });
+      const pIn = el('input', { type: 'number', step: UNIT_SCALE === MM ? '0.05' : '0.001', min: '0', value: show(init.pitch), style: 'width:80px' });
       const lIn = el('input', { type: 'number', step: '0.5', min: '0', placeholder: 'auto', style: 'width:80px' });
       const pr0 = THREAD_PRESETS.find(p => Math.abs(p[2] - init.d) < 1e-6 && Math.abs(p[3] - init.pitch) < 1e-6); std.value = pr0 ? pr0[0] : '';
-      std.addEventListener('change', () => { const p = THREAD_PRESETS.find(x => x[0] === std.value); if (p) { dIn.value = +p[2].toFixed(4); pIn.value = +p[3].toFixed(4); } });
-      const custom = () => { std.value = THREAD_PRESETS.find(p => Math.abs(p[2] - +dIn.value) < 1e-3 && Math.abs(p[3] - +pIn.value) < 1e-4) ? THREAD_PRESETS.find(p => Math.abs(p[2] - +dIn.value) < 1e-3 && Math.abs(p[3] - +pIn.value) < 1e-4)[0] : ''; };
+      std.addEventListener('change', () => { const p = THREAD_PRESETS.find(x => x[0] === std.value); if (p) { dIn.value = show(p[2]); pIn.value = show(p[3]); } });
+      const custom = () => { std.value = THREAD_PRESETS.find(p => Math.abs(p[2] - +dIn.value * k) < 1e-3 && Math.abs(p[3] - +pIn.value * k) < 1e-4) ? THREAD_PRESETS.find(p => Math.abs(p[2] - +dIn.value * k) < 1e-3 && Math.abs(p[3] - +pIn.value * k) < 1e-4)[0] : ''; };
       dIn.addEventListener('input', custom); pIn.addEventListener('input', custom);
       return { el: el('div', null, el('div', { style: 'font-weight:700;margin:4px 0' }, title),
-          pgrid(1, ['Gender', g], ['Standard', std], ['Major Ø (mm)', dIn], ['Pitch (mm)', pIn], ['Thread length (mm)', lIn])),
-        get: () => ({ male: g.value === 'male', d: +dIn.value, pitch: +pIn.value, len: +lIn.value || 0 }) };
+          pgrid(1, ['Gender', g], ['Standard', std], ['Major Ø (' + UNIT_LABEL + ')', dIn], ['Pitch (' + UNIT_LABEL + ')', pIn], ['Thread length (' + UNIT_LABEL + ')', lIn])),
+        get: () => ({ male: g.value === 'male', d: +dIn.value * k, pitch: +pIn.value * k, len: (+lIn.value || 0) * k }) };
     }
     function showSplash() {
       splash.textContent = '';
@@ -2354,16 +2377,17 @@
       const lib = libLoad();
       // adapter assembler
       const A = threadPicker('Thread A (bottom)', { male: true, d: 48, pitch: 0.75 }), B = threadPicker('Thread B (top)', { male: false, d: 42, pitch: 0.75 });
-      const lenIn = el('input', { type: 'number', step: '0.5', min: '2', value: '20', style: 'width:80px' });
-      const wallIn = el('input', { type: 'number', step: '0.1', min: '0.4', value: '2.5', style: 'width:80px' });
-      const clrIn = el('input', { type: 'number', step: '0.05', value: '0', style: 'width:80px' });
+      const km = MM / UNIT_SCALE, sh = (mmv) => String(+(mmv / km).toFixed(UNIT_SCALE === MM ? 3 : 4)), im = UNIT_SCALE === MM;
+      const lenIn = el('input', { type: 'number', step: im ? '0.5' : '0.02', min: '0', value: sh(20), style: 'width:80px' });
+      const wallIn = el('input', { type: 'number', step: im ? '0.1' : '0.005', min: '0', value: sh(2.5), style: 'width:80px' });
+      const clrIn = el('input', { type: 'number', step: im ? '0.05' : '0.002', value: '0', style: 'width:80px' });
       const steepBox = el('input', { type: 'checkbox' }); steepBox.checked = true;
-      const angIn = el('input', { type: 'number', step: '5', min: '20', max: '85', value: '60', style: 'width:60px' });
+      const angIn = el('input', { type: 'number', step: ANG_SCALE === 1 ? '5' : '0.05', min: String(+(20 * ANG_SCALE).toFixed(3)), max: String(+(85 * ANG_SCALE).toFixed(3)), value: String(+(60 * ANG_SCALE).toFixed(4)), style: 'width:60px' });
       const out = el('div', { style: 'color:#9a6700;margin-top:6px' });
       const build = () => {
-        const a = A.get(), b = B.get(), H = +lenIn.value;
+        const a = A.get(), b = B.get(), H = +lenIn.value * km;
         if (!(a.d > 0 && a.pitch > 0 && b.d > 0 && b.pitch > 0 && H > 0)) { out.textContent = 'Enter a diameter and pitch for both threads, and a total length.'; return; }
-        const r = buildAdapter({ a, b, length: H, wall: +wallIn.value || 2.5, clearance: +clrIn.value || 0, steep: steepBox.checked, angle: +angIn.value || 60 });
+        const r = buildAdapter({ a, b, length: H, wall: (+wallIn.value * km) || 2.5, clearance: (+clrIn.value * km) || 0, steep: steepBox.checked, angle: (+angIn.value / ANG_SCALE) || 60 });
         openScene(r.scene, r.notes.length ? 'Adapter: ' + r.notes.join(' ') : 'Adapter created: thread A at the bottom, thread B at the top. Every part is editable.');
       };
       splash.append(
@@ -2389,8 +2413,8 @@
           card('Adapter assembler',
             el('div', { style: 'color:#666;margin-bottom:6px' }, 'Builds an adapter from thread A (bottom) to thread B (top), as editable rings and threads with lead-in tapers at the ends.'),
             el('div', { style: 'display:flex;gap:18px;flex-wrap:wrap' }, A.el, B.el),
-            pgrid(2, ['Total length (mm)', lenIn], ['Wall (mm)', wallIn], ['Fit clearance (mm)', clrIn], GBR,
-              ['Avoid right angles', el('label', { style: 'display:inline-flex;gap:4px;align-items:center' }, steepBox, 'steep walls, at least'), angIn, '° from horizontal']),
+            pgrid(2, ['Total length (' + UNIT_LABEL + ')', lenIn], ['Wall (' + UNIT_LABEL + ')', wallIn], ['Fit clearance (' + UNIT_LABEL + ')', clrIn], GBR,
+              ['Avoid right angles', el('label', { style: 'display:inline-flex;gap:4px;align-items:center' }, steepBox, 'steep walls, at least'), angIn, ANG_LABEL.trim() + ' from horizontal']),
             el('button', { type: 'button', style: BTN + ';margin-top:6px', onclick: build }, 'Create adapter'), out)));
       splash.style.display = 'block';
     }
@@ -2421,7 +2445,7 @@
       }
       const arrows = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
       if (arrows[e.key] && (state.sel.size || state.selNodes.size)) {
-        const step = (e.shiftKey ? 1 : 0.1) / UNIT_SCALE, [ay, az] = arrows[e.key];
+        const step = (e.shiftKey ? 1 : 0.1) * (UNIT_SCALE === MM ? 1 : 0.1) / UNIT_SCALE, [ay, az] = arrows[e.key];
         pushUndo();
         if (state.sel.size) moveKeysView(state.scene, [...state.sel], ay * step, az * step);
         else for (const id of leavesUnder(state.scene, topSelected(state.scene))) moveNodeView(state.scene, id, ay * step, az * step);
@@ -2649,7 +2673,7 @@
         const at = xf.fwd({ y: R, z: q.height || 0 });
         return { radial: true, at, a: at, b: { y: Math.max(at.y + 10 / view.s, isFinite(y1) ? y1 : at.y), z: at.z } };
       }
-      if (!isFinite(z0)) { z0 = zBase(); z1 = z0 + 10 / UNIT_SCALE; }
+      if (!isFinite(z0)) { z0 = zBase(); z1 = z0 + 10 / MM; }
       const a = xf.fwd({ y: R, z: z0 }), b = xf.fwd({ y: R, z: z1 });
       return { radial: false, at: a, a, b };
     }
@@ -2661,34 +2685,53 @@
       const pxPerUnit = view.s / UNIT_SCALE;
       return ([0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 50].find(s => s * pxPerUnit >= 55) || 100) / UNIT_SCALE;
     }   // bottom axis strip (radius + diameter + cursor rows), left axis strip
+    // Grid lines and axis ticks at round steps; the next finer step fades in as the zoom spreads it out, so
+    // zooming moves the ticks smoothly instead of swapping them.
+    const GRID_STEPS = [0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500];
     function grid(g, base) {
       const { w, h } = size();
       const [ya, za] = toWorld(0, h), [yb, zb] = toWorld(w, 0);
-      const st = gridStep();
-      const lab = (x, y, text, o = {}) => { const t = sv('text', { x, y, 'font-size': 10, fill: o.fill || '#868e96', 'text-anchor': o.anchor || 'start' }); t.textContent = text; g.append(t); };
-      for (let y = Math.ceil(ya / st) * st; y <= yb; y += st) {
-        const [x] = toScreen(y, 0);
-        g.append(sv('line', { x1: x, y1: 0, x2: x, y2: h - AX_B, stroke: Math.abs(y) < st / 2 ? '#adb5bd' : '#e9ecef' }));
-      }
-      for (let zr = Math.ceil((za - base) / st) * st; zr <= zb - base; zr += st) {
-        const [, y] = toScreen(0, base + zr);
-        g.append(sv('line', { x1: AX_L, y1: y, x2: w, y2: y, stroke: Math.abs(zr) < st / 2 ? '#adb5bd' : '#e9ecef' }));
+      const pxu = view.s / UNIT_SCALE; let i = GRID_STEPS.findIndex(s => s * pxu >= 55); if (i < 0) i = GRID_STEPS.length - 1;
+      const main = GRID_STEPS[i] / UNIT_SCALE, fine = i > 0 ? GRID_STEPS[i - 1] / UNIT_SCALE : main, finePx = i > 0 ? fine * view.s : 0;
+      const clamp01 = (x) => Math.max(0, Math.min(1, x));
+      const aLine = clamp01((finePx - 12) / (55 - 12)), aLab = clamp01((finePx - 36) / (55 - 36));
+      const lab = (x, y, text, o = {}) => { const t = sv('text', { x, y, 'font-size': 10, fill: o.fill || '#868e96', 'text-anchor': o.anchor || 'start', opacity: o.op == null ? 1 : o.op }); t.textContent = text; g.append(t); };
+      const isMain = (v) => Math.abs(v / main - Math.round(v / main)) < 1e-6;
+      const levels = [[main, 1, 1]];
+      if (aLine > 0.01) levels.unshift([fine, aLine, aLab]);
+      for (const [st, aL] of levels) {
+        for (let y = Math.ceil(ya / st) * st; y <= yb; y += st) {
+          if (st !== main && isMain(y)) continue;
+          const [x] = toScreen(y, 0);
+          g.append(sv('line', { x1: x, y1: 0, x2: x, y2: h - AX_B, stroke: Math.abs(y) < st / 2 ? '#adb5bd' : '#e9ecef', 'stroke-opacity': aL }));
+        }
+        for (let zr = Math.ceil((za - base) / st) * st; zr <= zb - base; zr += st) {
+          if (st !== main && isMain(zr)) continue;
+          const [, y] = toScreen(0, base + zr);
+          g.append(sv('line', { x1: AX_L, y1: y, x2: w, y2: y, stroke: Math.abs(zr) < st / 2 ? '#adb5bd' : '#e9ecef', 'stroke-opacity': aL }));
+        }
       }
       // axis strips
       g.append(sv('rect', { x: 0, y: h - AX_B, width: w, height: AX_B, fill: 'rgba(248,249,250,.95)', stroke: '#dee2e6' }));
       g.append(sv('rect', { x: 0, y: 0, width: AX_L, height: h - AX_B, fill: 'rgba(248,249,250,.95)', stroke: '#dee2e6' }));
-      for (let y = Math.ceil(ya / st) * st; y <= yb; y += st) {
-        const [x] = toScreen(y, 0);
-        if (x < AX_L) continue;
-        g.append(sv('line', { x1: x, y1: h - AX_B, x2: x, y2: h - AX_B + 4, stroke: '#adb5bd' }));
-        lab(x, h - 4, num(mm(Math.abs(y)), 2) + ' ' + UNIT_LABEL, { anchor: 'middle' });                 // radius (positive on both sides)
-        lab(x, h - 17, 'Ø' + num(mm(2 * Math.abs(y)), 2) + ' ' + UNIT_LABEL, { anchor: 'middle', fill: '#adb5bd' });  // diameter
-      }
-      for (let zr = Math.ceil((za - base) / st) * st; zr <= zb - base; zr += st) {
-        const [, y] = toScreen(0, base + zr);
-        if (y > h - AX_B) continue;
-        g.append(sv('line', { x1: AX_L - 4, y1: y, x2: AX_L, y2: y, stroke: '#adb5bd' }));
-        lab(AX_L - 6, y + 3, num(zr * UNIT_SCALE, 2) + ' ' + UNIT_LABEL, { anchor: 'end' });
+      for (const [st, aL, aT] of levels) {
+        for (let y = Math.ceil(ya / st) * st; y <= yb; y += st) {
+          if (st !== main && isMain(y)) continue;
+          const [x] = toScreen(y, 0);
+          if (x < AX_L) continue;
+          g.append(sv('line', { x1: x, y1: h - AX_B, x2: x, y2: h - AX_B + (st === main ? 4 : 3), stroke: '#adb5bd', 'stroke-opacity': aL }));
+          if (aT > 0.01) {
+            lab(x, h - 4, num(mm(Math.abs(y)), 3) + ' ' + UNIT_LABEL, { anchor: 'middle', op: aT });                 // radius (positive on both sides)
+            lab(x, h - 17, 'Ø' + num(mm(2 * Math.abs(y)), 3) + ' ' + UNIT_LABEL, { anchor: 'middle', fill: '#adb5bd', op: aT });  // diameter
+          }
+        }
+        for (let zr = Math.ceil((za - base) / st) * st; zr <= zb - base; zr += st) {
+          if (st !== main && isMain(zr)) continue;
+          const [, y] = toScreen(0, base + zr);
+          if (y > h - AX_B) continue;
+          g.append(sv('line', { x1: AX_L - (st === main ? 4 : 3), y1: y, x2: AX_L, y2: y, stroke: '#adb5bd', 'stroke-opacity': aL }));
+          if (aT > 0.01) lab(AX_L - 6, y + 3, num(zr * UNIT_SCALE, 3) + ' ' + UNIT_LABEL, { anchor: 'end', op: aT });
+        }
       }
       const t1 = sv('text', { x: AX_L + 4, y: h - AX_B - 4, 'font-size': 10, fill: '#adb5bd' }); t1.textContent = 'x: radius / Ø →'; g.append(t1);
       const t2 = sv('text', { x: 4, y: 12, 'font-size': 10, fill: '#adb5bd' }); t2.textContent = 'y: height ↑'; g.append(t2);
@@ -2883,7 +2926,7 @@
         const xf = xfOf(state.scene, h.node), a = xf.fwd(n.pts[h.i]), b = xf.fwd(n.pts[(h.i + 1) % n.pts.length]), L = Math.hypot(b.y - a.y, b.z - a.z);
         const ang = Math.atan2(b.z - a.z, b.y - a.y) * 180 / Math.PI;
         const [x, y] = toScreen((a.y + b.y) / 2, (a.z + b.z) / 2);
-        label(svg, x + 8, y + 14, ['length ' + num(mm(L), 3) + ' ' + UNIT_LABEL + ' · angle ' + num(((ang % 180) + 180) % 180, 2) + '°', 'Δx (radius) ' + num(mm(b.y - a.y), 3) + ' · Δy (height) ' + num(mm(b.z - a.z), 3) + ' ' + UNIT_LABEL], { border: '#ffa8a8' });
+        label(svg, x + 8, y + 14, ['length ' + num(mm(L), 3) + ' ' + UNIT_LABEL + ' · angle ' + num((((ang % 180) + 180) % 180) * ANG_SCALE, ANG_SCALE === 1 ? 2 : 4) + ANG_LABEL, 'Δx (radius) ' + num(mm(b.y - a.y), 3) + ' · Δy (height) ' + num(mm(b.z - a.z), 3) + ' ' + UNIT_LABEL], { border: '#ffa8a8' });
       }
       // sample positions of points that would be inserted (menu hover)
       for (const p of previewMarks) {
@@ -3092,7 +3135,7 @@
         if (!tb.collapsed) animIn(body, { ms: 200 });
         syncThreadBoxes();
       });
-      const fields = [['pitch', 'pitch', UNIT_LABEL], ['turns', 'turns', ''], ['depth', 'thread depth (x)', UNIT_LABEL], ['angle', 'V angle', '°'],
+      const fields = [['pitch', 'pitch', UNIT_LABEL], ['turns', 'turns', ''], ['depth', 'thread depth (x)', UNIT_LABEL], ['angle', 'V angle', ANG_LABEL.trim()],
         ['dmin', 'minor Ø', UNIT_LABEL], ['dmax', 'major Ø', UNIT_LABEL], ['len', 'length (y)', UNIT_LABEL], ['from', 'starts at y', UNIT_LABEL], ['to', 'ends at y', UNIT_LABEL]];
       for (const [f, lab, unit] of fields) {
         const inp = el('input', { type: 'number', step: f === 'turns' ? '0.25' : f === 'angle' ? '0.5' : '0.01', style: INP });
@@ -3102,7 +3145,7 @@
           if (!isFinite(v) || !o) return;
           if (inp.__fresh !== false) pushUndo();
           inp.__fresh = false;
-          setThreadValue(o.r, o.r.kind, f, v, zBase());
+          setThreadValue(o.r, o.r.kind, f, f === 'angle' ? v / ANG_SCALE : v, zBase());
           syncRunPts(o.n, o.r); markEdited();
           state.liveInput = live; try { recalc(); } finally { state.liveInput = false; }
         };
@@ -3125,7 +3168,7 @@
         for (const f in tb.inputs) {
           const inp = tb.inputs[f].inp;
           if (document.activeElement === inp) continue;   // never overwrite what the user is typing
-          inp.value = num(vals[f], f === 'turns' ? 3 : f === 'angle' ? 2 : 4);
+          inp.value = f === 'angle' ? num(vals[f] * ANG_SCALE, ANG_SCALE === 1 ? 2 : 4) : num(vals[f], f === 'turns' ? 3 : 4);
         }
       };
       return tb;
@@ -3194,7 +3237,7 @@
         const dy = tf.dx / UNIT_SCALE, dz = tf.dy / UNIT_SCALE;
         if (state.sel.size) moveKeysView(state.scene, [...state.sel], dy, dz); else t.nodes.forEach(n => moveNodeView(state.scene, n.id, dy, dz));
       } else {
-        const P = pivotOf(t), a = tf.angle * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
+        const P = pivotOf(t), a = tf.angle / ANG_SCALE * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
         const map = kind === 'scale'
           ? (q) => ({ y: P.y + (q.y - P.y) * tf.sx, z: P.z + (q.z - P.z) * (tf.linkScale ? tf.sx : tf.sy) })
           : (q) => ({ y: P.y + (q.y - P.y) * c - (q.z - P.z) * s, z: P.z + (q.y - P.y) * s + (q.z - P.z) * c });
@@ -3276,11 +3319,11 @@
       link.addEventListener('change', () => { tf.linkScale = link.checked; buildSelBox(); });
       const uni = el('label', { style: 'cursor:pointer;display:inline-flex;gap:3px;align-items:center;white-space:nowrap' }, link, 'uniform');
       add('Scale', tf.linkScale ? ['×', inp('sx', { step: '0.05' }), null, null, uni] : ['× x', inp('sx', { step: '0.05' }), '× y', inp('sy', { step: '0.05' }), uni], 'scale');
-      add('Rotate', ['°', inp('angle', { step: '1', title: 'degrees, counter-clockwise' }), null, null, 'counter-clockwise'], 'rotate');
+      add('Rotate', [ANG_LABEL.trim(), inp('angle', { step: ANG_SCALE === 1 ? '1' : '0.01', title: (ANG_SCALE === 1 ? 'degrees' : 'radians') + ', counter-clockwise' }), null, null, 'counter-clockwise'], 'rotate');
       const piv = el('select', { style: 'font-size:11px;max-width:100%' }, el('option', { value: 'centre' }, 'selection centre'), el('option', { value: 'origin' }, 'axis at the lowest point'));
       piv.value = tf.pivot; piv.addEventListener('change', () => { tf.pivot = piv.value; });
       add('About', { span: [piv] }, null);
-      selBox.append(grid, el('div', { style: 'color:#888;margin-top:5px;width:0;min-width:100%' }, 'x = radius / diameter, y = height. Threads move with their centre but keep their shape. Arrow keys nudge 0.1 ' + UNIT_LABEL + ' (Shift: 1).'));
+      selBox.append(grid, el('div', { style: 'color:#888;margin-top:5px;width:0;min-width:100%' }, 'x = radius / diameter, y = height. Threads move with their centre but keep their shape. Arrow keys nudge ' + (UNIT_SCALE === MM ? '0.1 mm (Shift: 1 mm).' : '0.01 in (Shift: 0.1 in).')));
     }
 
     // ---- pointer interaction ----
@@ -3451,12 +3494,27 @@
     svg.addEventListener('wheel', (e) => {
       e.preventDefault();
       if (!view) return;
-      const [sx, sy] = local(e), [wy, wz] = toWorld(sx, sy);
-      view.s *= Math.exp(-e.deltaY * 0.0015);
-      const [ny, nz] = toWorld(sx, sy);
-      view.cy += wy - ny; view.cz += wz - nz;
-      drawSection();
+      const [sx, sy] = local(e);
+      zoomTo((zoomAnim ? zoomAnim.s : view.s) * Math.exp(-e.deltaY * 0.0015), sx, sy);
     }, { passive: false });
+    // zooming eases toward its target over a few frames; the point under the pointer stays where it is
+    let zoomAnim = null;
+    function zoomTo(s, sx, sy) {
+      const [wy, wz] = toWorld(sx, sy);
+      const fresh = !zoomAnim;
+      zoomAnim = { s, sx, sy, wy, wz };
+      if (!fresh) return;
+      const step = () => {
+        const z = zoomAnim; if (!z || !view || !root.isConnected) { zoomAnim = null; return; }
+        const k = reduceMotion() ? 1 : 0.28, ls = Math.log(view.s), lt = Math.log(z.s), done = Math.abs(lt - ls) < 0.002;
+        view.s = done ? z.s : Math.exp(ls + (lt - ls) * k);
+        const { w, h } = size();
+        view.cy = z.wy - (z.sx - w / 2) / view.s; view.cz = z.wz + (z.sy - h / 2) / view.s;
+        drawSection();
+        if (done) zoomAnim = null; else requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    }
     svg.addEventListener('dblclick', (e) => { if (!e.target.__key) { fit(); drawSection(); } });
 
     // ---- context menus ----
@@ -3700,8 +3758,8 @@
         box.append(sect('Copies', pgrid(2,
           ['Copies', numInput(() => q.count, v => setC('count', Math.max(1, Math.min(360, Math.round(v)))), { step: '1', min: 1, max: 360, digits: 0, width: 80 })],
           ['Orientation', selectInput(q.orient, [['axial', 'axial (parallel to the axis)'], ['radial', 'radial (pointing outward)']], v => setC('orient', v))],
-          ['Angle offset (°)', numInput(() => q.angle, v => setC('angle', v), { step: '1', digits: 3, width: 80 })],
-          ['Spread (°)', numInput(() => q.spread, v => setC('spread', Math.max(0, Math.min(360, v))), { step: '5', min: 0, max: 360, digits: 3, width: 80 })])),
+          ['Angle offset (' + ANG_LABEL.trim() + ')', numInput(() => q.angle * ANG_SCALE, v => setC('angle', v / ANG_SCALE), { step: ANG_SCALE === 1 ? '1' : '0.01', digits: 4, width: 80 })],
+          ['Spread (' + ANG_LABEL.trim() + ')', numInput(() => q.spread * ANG_SCALE, v => setC('spread', Math.max(0, Math.min(360, v / ANG_SCALE))), { step: ANG_SCALE === 1 ? '5' : '0.05', min: 0, max: 360 * ANG_SCALE, digits: 4, width: 80 })])),
           sect('Placement', pgrid(2,
           ['Distance from axis (x' + UX, numInput(() => mm(q.radius), v => setC('radius', Math.max(0, v / UNIT_SCALE)), { min: 0 })],
           q.orient === 'radial' ? ['Copies\' axis height (y' + UX, numInput(() => hDisp(q.height, zBase()), v => setC('height', v / UNIT_SCALE + zBase()))] : null)),
@@ -3719,7 +3777,7 @@
         presetSel.value = THREAD_PRESETS.some(p => p[0] === q.preset) ? q.preset : '';
         presetSel.addEventListener('change', () => {
           const p = THREAD_PRESETS.find(x => x[0] === presetSel.value); if (!p) return;
-          setT(t => { const std = isStd(t), L = t.turns * t.pitch; t.preset = p[0]; t.d = p[2] / UNIT_SCALE; t.pitch = p[3] / UNIT_SCALE; t.turns = Math.max(1, L / t.pitch); if (std) t.depth = stdOf(t.pitch, t.profile); });
+          setT(t => { const std = isStd(t), L = t.turns * t.pitch; t.preset = p[0]; t.d = p[2] / MM; t.pitch = p[3] / MM; t.turns = Math.max(1, L / t.pitch); if (std) t.depth = stdOf(t.pitch, t.profile); });
         });
         const backing = () => q.backing != null ? q.backing : q.wall / q.depth;
         const diam = () => (q.kind === 'internal' ? 'Minor Ø ' + num(mm(q.d - 2 * q.depth + 2 * (q.clearance || 0)), 3) + ', major Ø ' + num(mm(q.d + 2 * (q.clearance || 0)), 3)
@@ -3733,7 +3791,7 @@
           ['Pitch' + U, numInput(() => mm(q.pitch), v => setT(t => {
             const P = Math.max(0.05 / UNIT_SCALE, v / UNIT_SCALE), std = isStd(t), L = t.turns * t.pitch;
             t.pitch = P; t.turns = Math.max(1, L / P); t.preset = ''; if (std) t.depth = stdOf(P, t.profile);
-          }), { step: '0.05', min: 0.05 }), dyn(() => '= ' + num(25.4 / mm(q.pitch), 2) + ' TPI')],
+          }), { step: '0.05', min: 0.05 }), dyn(() => '= ' + num(1 / q.pitch, 2) + ' TPI')],
           ['Profile', selectInput(q.profile, [['iso', 'ISO 60° (flats)'], ['v', 'sharp 60° V']], v => setT(t => { const std = isStd(t); t.profile = v; if (std) t.depth = stdOf(t.pitch, v); }))],
           ['Depth (x' + UX, numInput(() => mm(q.depth), v => setT(t => { t.depth = Math.max(0.01 / UNIT_SCALE, v / UNIT_SCALE); }), { step: '0.01', min: 0.01 }),
             el('button', { type: 'button', style: BTN2 + ';padding:2px 6px', onclick: () => setT(t => { t.depth = stdOf(t.pitch, t.profile); }), title: 'ISO basic depth 5H/8 = 0.541 × pitch, or H = 0.866 × pitch for a sharp V' }, 'standard')],
@@ -3773,7 +3831,7 @@
       appendKids(box, ng ? sect('N-sided', pgrid(2,
         ['Sides', numInput(() => q.sides, v => setP(t => { t.sides = Math.max(3, Math.min(256, Math.round(v))); }), { step: '1', min: 3, max: 256, digits: 0 })],
         ['Radius about', selectInput(q.about, [['faces', 'face centres'], ['edges', 'edges']], v => setP(t => { t.about = v; }))],
-        ['Rotation (°)', numInput(() => q.rotation || 0, v => setP(t => { t.rotation = v; }), { step: '1', digits: 2 })])) : null,
+        ['Rotation (' + ANG_LABEL.trim() + ')', numInput(() => (q.rotation || 0) * ANG_SCALE, v => setP(t => { t.rotation = v / ANG_SCALE; }), { step: ANG_SCALE === 1 ? '1' : '0.01', digits: 4 })])) : null,
         sect('Position and height', pgrid(2,
         ['Bottom y offset' + U, numInput(() => hDisp(q.z, zBase()), v => setP(t => { t.z = v / UNIT_SCALE + zBase(); }))],
         ['Height' + U, len('h', { min: 0.01 })])),
@@ -3814,7 +3872,6 @@
       return box;
     }
 
-    const dlBtn = el('button', { type: 'button', style: BTN, onclick: download });
     let sideSig = null;
     // A block from the old single panel, shown bare inside its own view (its own title row dropped).
     function bare(b, keepHead) {
@@ -3832,8 +3889,6 @@
     function renderSide() {
       const fe = document.activeElement;
       const s = statusText();
-      dlBtn.disabled = !s.ready; dlBtn.style.opacity = s.ready ? '1' : '0.5'; dlBtn.style.cursor = s.ready ? 'pointer' : 'not-allowed';
-      dlBtn.textContent = downloadLabel(s);
       if (side.contains(fe) && (fe.tagName === 'SELECT' || (fe.tagName === 'INPUT' && !/^(checkbox|radio|button|submit|range|color)$/.test(fe.type)))) {
         // keep the other fields up to date while one is being edited
         for (const i of side.querySelectorAll('input')) if (i !== document.activeElement && i.__get) i.value = i.__get();
@@ -3849,12 +3904,14 @@
         hbtn('undo', 'Undo', undo, { title: 'Undo (Ctrl+Z)', disabled: !state.undo.length }),
         hbtn('redo', 'Redo', redo, { title: 'Redo (Ctrl+Y or Ctrl+Shift+Z)', disabled: !state.redo.length }),
         hbtn('save', 'Save scene', saveScene, { title: 'Save everything in the scene to Saved models', disabled: !(state.scene && state.scene.root.length) }),
-        hbtn('download', 'Export', exportSceneJson, { title: 'Export the whole scene as a JSON file that Import can rebuild it from', disabled: !state.scene }),
+        hbtn('json', 'Export', exportSceneJson, { title: 'Export the whole scene as a JSON file that Import can rebuild it from', disabled: !state.scene }),
         hbtn('upload', 'Import', pickJsonFile, { title: 'Import a scene or saved models from a JSON file' }),
-        hbtn('fit', 'Fit', () => { fit(); drawSection(); }, { title: 'Fit the cross-section view' }));
+        hbtn('fit', 'Fit', () => { fit(); drawSection(); }, { title: 'Fit the cross-section view' }),
+        (() => { const b = hbtn('download', 'Download ' + (state.format || 'stl').toUpperCase(), download, { title: s.ready ? downloadLabel(s) : 'The part is still being built', disabled: !s.ready });
+          b.style.background = '#1f6feb'; b.style.color = '#fff'; b.style.borderColor = '#1f6feb'; return b; })());
       const msg = state.exportError || (state.exporting ? 'Exporting ' + state.exporting + '…' : state.libMessage) || '';
       appendKids(panels.project.body,
-        msg ? el('div', { style: 'margin-bottom:4px;color:' + (state.exportError ? '#b42318' : '#1a7f37') }, msg) : null, dlBtn,
+        msg ? el('div', { style: 'margin-bottom:4px;color:' + (state.exportError ? '#b42318' : '#1a7f37') }, msg) : null,
         el('div', { style: 'margin-top:5px;padding-top:4px;border-top:1px solid #e9ecef' }, settingsBlock()));
       headStatus(s);
       if (state.scene) {
@@ -4305,7 +4362,7 @@
         if (mj && gap * 10 < 28) continue;
         const L = lw(mj ? 4 : 2);
         quad([p[0] - gnd[0] * L, p[1] - gnd[1] * L, gz], [p[0] + gnd[0] * L, p[1] + gnd[1] * L, gz], lw(mj ? 1.2 : 0.8), mj ? COL : DIM);
-        if (mj) text(num(Math.abs(s)), [p[0] + up[0] * lw(5), p[1] + up[1] * lw(5), p[2] + up[2] * lw(5)], rt, up, COL);
+        if (mj) text(num(+(Math.abs(s) * UNIT_SCALE / MM).toFixed(6)), [p[0] + up[0] * lw(5), p[1] + up[1] * lw(5), p[2] + up[2] * lw(5)], rt, up, COL);
       }
       // angles round the rim, each upright and read left to right on screen
       // round the rim: only the angles near the part of it in view
@@ -4317,7 +4374,7 @@
         const d = i * S.aMajor, t = d * Math.PI / 180, rr = S.Ra - lw(11) - hgt * 0.6;
         const p = [cx + Math.cos(t) * rr, cy + Math.sin(t) * rr, gz];
         if (!onScreen(p, 20)) continue;
-        text(num(d) + '°', [p[0] - upA[0] * hgt * 0.5, p[1] - upA[1] * hgt * 0.5, p[2] - upA[2] * hgt * 0.5], right, upA, Math.abs(d % 90) < 1e-9 ? [0.97, 0.98, 1, 0.95] : COL);
+        text(ANG_SCALE === 1 ? num(d) + '°' : num(+(d * ANG_SCALE).toFixed(3)), [p[0] - upA[0] * hgt * 0.5, p[1] - upA[1] * hgt * 0.5, p[2] - upA[2] * hgt * 0.5], right, upA, Math.abs(d % 90) < 1e-9 ? [0.97, 0.98, 1, 0.95] : COL);
       }
       if (!v.length) return;
       if (!axisLblBuf) axisLblBuf = gl.createBuffer();
@@ -4380,7 +4437,7 @@
       const { mn, mx } = bbox, Rpart = Math.max(mx[0] - mn[0], mx[1] - mn[1]) / 2 * 1.04, px = Math.max(1e-6, pxPerMm());
       const w = canvas.clientWidth || 1, h = canvas.clientHeight || 1, half = Math.hypot(w, h) / 2 / px;
       const cx = (mn[0] + mx[0]) / 2, cy = (mn[1] + mx[1]) / 2;
-      const minor = niceStep(10 / px), major = minor * 10;
+      const kU = MM / UNIT_SCALE, minor = niceStep(10 / px / kU) * kU, major = minor * 10;    // steps round in the shown unit
       const floorNice = (x) => { const e = Math.pow(10, Math.floor(Math.log10(x))), m = x / e; return (m >= 5 ? 5 : m >= 2 ? 2 : 1) * e; };
       // the ground under the middle of the view, a little below centre
       const G = groundAt(0, -0.3, mn[2]), rG = G ? Math.hypot(G[0] - cx, G[1] - cy) : 0;
@@ -4694,10 +4751,10 @@
         for (let d = Math.floor((A - cx / PXD) / 5) * 5; d <= A + cx / PXD; d += 5) {
           const px = cx + (d - A) * PXD, major = ((d % 30) + 30) % 30 === 0;
           x.strokeStyle = major ? '#495057' : '#adb5bd'; x.beginPath(); x.moveTo(px + 0.5, H1); x.lineTo(px + 0.5, H1 - (major ? 9 : 5)); x.stroke();
-          if (major) x.fillText(String(((d % 360) + 360) % 360) + '°', px, 11);
+          if (major) x.fillText(ANG_SCALE === 1 ? String(((d % 360) + 360) % 360) + '°' : num((((d % 360) + 360) % 360) * ANG_SCALE, 2), px, 11);
         }
         x.strokeStyle = '#e8590c'; x.lineWidth = 2; x.beginPath(); x.moveTo(cx, 0); x.lineTo(cx, H1); x.stroke(); x.lineWidth = 1;
-        x.fillStyle = '#e8590c'; x.font = 'bold 10px sans-serif'; x.fillText(A.toFixed(1) + '°', cx + 22, H1 - 4);
+        x.fillStyle = '#e8590c'; x.font = 'bold 10px sans-serif'; x.fillText(ANG_SCALE === 1 ? A.toFixed(1) + '°' : (A * ANG_SCALE).toFixed(3), cx + 22, H1 - 4);
       }
     }
     {
