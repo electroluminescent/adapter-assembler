@@ -2779,7 +2779,6 @@
     const COLORS = { source: '#1f6feb', circle: '#2f9e44', ngon: '#7048e8', thread: '#e8590c', group: '#495057', boolean: '#495057', cloner: '#495057', holes: '#c92a2a' };
     const viewTheta = () => state.viewAngle * Math.PI / 180 + (MS < 0 ? Math.PI : 0);
     function drawSection() {
-      for (const r of side.querySelectorAll('[data-node]')) r.classList.toggle('aa-hov', !drag && r.dataset.node === hoverNode);
       svg.textContent = '';
       if (!state.scene) return;
       if (!view) fit();
@@ -2794,6 +2793,7 @@
       grid(g, sceneBase);
       // selected objects are drawn last (on top), so their points and edges can be picked over others
       const order = frontOrder(), ext = { y0: Infinity, y1: -Infinity, z0: Infinity, z1: -Infinity };
+      lastPolys = { 1: {}, '-1': {} };
       for (const sideK of [-1, 1]) {
       MS = sideK;
       for (const id of order) {
@@ -2805,9 +2805,8 @@
         if (!xf.id) g.append(sv('path', { d: pathOf(local.map(xf.mir)), fill: 'none', stroke: COLORS[n.type] || '#1f6feb', 'stroke-width': 1, 'stroke-dasharray': '3 3', opacity: 0.6 }));
         const col = COLORS[n.type] || '#1f6feb', crossing = polygonSelfIntersects(local), selected = selectedAncestorOf(id);
         const fill = role === 'negative' ? 'url(#aa-hatch)' : crossing ? 'rgba(220,38,38,.18)' : col + (role === 'intersect' ? '18' : '26');
-        // the object under the pointer's point or edge: a soft halo round its section
-        if (id === hoverNode && !drag) g.append(sv('path', { d: pathOf(poly), fill: col + '1a', stroke: col, 'stroke-width': 7, 'stroke-opacity': 0.28, 'stroke-linejoin': 'round', 'pointer-events': 'none' }));
-        g.append(sv('path', { d: pathOf(poly), fill, stroke: crossing || role === 'negative' ? '#e03131' : col, 'stroke-width': selected ? 2.8 : (id === hoverNode && !drag ? 2.2 : 1.4),
+        lastPolys[MS][id] = { d: pathOf(poly), col };      // for the hover highlight
+        g.append(sv('path', { d: pathOf(poly), fill, stroke: crossing || role === 'negative' ? '#e03131' : col, 'stroke-width': selected ? 2.8 : 1.4,
           'stroke-dasharray': role === 'negative' ? '6 3' : 'none', 'stroke-linejoin': 'round' }));
         if (n.type === 'ngon') {
           // the range the section moves through as the view turns: face-centre radius (min) and edge radius (max)
@@ -2861,12 +2860,11 @@
           g.append(sv('line', { x1, y1, x2, y2, stroke: '#c92a2a', 'stroke-width': 1.6, 'stroke-dasharray': '4 2', 'pointer-events': 'none' }));
         }
       }
-      // selected / hovered edges
+      // selected edges
       for (const id of order) for (const e of edgesOf(id)) {
-        const on = state.sel.has(e.key), hov = hoverEdge === e.key;
-        if (!on && !hov) continue;
+        if (!state.sel.has(e.key)) continue;
         const [x1, y1] = toScreen(e.a.y, e.a.z), [x2, y2] = toScreen(e.b.y, e.b.z);
-        g.append(sv('line', { x1, y1, x2, y2, stroke: on ? '#e03131' : 'rgba(224,49,49,.45)', 'stroke-width': on ? 3.5 : 3, 'stroke-linecap': 'round' }));
+        g.append(sv('line', { x1, y1, x2, y2, stroke: '#e03131', 'stroke-width': 3.5, 'stroke-linecap': 'round' }));
       }
       // handles that would cover each other are fanned out around their common point (with a thin leader), so each can be grabbed
       const hds = [];
@@ -2900,7 +2898,7 @@
           const c = sv('circle', { cx: x.toFixed(1), cy: y.toFixed(1), r: on ? 5.5 : 4,
             fill: on ? '#e03131' : hd.run ? '#d9480f' : (COLORS[n.type] || '#1f6feb'), stroke: hd.bevel ? '#fab005' : '#fff', 'stroke-width': hd.bevel ? 2.2 : 1.4, style: 'cursor:move' });
           c.__key = hd.key; c.__side = MS;
-          const tip = sv('title'); tip.textContent = (n.name || id) + ': r ' + fmt(hd.y, 3) + ', z ' + fmt(hd.z, 3) + ' ' + UNIT_LABEL + (hd.bevel ? ' (bevelled)' : ''); c.append(tip);
+          if (!hd.run) { const tip = sv('title'); tip.textContent = (n.name || id) + ': r ' + fmt(hd.y, 3) + ', z ' + fmt(hd.z, 3) + ' ' + UNIT_LABEL + (hd.bevel ? ' (bevelled)' : ''); c.append(tip); }
           svg.append(c);
         }
       }
@@ -2960,9 +2958,32 @@
       }
       if (drag && drag.type === 'bevel' && drag.label) label(svg, drag.labelAt[0] + 12, drag.labelAt[1] - 10, [drag.label], { border: '#ffc078', bg: 'rgba(255,249,219,.95)' });
       drawCursor();
+      drawHover();
       syncThreadBoxes();
       renderSelBox();
       MS = MS0;
+    }
+    // the object under the pointer (a soft halo round its section, both sides) and the edge under it, drawn over
+    // the section on their own so moving the pointer does not redraw everything
+    let lastPolys = { 1: {}, '-1': {} };
+    function drawHover() {
+      for (const r of side.querySelectorAll('[data-node]')) r.classList.toggle('aa-hov', !drag && r.dataset.node === hoverNode);
+      const old = svg.querySelector('#aa-hover'); if (old) old.remove();
+      if (drag || !state.scene || !view || (!hoverNode && !hoverEdge)) return;
+      const g = sv('g', { id: 'aa-hover', 'pointer-events': 'none' }), MSh = MS;
+      for (const s of [1, -1]) {
+        MS = s;
+        const p = hoverNode && lastPolys[s][hoverNode];
+        if (p) g.append(sv('path', { d: p.d, fill: p.col + '1a', stroke: p.col, 'stroke-width': 6, 'stroke-opacity': 0.3, 'stroke-linejoin': 'round' }));
+        if (hoverEdge && !state.sel.has(hoverEdge)) {
+          const h = parseKey(hoverEdge), e = state.scene.nodes[h.node] && edgesOf(h.node).find(x => x.key === hoverEdge);
+          if (e) { const [x1, y1] = toScreen(e.a.y, e.a.z), [x2, y2] = toScreen(e.b.y, e.b.z); g.append(sv('line', { x1, y1, x2, y2, stroke: 'rgba(224,49,49,.45)', 'stroke-width': 3, 'stroke-linecap': 'round' })); }
+        }
+      }
+      MS = MSh;
+      // under the handles, so they stay on top and easy to grab
+      const firstHandle = [...svg.children].find(c => c.tagName === 'circle');
+      if (firstHandle) svg.insertBefore(g, firstHandle); else svg.append(g);
     }
     // The far inside of the part, seen through the middle behind the cut, very lightly in the colour of whatever is
     // nearest the axis. A screen point at distance x from the axis sees the inside wall where it turns away from the
@@ -3006,7 +3027,28 @@
       }
       return runs;
     }
+    let wrapKey = '', wrapTimer = 0;
     function drawWrap() {
+      const { w, h } = size();
+      const key = [state.job, state.viewAngle, view && view.s, view && view.cy, view && view.cz, w, h, UNIT_SCALE, state.quality, state.scene ? state.scene.root.length : 0].join('|');
+      if (key === wrapKey) return;
+      const busy = !!((drag && drag.moved) || zoomAnim);
+      clearTimeout(wrapTimer);
+      if (busy && wrapView) {
+        // keep the shading drawn last, moved and scaled to the current view, until things settle
+        const a = view.s / wrapView.s, bx = w / 2 - a * w / 2 + (wrapView.cy - view.cy) * view.s, by = h / 2 - a * h / 2 - (wrapView.cz - view.cz) * view.s;
+        wrapCanvas.style.transformOrigin = '0 0'; wrapCanvas.style.transform = 'matrix(' + a + ',0,0,' + a + ',' + bx + ',' + by + ')';
+        wrapKey = '';
+        wrapTimer = setTimeout(() => { if (!(drag && drag.moved) && !zoomAnim && root.isConnected) drawWrap(); }, 140);
+        return;
+      }
+      drawWrapNow(false);
+      wrapCanvas.style.transform = '';
+      wrapView = view ? { s: view.s, cy: view.cy, cz: view.cz } : null;
+      wrapKey = key;
+    }
+    let wrapView = null;
+    function drawWrapNow(quick) {
       // drawn at one canvas pixel per screen pixel (a soft shading needs no more), then the opacity is worked out per
       // pixel from how far it is from the part toward the axis, with ordered dithering so the faint gradient has no bands
       const ctx = wrapCanvas.getContext('2d', { willReadFrequently: true }), { w, h } = size(), W = Math.max(1, Math.round(w)), H = Math.max(1, Math.round(h));
@@ -3020,7 +3062,7 @@
         objs.push({ n, col: COLORS[n.type] || '#1f6feb', turns: n.type === 'ngon' || (n.runs || []).some(r => r.hand) });
       }
       if (!objs.length) return;
-      const low = lowQuality(), K = low ? 6 : 24, MSw = MS, theta = state.viewAngle * Math.PI / 180;
+      const low = lowQuality() || quick, K = low ? 6 : 24, MSw = MS, theta = state.viewAngle * Math.PI / 180;
       wrapCanvas.style.opacity = low ? '0.05' : '1';
       // per side: the inner radius at the cut for each pixel row (to measure the fade), and the colour layers
       const wall = { 1: new Float32Array(H).fill(NaN), '-1': new Float32Array(H).fill(NaN) };
@@ -3410,7 +3452,7 @@
       if (!drag) {
         drawCursor();
         const he = e.target.__key ? null : edgeAt(sx, sy), hk = e.target.__key || he, hn = hk ? parseKey(hk).node : null;
-        if (he !== hoverEdge || hn !== hoverNode) { hoverEdge = he; hoverNode = hn; svg.style.cursor = he ? 'pointer' : ''; drawSection(); }
+        if (he !== hoverEdge || hn !== hoverNode) { hoverEdge = he; hoverNode = hn; svg.style.cursor = he ? 'pointer' : ''; drawHover(); }
         return;
       }
       if (drag.type === 'pan') { view.cy = drag.cy - (sx - drag.sx) / view.s; view.cz = drag.cz + (sy - drag.sy) / view.s; drawSection(); return; }
@@ -3496,7 +3538,7 @@
     };
     svg.addEventListener('pointerup', endDrag);
     svg.addEventListener('pointercancel', endDrag);
-    svg.addEventListener('pointerleave', () => { cursorW = null; if ((hoverEdge || hoverNode) && !drag) { hoverEdge = null; hoverNode = null; drawSection(); } else drawCursor(); });
+    svg.addEventListener('pointerleave', () => { cursorW = null; if ((hoverEdge || hoverNode) && !drag) { hoverEdge = null; hoverNode = null; drawHover(); } drawCursor(); });
     svg.addEventListener('wheel', (e) => {
       e.preventDefault();
       if (!view) return;
@@ -4043,15 +4085,19 @@
       // (9 minor between majors), spokes at the major angles, and the angle scale's rim with its ticks
       if (gl.getExtension('OES_standard_derivatives')) gridProg = program('attribute vec3 pos; uniform mat4 mvp; varying vec2 vXY; void main(){ vXY = pos.xy; gl_Position = mvp * vec4(pos, 1.0); }', [
         '#extension GL_OES_standard_derivatives : enable',
-        'precision highp float; varying vec2 vXY; uniform vec2 C; uniform float minor; uniform float major; uniform float spoke; uniform float Ra; uniform float aMinor;',
+        'precision highp float; varying vec2 vXY; uniform vec2 C; uniform float minor; uniform float major; uniform float spoke; uniform float Ra; uniform float aMinor; uniform float kU;',
         'float band(float d, float px, float wpx){ return 1.0 - smoothstep(max(wpx * 0.5 - 0.5, 0.0) * px, (wpx * 0.5 + 0.5) * px, abs(d)); }',
         'void main(){',
         '  vec2 q = vXY - C; float r = length(q); float px = max(length(vec2(dFdx(r), dFdy(r))), 1e-9);',
         '  float a = degrees(atan(q.y, q.x)); if (a < 0.0) a += 360.0;',
         '  float k = 0.0; vec3 col = vec3(0.78, 0.81, 0.85);',
-        '  float fMin = 1.0 - smoothstep(minor / 12.0, minor / 5.0, px), fMaj = 1.0 - smoothstep(major / 12.0, major / 5.0, px);',
-        '  k = max(k, band(r - minor * floor(r / minor + 0.5), px, 0.7) * 0.16 * fMin);',
-        '  k = max(k, band(r - major * floor(r / major + 0.5), px, 1.1) * 0.42 * fMaj);',
+        // ring spacings in tens of the shown unit, chosen per pixel: the finest fades out as it gets crowded and the
+        // next one grows into a major line, so zooming changes the grid smoothly (and near / far parts differ)
+        '  float e = log(max(px / kU, 1e-12) * 14.0) / log(10.0), n = floor(e), f = e - n;',
+        '  float s0 = pow(10.0, n) * kU, s1 = s0 * 10.0, s2 = s1 * 10.0;',
+        '  k = max(k, band(r - s0 * floor(r / s0 + 0.5), px, 0.7) * 0.16 * (1.0 - f));',
+        '  k = max(k, band(r - s1 * floor(r / s1 + 0.5), px, mix(0.7, 1.1, f)) * mix(0.16, 0.42, f));',
+        '  k = max(k, band(r - s2 * floor(r / s2 + 0.5), px, 1.1) * 0.42);',
         // spokes: the major angles beyond the first ring, the four quarters from the centre
         '  float ds = (a - spoke * floor(a / spoke + 0.5)) * 0.0174533 * r, dq = (a - 90.0 * floor(a / 90.0 + 0.5)) * 0.0174533 * r;',
         // a line's width in pixels: its distance divided by how fast that distance changes on screen
@@ -4474,7 +4520,7 @@
       const U = (n) => gl.getUniformLocation(gridProg, n);
       gl.uniformMatrix4fv(U('mvp'), false, new Float32Array(lastM));
       gl.uniform2f(U('C'), cx, cy); gl.uniform1f(U('minor'), S.minor); gl.uniform1f(U('major'), S.major);
-      gl.uniform1f(U('spoke'), Math.max(S.aMajor, 10)); gl.uniform1f(U('Ra'), S.Ra); gl.uniform1f(U('aMinor'), S.aMinor);
+      gl.uniform1f(U('spoke'), Math.max(S.aMajor, 10)); gl.uniform1f(U('Ra'), S.Ra); gl.uniform1f(U('aMinor'), S.aMinor); gl.uniform1f(U('kU'), MM / UNIT_SCALE);
       const aP = gl.getAttribLocation(gridProg, 'pos');
       gl.enableVertexAttribArray(aP); gl.vertexAttribPointer(aP, 3, gl.FLOAT, false, 12, 0);
       gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);
@@ -4701,20 +4747,35 @@
     canvas.addEventListener('auxclick', (e) => { if (e.button === 1) e.preventDefault(); });
     canvas.addEventListener('wheel', (e) => {
       e.preventDefault();
-      // zoom toward the point under the pointer: it stays put on the screen
-      const minD = radius * 0.03, want = Math.min(radius * 12, dist * Math.exp(e.deltaY * 0.0012)), nd = Math.max(minD, want), k = 1 - nd / dist;
+      // zoom toward the point under the pointer: it stays put on the screen. The camera eases to the new place.
+      const bd = zoom3 ? zoom3.dist : dist, bp = zoom3 ? zoom3.pan.slice() : pan.slice();
+      const minD = radius * 0.03, want = Math.min(radius * 12, bd * Math.exp(e.deltaY * 0.0012)), nd = Math.max(minD, want), k = 1 - nd / bd;
       const r = canvas.getBoundingClientRect(), nx = (e.clientX - r.left) / r.width * 2 - 1, ny = 1 - (e.clientY - r.top) / r.height * 2;
       if (camBasis && r.width && r.height) {
-        const th = Math.tan(0.35), ox = nx * th * (r.width / r.height) * dist, oy = ny * th * dist, { x, y, z } = camBasis;
-        for (let c = 0; c < 3; c++) pan[c] += (ox * x[c] + oy * y[c]) * k;
+        const th = Math.tan(0.35), ox = nx * th * (r.width / r.height) * bd, oy = ny * th * bd, { x, y, z } = camBasis;
+        for (let c = 0; c < 3; c++) bp[c] += (ox * x[c] + oy * y[c]) * k;
         if (want < minD && e.deltaY < 0) {
           // past the point zooming would stop: keep going, moving toward the pointer (through the part if need be)
           const dir = [0, 1, 2].map(c => -z[c] + nx * th * (r.width / r.height) * x[c] + ny * th * y[c]), l = Math.hypot(...dir), step = radius * 0.04 * Math.min(4, -e.deltaY / 100);
-          for (let c = 0; c < 3; c++) pan[c] += dir[c] / l * step;
+          for (let c = 0; c < 3; c++) bp[c] += dir[c] / l * step;
         }
       }
-      dist = nd; draw3d();
+      const fresh = !zoom3;
+      zoom3 = { dist: nd, pan: bp };
+      if (!fresh) return;
+      const step = () => {
+        const t = zoom3; if (!t) return;
+        const kk = reduceMotion() ? 1 : 0.4, ld = Math.log(dist), lt = Math.log(t.dist);
+        const done = Math.abs(lt - ld) < 0.002 && Math.hypot(t.pan[0] - pan[0], t.pan[1] - pan[1], t.pan[2] - pan[2]) < radius * 1e-4;
+        dist = done ? t.dist : Math.exp(ld + (lt - ld) * kk);
+        pan = done ? t.pan : pan.map((v, c) => v + (t.pan[c] - v) * kk);
+        draw3dNow();
+        if (done) zoom3 = null; else requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
     }, { passive: false });
+    let zoom3 = null;
+    canvas.addEventListener('pointerdown', () => { zoom3 = null; }, true);      // grabbing the view stops a zoom in progress
     wireBox.addEventListener('change', () => { state.wire = wireBox.checked; saveSettings(); draw3d(); });
     ssaoBox.addEventListener('change', () => { state.ssao = ssaoBox.checked; saveSettings(); draw3d(); });
     orthoBox.addEventListener('change', () => {
