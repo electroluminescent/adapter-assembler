@@ -1,6 +1,6 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.4.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.5.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
@@ -556,7 +556,7 @@
         if (i === runs[inRun[i]].start) {
           const r = runs[inRun[i]];
           items.push({ band: { rFirst: r.rFirst, rOther: r.rOther, zFirst: r.zFirst, zLast: r.zLast, pitch: r.pitch, hand: r.hand, flatA: r.flatA || 0, flatB: r.flatB || 0,
-            dir: Math.sign(r.zLast - r.zFirst) || 1, zMin: Math.min(r.zFirst, r.zLast), zMax: Math.max(r.zFirst, r.zLast) } });
+            dir: Math.sign(r.zLast - r.zFirst) || 1, zMin: Math.min(r.zFirst, r.zLast), zMax: Math.max(r.zFirst, r.zLast), runout: r.runout || null } });
         }
         continue;
       }
@@ -597,6 +597,47 @@
       if (t >= a.u - 1e-12 && t <= b.u + 1e-12) return b.u - a.u < 1e-12 ? a.r : a.r + (b.r - a.r) * (t - a.u) / (b.u - a.u);
     }
     return pat[0].r;
+  }
+  // Lead-in (run-out) of a thread's end: within a pitch of a tapered end the teeth are offset inward, toward
+  // their root, a little more the nearer the end, until nothing is left at the end face. An offset keeps the
+  // flank angles, so each tooth narrows about its own centre as it retracts. (Replaces the old cone cut.)
+  function runoutOf(node, r) {
+    const q = node && node.params;
+    if (!q || node.type !== 'thread' || !(q.taperTop || q.taperBottom) || !r) return null;
+    const internal = q.kind === 'internal', root = internal ? Math.max(r.rFirst, r.rOther) : Math.min(r.rFirst, r.rOther);
+    const crest = internal ? Math.min(r.rFirst, r.rOther) : Math.max(r.rFirst, r.rOther), depth = Math.abs(crest - root);
+    if (!(depth > 1e-9)) return null;
+    const fl = Math.max(1e-9, (1 - (r.flatA || 0) - (r.flatB || 0)) / 2 * r.pitch);
+    return { top: !!q.taperTop, bottom: !!q.taperBottom, root, s: Math.sign(crest - root), depth, fl, k: fl / depth, len: r.pitch,
+      zMin: Math.min(r.zFirst, r.zLast), zMax: Math.max(r.zFirst, r.zLast) };
+  }
+  // a thread node's runs, with their run-out
+  function runsOf(node) { return (node.runs || []).map(r => { const ro = runoutOf(node, r); return ro ? { ...r, runout: ro } : r; }); }
+  // how far inward the teeth are offset at height z
+  function runoutDelta(ro, z) {
+    let t = 0;
+    if (ro.top) t = Math.max(t, 1 - (ro.zMax - z) / ro.len);
+    if (ro.bottom) t = Math.max(t, 1 - (z - ro.zMin) / ro.len);
+    return ro.depth * Math.max(0, Math.min(1, t));
+  }
+  // the tooth pattern with each root corner knowing which way its flank rises (a sharp root is split in two, so
+  // it can open into a flat as the flanks move in)
+  function runoutPattern(b) {
+    const ro = b.runout, base = toothPattern(b), n = base.length, isRoot = (e) => Math.abs(e.r - ro.root) < 1e-12, out = [];
+    for (let i = 0; i < n; i++) {
+      const e = base[i], pR = isRoot(base[(i - 1 + n) % n]), nR = isRoot(base[(i + 1) % n]);
+      if (!isRoot(e)) { out.push({ ...e, kind: 'crest' }); continue; }
+      if (!pR && !nR) { out.push({ ...e, kind: 'root', dir: -1 }); out.push({ ...e, u: e.u + 1e-7 * b.pitch, kind: 'root', dir: 1 }); }
+      else out.push({ ...e, kind: 'root', dir: nR ? -1 : 1 });
+    }
+    return out;
+  }
+  // a corner after the offset: root corners slide along the root toward their flank, the rest move toward the root
+  function runoutCorner(ro, e, z) {
+    const dl = runoutDelta(ro, z);
+    if (!(dl > 0)) return { r: e.r, z };
+    if (e.kind === 'root') return { r: e.r, z: Math.max(ro.zMin, Math.min(ro.zMax, z + e.dir * Math.min(ro.fl * (1 - 1e-6), dl * ro.k))) };
+    return { r: ro.root + ro.s * Math.max(0, ro.s * (e.r - ro.root) - dl), z };
   }
   // Tooth corners as drawn at angle 0, ordered along the run (first, middles, last).
   function runVertices(r) {
@@ -651,25 +692,26 @@
       return V.length / 3 - 1;
     }
     const pats = new Map();
-    const patOf = (b) => { let p = pats.get(b); if (!p) { p = toothPattern(b); pats.set(b, p); } return p; };
+    const patOf = (b) => { let p = pats.get(b); if (!p) { p = b.runout ? runoutPattern(b) : toothPattern(b); pats.set(b, p); } return p; };
     const hand = (b) => opts.helical ? (b.hand || 0) : 0;
     function column(j) {
       const phi = TAU * j / N, col = [];
       items.forEach((it, pi) => {
         if (!it.band) { col.push({ id: vert(it.y, it.z, phi), key: [pi, 0] }); return; }
-        const b = it.band, shift = hand(b) * b.pitch * phi / TAU, d = b.dir, P = b.pitch, pat = patOf(b);
+        const b = it.band, shift = hand(b) * b.pitch * phi / TAU, d = b.dir, P = b.pitch, pat = patOf(b), ro = b.runout;
         const zs = d > 0 ? b.zMin : b.zMax, ze = d > 0 ? b.zMax : b.zMin;
-        col.push({ id: vert(toothAt(b, pat, zs - b.zFirst - shift), zs, phi), key: [pi, -Infinity] });
+        const endR = (z) => { const r = toothAt(b, pat, z - b.zFirst - shift); return ro ? runoutCorner(ro, { r, kind: 'crest' }, z).r : r; };
+        col.push({ id: vert(endR(zs), zs, phi), key: [pi, -Infinity] });
         // tooth corners lie on helices: z = zFirst + (m·pitch + corner phase) + shift
         const mLo = Math.floor((b.zMin - b.zFirst - shift) / P) - 1, mHi = Math.ceil((b.zMax - b.zFirst - shift) / P) + 1;
         const vs = [];
         for (let m = mLo; m <= mHi; m++) for (const e of pat) {
           const uu = m * P + e.u, z = b.zFirst + uu + shift;
-          if (z - b.zMin > 1e-7 && b.zMax - z > 1e-7) vs.push({ uu, z, r: e.r });
+          if (z - b.zMin > 1e-7 && b.zMax - z > 1e-7) vs.push({ uu, z, r: e.r, e });
         }
         vs.sort((x, y) => d * (x.z - y.z));
-        for (const v of vs) col.push({ id: vert(v.r, v.z, phi), key: [pi, d * (b.zFirst + v.uu)] });
-        col.push({ id: vert(toothAt(b, pat, ze - b.zFirst - shift), ze, phi), key: [pi, Infinity] });
+        for (const v of vs) { const c = ro ? runoutCorner(ro, v.e, v.z) : v; col.push({ id: vert(c.r, c.z, phi), key: [pi, d * (b.zFirst + v.uu)] }); }
+        col.push({ id: vert(endR(ze), ze, phi), key: [pi, Infinity] });
       });
       return col;
     }
@@ -739,36 +781,6 @@
     return { V, T };
   }
 
-  // Lead-in taper of a thread object: the solid that is kept, a cone at the flank angle of the teeth
-  // at the tapered end(s), so the thread starts at its root instead of half a tooth.
-  function taperMesh(node, settings) {
-    const q = node.params, t = threadProfile(q), r = t.runs[0];
-    const z0 = Math.min(r.zFirst, r.zLast), z1 = Math.max(r.zFirst, r.zLast);
-    const rRoot = q.kind === 'internal' ? Math.max(r.rFirst, r.rOther) : Math.min(r.rFirst, r.rOther);
-    const rCrest = q.kind === 'internal' ? Math.min(r.rFirst, r.rOther) : Math.max(r.rFirst, r.rOther);
-    const flank = Math.max(1e-6, (1 - (r.flatA || 0) - (r.flatB || 0)) / 2 * r.pitch), depth = Math.max(1e-6, Math.abs(rCrest - rRoot));
-    const k = flank / depth;                    // axial change per radial change, as on a tooth flank
-    const e = Math.max(1e-4, (z1 - z0) * 0.01), big = depth * 2 + 1e-3;
-    // the cone runs from the backing wall at the end face to the crest, so the whole thread (backing too) is tapered
-    const ys = t.pts.map(p => p.y);
-    let pts;
-    if (q.kind === 'internal') {
-      // keep everything outside a cone that opens to the backing's outer wall at the tapered ends
-      const rWall = Math.max(...ys), rIn = Math.max(0, rCrest - big), dz = (rWall - rIn) * k, rOut = rWall + 1;
-      pts = [{ y: rOut, z: z0 - e }, { y: rOut, z: z1 + e }];
-      if (q.taperTop) pts.push({ y: rWall, z: z1 + e }, { y: rWall, z: z1 }, { y: rIn, z: z1 - dz }); else pts.push({ y: rIn, z: z1 + e });
-      if (q.taperBottom) pts.push({ y: rIn, z: z0 + dz }, { y: rWall, z: z0 }, { y: rWall, z: z0 - e }); else pts.push({ y: rIn, z: z0 - e });
-    } else {
-      // keep everything inside a cone that closes to the backing's inner wall at the tapered ends
-      const rWall = Math.min(...ys), rOut = rCrest + big, dz = (rOut - rWall) * k;
-      pts = [{ y: 0, z: z0 - e }];
-      if (q.taperBottom) pts.push({ y: rWall, z: z0 - e }, { y: rWall, z: z0 }, { y: rOut, z: z0 + dz }); else pts.push({ y: rOut, z: z0 - e });
-      if (q.taperTop) pts.push({ y: rOut, z: z1 - dz }, { y: rWall, z: z1 }, { y: rWall, z: z1 + e }); else pts.push({ y: rOut, z: z1 + e });
-      pts.push({ y: 0, z: z1 + e });
-    }
-    return revolve(expandProfile(pts.map(p => ({ y: p.y, z: p.z, bevel: null })), []), { segments: Math.min(300, node.precision > 2 ? node.precision : settings.precision) });
-  }
-
   // Outline of a thread object: a ring with an ISO-style (or plain V) thread on its outside
   // (external) or inside (internal) surface. All lengths in inches.
   function threadProfile(q) {
@@ -794,7 +806,7 @@
   // Mesh for one leaf node of the scene.
   function nodeMesh(node, settings) {
     if (node.type === 'source' || node.type === 'thread') {
-      return revolve(expandProfile(node.pts, node.runs), { segments: Math.min(300, node.precision > 2 ? node.precision : settings.precision), helical: settings.helical });
+      return revolve(expandProfile(node.pts, runsOf(node)), { segments: Math.min(300, node.precision > 2 ? node.precision : settings.precision), helical: settings.helical });
     }
     const items = expandProfile(node.pts, []);
     if (node.type === 'ngon') {
@@ -811,8 +823,7 @@
     const holesOf = (n) => n.type === 'source' ? (n.holes || (n.id === 'src' ? holes || [] : [])) : [];
     if (!scene.root.length) throw new Error('the scene is empty');
     const only = scene.root.length === 1 ? nodes[scene.root[0]] : null;
-    const tapered = (n) => n.type === 'thread' && n.params && (n.params.taperTop || n.params.taperBottom);
-    if (only && only.type !== 'boolean' && only.type !== 'group' && only.type !== 'cloner' && only.type !== 'holes' && !tapered(only) && !holesOf(only).length) return { mesh: nodeMesh(only, settings), engine: 'direct' };
+    if (only && only.type !== 'boolean' && only.type !== 'group' && only.type !== 'cloner' && only.type !== 'holes' && !holesOf(only).length) return { mesh: nodeMesh(only, settings), engine: 'direct' };
     let mf;
     try {
       if (!self.__aaManifold) {
@@ -873,7 +884,6 @@
       }
       let m = toM(nodeMesh(node, settings), node.name || node.type);
       for (const h of holesOf(node)) m = keep(m.subtract(toM(holeMesh(h), 'a hole')));
-      if (tapered(node)) m = keep(m.intersect(toM(taperMesh(node, settings), 'the thread taper')));
       return m;
     }
     const total = unionAll(scene.root);
@@ -916,7 +926,7 @@
   function getWorker() {
     if (worker || workerFailed) return worker;
     try {
-      const src = [processMesh, ngonFaces, bevelReach, cornerPoints, toothPattern, toothAt, threadProfile, taperMesh, expandProfile, runVertices, revolve, holeMesh, nodeMesh, evaluateScene, soup, runJob]
+      const src = [processMesh, ngonFaces, bevelReach, cornerPoints, toothPattern, toothAt, runoutOf, runsOf, runoutDelta, runoutPattern, runoutCorner, threadProfile, expandProfile, runVertices, revolve, holeMesh, nodeMesh, evaluateScene, soup, runJob]
         .map(f => f.toString()).join('\n') +
         '\nself.onmessage = async function (e) {' +
         '  try { const r = await runJob(e.data); self.postMessage({ job: e.data.job, result: r }, [r.buffer, r.preview.tris.buffer, r.preview.lines.buffer, r.preview.bad.buffer]); }' +
@@ -1461,12 +1471,16 @@
   // Threads advance along their helix and n-sided objects change radius between their face centres
   // and edges; everything else is the same at every angle. theta: radians, as in the revolve.
   function bandSection(b, phi, helical) {
-    const pat = toothPattern(b), P = b.pitch, d = b.dir, shift = (helical ? (b.hand || 0) : 0) * P * phi / (2 * Math.PI);
-    const zs = d > 0 ? b.zMin : b.zMax, ze = d > 0 ? b.zMax : b.zMin, out = [{ y: toothAt(b, pat, zs - b.zFirst - shift), z: zs }], vs = [];
+    const ro = b.runout, pat = ro ? runoutPattern(b) : toothPattern(b), P = b.pitch, d = b.dir, shift = (helical ? (b.hand || 0) : 0) * P * phi / (2 * Math.PI);
+    const endR = (z) => { const r = toothAt(b, pat, z - b.zFirst - shift); return ro ? runoutCorner(ro, { r, kind: 'crest' }, z).r : r; };
+    const zs = d > 0 ? b.zMin : b.zMax, ze = d > 0 ? b.zMax : b.zMin, out = [{ y: endR(zs), z: zs }], vs = [];
     const mLo = Math.floor((b.zMin - b.zFirst - shift) / P) - 1, mHi = Math.ceil((b.zMax - b.zFirst - shift) / P) + 1;
-    for (let m = mLo; m <= mHi; m++) for (const e of pat) { const z = b.zFirst + m * P + e.u + shift; if (z - b.zMin > 1e-7 && b.zMax - z > 1e-7) vs.push({ y: e.r, z }); }
-    vs.sort((x, y) => d * (x.z - y.z));
-    return out.concat(vs, [{ y: toothAt(b, pat, ze - b.zFirst - shift), z: ze }]);
+    for (let m = mLo; m <= mHi; m++) for (const e of pat) {
+      const z = b.zFirst + m * P + e.u + shift;
+      if (z - b.zMin > 1e-7 && b.zMax - z > 1e-7) { const c = ro ? runoutCorner(ro, e, z) : { r: e.r, z }; vs.push({ y: c.r, z: c.z, o: z }); }
+    }
+    vs.sort((x, y) => d * (x.o - y.o));
+    return out.concat(vs.map(v => ({ y: v.y, z: v.z })), [{ y: endR(ze), z: ze }]);
   }
   function ngonScaleAt(q, theta) {
     const n = Math.max(3, q.sides | 0), seg = 2 * Math.PI / n, scale = q.about === 'faces' ? 1 / Math.cos(Math.PI / n) : 1;
@@ -1477,36 +1491,8 @@
     if (n.type === 'ngon') { const s = ngonScaleAt(n.params, theta); return outlineOf(n.pts, []).map(p => ({ y: p.y * s, z: p.z })); }
     if (!(n.runs || []).length) return outlineOf(n.pts, n.runs);
     const out = [];
-    for (const it of expandProfile(n.pts, n.runs)) { if (it.band) out.push(...bandSection(it.band, theta, state.helical)); else out.push({ y: it.y, z: it.z }); }
-    return taperClip(n, out);
-  }
-  // Cut a polygon to one side of a line: keep the points where f(p) >= 0.
-  function clipHalf(poly, f) {
-    const out = [];
-    for (let i = 0; i < poly.length; i++) {
-      const a = poly[i], b = poly[(i + 1) % poly.length], fa = f(a), fb = f(b);
-      if (fa >= 0) out.push(a);
-      if ((fa >= 0) !== (fb >= 0)) { const t = fa / (fa - fb); out.push({ y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t }); }
-    }
+    for (const it of expandProfile(n.pts, runsOf(n))) { if (it.band) out.push(...bandSection(it.band, theta, state.helical)); else out.push({ y: it.y, z: it.z }); }
     return out;
-  }
-  // A thread's outline as its lead-in tapers leave it (the cut the 3D model makes, seen in the section).
-  function taperGeom(n) {
-    const q = n.params, r = (n.runs || [])[0];
-    if (n.type !== 'thread' || !q || !(q.taperTop || q.taperBottom) || !r || !n.pts.length) return null;
-    const z0 = Math.min(r.zFirst, r.zLast), z1 = Math.max(r.zFirst, r.zLast), internal = q.kind === 'internal';
-    const rRoot = internal ? Math.max(r.rFirst, r.rOther) : Math.min(r.rFirst, r.rOther), rCrest = internal ? Math.min(r.rFirst, r.rOther) : Math.max(r.rFirst, r.rOther);
-    const k = Math.max(1e-6, (1 - (r.flatA || 0) - (r.flatB || 0)) / 2 * r.pitch) / Math.max(1e-6, Math.abs(rCrest - rRoot));
-    const ys = n.pts.map(p => p.y), rWall = internal ? Math.max(...ys) : Math.min(...ys);
-    return { q, z0, z1, internal, rCrest, rWall, k };
-  }
-  function taperClip(n, poly) {
-    const t = taperGeom(n);
-    if (!t) return poly;
-    const depthIn = (p) => (t.internal ? t.rWall - p.y : p.y - t.rWall) * t.k;    // how far the cone is from the end face at p
-    if (t.q.taperBottom) poly = clipHalf(poly, p => (p.z - t.z0) - depthIn(p));
-    if (t.q.taperTop) poly = clipHalf(poly, p => (t.z1 - p.z) - depthIn(p));
-    return poly;
   }
 
   // Copy an object (and everything inside it) under new ids; returns the copy's id.
@@ -2494,9 +2480,19 @@
       (n.runs || []).forEach((r, ri) => {
         // helical teeth move along the axis as the view turns: their handles follow the section at the view angle
         const s = xf.id ? runShift(r) : 0, zMin = Math.min(r.zFirst, r.zLast), zMax = Math.max(r.zFirst, r.zLast);
-        runVertices(r).forEach((v, k) => {
+        const ro = runoutOf(n, r), vs = runVertices(r);
+        vs.forEach((v, k) => {
           let p = v;
           if (s && v.role === 'mid') { p = { y: v.y, z: v.z + s }; if (!(p.z - zMin > 1e-7 && zMax - p.z > 1e-7)) return; }
+          // near a lead-in the teeth run out: the handles sit on the retracted tooth
+          if (ro) {
+            const isRoot = (w) => w && Math.abs(w.y - ro.root) < 1e-9;
+            if (!isRoot(v) || v.role !== 'mid') p = { y: runoutCorner(ro, { r: v.y, kind: 'crest' }, p.z).r, z: p.z };
+            else {
+              const nb = !isRoot(vs[k + 1]) && vs[k + 1] ? vs[k + 1] : !isRoot(vs[k - 1]) && vs[k - 1] ? vs[k - 1] : null;
+              if (nb) p = runoutCorner(ro, { r: v.y, kind: 'root', dir: Math.sign(nb.z - v.z) || 1 }, p.z), p = { y: p.r, z: p.z };
+            }
+          }
           const q = xf.fwd(p); out.push({ key: id + '|r|' + ri + '|' + k, y: q.y, z: q.z, run: true });
         });
       });
@@ -2798,7 +2794,7 @@
       MS = sideK;
       for (const id of order) {
         // the section at the view angle (copies in radial cloners are shown as their first copy)
-        const n = state.scene.nodes[id], xf = xfOf(state.scene, id), local = outlineOf(n.pts, n.runs), poly = xf.id ? sectionOutline(n, viewTheta()) : taperClip(n, local).map(xf.fwd), role = roleOf(state.scene, id);
+        const n = state.scene.nodes[id], xf = xfOf(state.scene, id), local = outlineOf(n.pts, n.runs), poly = xf.id ? sectionOutline(n, viewTheta()) : (n.type === 'thread' ? sectionOutline(n, 0) : local).map(xf.fwd), role = roleOf(state.scene, id);
         if (MS < 0 && !xf.id) continue;     // copies in radial cloners: their opposite copy is drawn faintly from the right side
         if (MS > 0) for (const p of poly) { ext.y0 = Math.min(ext.y0, p.y); ext.y1 = Math.max(ext.y1, p.y); ext.z0 = Math.min(ext.z0, p.z); ext.z1 = Math.max(ext.z1, p.z); }
         // a cloned object: show the other half of its section faintly
@@ -2846,18 +2842,6 @@
         if (hot || state.selNodes.has(id)) {
           const q = state.scene.nodes[id].params;
           label(g, hx + 18, hy + (hp.radial ? -16 : 20), ['copies\' axis · distance ' + num(mm(q.radius), 3) + ' ' + UNIT_LABEL + (hp.radial ? ' · y ' + num(hDisp(q.height, sceneBase), 3) + ' ' + UNIT_LABEL : '')], { border: '#ffc078', bg: 'rgba(255,249,219,.95)' });
-        }
-      }
-      // thread lead-in tapers: the cone that trims the teeth at the ends
-      for (const id of order) {
-        const n = state.scene.nodes[id], t = taperGeom(n);
-        if (!t) continue;
-        const xf = xfOf(state.scene, id), dz = Math.abs(t.rCrest - t.rWall) * t.k, segs = [];
-        if (t.q.taperBottom) segs.push([{ y: t.rWall, z: t.z0 }, { y: t.rCrest, z: t.z0 + dz }]);
-        if (t.q.taperTop) segs.push([{ y: t.rWall, z: t.z1 }, { y: t.rCrest, z: t.z1 - dz }]);
-        for (const [a, b] of segs) {
-          const A = xf.fwd(a), B = xf.fwd(b), [x1, y1] = toScreen(A.y, A.z), [x2, y2] = toScreen(B.y, B.z);
-          g.append(sv('line', { x1, y1, x2, y2, stroke: '#c92a2a', 'stroke-width': 1.6, 'stroke-dasharray': '4 2', 'pointer-events': 'none' }));
         }
       }
       // selected edges
@@ -2965,7 +2949,7 @@
     }
     // the object under the pointer (a soft halo round its section, both sides) and the edge under it, drawn over
     // the section on their own so moving the pointer does not redraw everything
-    let lastPolys = { 1: {}, '-1': {} };
+    let lastPolys = { 1: {}, '-1': {} }, treeAnchor = null;
     function drawHover() {
       for (const r of side.querySelectorAll('[data-node]')) r.classList.toggle('aa-hov', !drag && r.dataset.node === hoverNode);
       const old = svg.querySelector('#aa-hover'); if (old) old.remove();
@@ -3102,7 +3086,7 @@
           const a0 = D[o + 3]; if (!a0) continue;
           const X = (col + 0.5 - axisX) / view.s, r = X >= 0 ? rR : rL;
           const uu = r > 0 ? Math.min(1, Math.abs(X) / r) : 1, t = 1 - uu, hy = (1 / (1 + c * t) - h0) / (1 - h0);
-          const a = BASE * (0.25 + 0.8 * hy) * (a0 / 255) * 255 + (BAYER[(col & 3) + (row & 3) * 4] + 0.5) / 16 - 0.5;
+          const a = BASE * (0.25 + 1.325 * hy) * (a0 / 255) * 255 + (BAYER[(col & 3) + (row & 3) * 4] + 0.5) / 16 - 0.5;
           D[o + 3] = a < 0 ? 0 : a > 255 ? 255 : Math.round(a);
         }
       }
@@ -3694,8 +3678,13 @@
           r.addEventListener('dragstart', (e) => { dragNodeId = opts.id; e.dataTransfer.setData('text/plain', opts.id); e.dataTransfer.effectAllowed = 'copyMove'; });
           r.addEventListener('dragend', () => { dragNodeId = null; });
           r.addEventListener('click', (e) => {
-            if (e.shiftKey || e.ctrlKey || e.metaKey) { if (state.selNodes.has(opts.id)) state.selNodes.delete(opts.id); else state.selNodes.add(opts.id); }
-            else { state.selNodes = new Set([opts.id]); state.sel = new Set(); }
+            // Shift: everything listed between the last clicked object and this one; Ctrl: add / remove one
+            const rows = [...side.querySelectorAll('[data-node]')].map(x => x.dataset.node), a = rows.indexOf(treeAnchor), b = rows.indexOf(opts.id);
+            if (e.shiftKey && a >= 0 && b >= 0) {
+              const range = rows.slice(Math.min(a, b), Math.max(a, b) + 1);
+              state.selNodes = new Set(e.ctrlKey || e.metaKey ? [...state.selNodes, ...range] : range); state.sel = new Set();
+            } else if (e.shiftKey || e.ctrlKey || e.metaKey) { if (state.selNodes.has(opts.id)) state.selNodes.delete(opts.id); else state.selNodes.add(opts.id); treeAnchor = opts.id; }
+            else { state.selNodes = new Set([opts.id]); state.sel = new Set(); treeAnchor = opts.id; }
             renderAll();
           });
           r.addEventListener('contextmenu', (e) => {
@@ -3931,7 +3920,7 @@
     // the project's state, short, beside the Project header (the full text on hover)
     function headStatus(s) {
       const x = panels.project.extra;
-      x.textContent = s.ready ? (s.text.startsWith('✔') ? '✔ solid' : '✘ not solid') : s.text.startsWith('Error') ? '✘ error' : state.busy ? 'updating…' : '';
+      x.textContent = s.text.startsWith('Error') ? '✘ error' : state.busy ? 'updating…' : '';
       x.style.color = s.color; x.title = s.text;
     }
     function renderSide() {
@@ -4441,18 +4430,6 @@
       gl.disable(gl.BLEND); gl.enable(gl.DEPTH_TEST);
       gl.disableVertexAttribArray(aC);
     }
-    function drawBadEdges() {
-      if (!badCount) return;
-      gl.useProgram(texProg);
-      gl.uniformMatrix4fv(gl.getUniformLocation(texProg, 'mvp'), false, new Float32Array(lastM));
-      gl.bindBuffer(gl.ARRAY_BUFFER, badBuf);
-      const aP = gl.getAttribLocation(texProg, 'pos'), aC = gl.getAttribLocation(texProg, 'col');
-      gl.enableVertexAttribArray(aP); gl.disableVertexAttribArray(aC); gl.vertexAttrib4f(aC, 1, 0.1, 0.85, 1);
-      gl.vertexAttribPointer(aP, 3, gl.FLOAT, false, 12, 0);
-      gl.disable(gl.DEPTH_TEST);
-      gl.drawArrays(gl.LINES, 0, badCount);
-      gl.enable(gl.DEPTH_TEST);
-    }
     // The compass on the ground plane, built from shapes (rings, ticks, stroke-font numbers, needle)
     // so it stays sharp at any zoom.
     // a thin stroke font for the compass numbers (x 0…0.55, y 0…1)
@@ -4654,7 +4631,7 @@
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, T && ssao ? T.bT : null);
       drawPart(prog, (U) => { gl.uniform1i(U('aoTex'), 0); gl.uniform1f(U('aoOn'), T && ssao ? 1 : 0); gl.uniform2f(U('res'), CW, CH); });
       // the compass, lying on the ground plane under the part and turning with it; the cut axes; problem edges
-      if (bbox && texProg) { drawCompass3d(); drawCutEdges(); drawGizmo(); drawAxisLabels(); drawBadEdges(); }
+      if (bbox && texProg) { drawCompass3d(); drawCutEdges(); drawGizmo(); drawAxisLabels(); }
       // 5. the wireframe: 1 device pixel, not smoothed
       if (wire) {
         if (T) {
