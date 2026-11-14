@@ -634,7 +634,17 @@
       if (!pR && !nR) { out.push({ ...e, kind: 'root', dir: -1, c: toward(-1, e.u) }); const u2 = e.u + 1e-7 * P; out.push({ ...e, u: u2, kind: 'root', dir: 1, c: toward(1, u2) }); }
       else { const dir = nR ? -1 : 1; out.push({ ...e, kind: 'root', dir, c: toward(dir, e.u) }); }
     }
+    out.uc = uc;
     return out;
+  }
+  // The thread's radius at any height z (on a band, with the helix shift at that angle), the tooth there sunk
+  // by the amount at its own centre: used where the band ends, so a tooth crossing an end face is cut there as
+  // it stands rather than dropped to the root early.
+  function runoutRadiusAt(b, pat, z, shift) {
+    const ro = b.runout, P = b.pitch, uu = z - b.zFirst - shift, r0 = toothAt(b, pat, uu);
+    let dc = pat.uc - (((uu % P) + P) % P);
+    if (dc > P / 2) dc -= P; else if (dc < -P / 2) dc += P;
+    return ro.root + ro.s * Math.max(0, ro.s * (r0 - ro.root) - runoutDelta(ro, z + dc));
   }
   // a corner after the offset: root corners slide along the root toward their flank, the rest move toward the root.
   // The offset is the one at the corner's tooth centre (z + e.c), the same for the whole tooth.
@@ -705,17 +715,18 @@
         if (!it.band) { col.push({ id: vert(it.y, it.z, phi), key: [pi, 0] }); return; }
         const b = it.band, shift = hand(b) * b.pitch * phi / TAU, d = b.dir, P = b.pitch, pat = patOf(b), ro = b.runout;
         const zs = d > 0 ? b.zMin : b.zMax, ze = d > 0 ? b.zMax : b.zMin;
-        const endR = (z) => { const r = toothAt(b, pat, z - b.zFirst - shift); return ro ? runoutCorner(ro, { r, kind: 'crest' }, z).r : r; };
+        const endR = (z) => ro ? runoutRadiusAt(b, pat, z, shift) : toothAt(b, pat, z - b.zFirst - shift);
         col.push({ id: vert(endR(zs), zs, phi), key: [pi, -Infinity] });
         // tooth corners lie on helices: z = zFirst + (m·pitch + corner phase) + shift
         const mLo = Math.floor((b.zMin - b.zFirst - shift) / P) - 1, mHi = Math.ceil((b.zMax - b.zFirst - shift) / P) + 1;
         const vs = [];
         for (let m = mLo; m <= mHi; m++) for (const e of pat) {
           const uu = m * P + e.u, z = b.zFirst + uu + shift;
-          if (z - b.zMin > 1e-7 && b.zMax - z > 1e-7) vs.push({ uu, z, r: e.r, e });
+          const c = ro ? runoutCorner(ro, e, z) : { r: e.r, z };
+          if (c.z - b.zMin > 1e-7 && b.zMax - c.z > 1e-7) vs.push({ uu, z, c });
         }
         vs.sort((x, y) => d * (x.z - y.z));
-        for (const v of vs) { const c = ro ? runoutCorner(ro, v.e, v.z) : v; col.push({ id: vert(c.r, c.z, phi), key: [pi, d * (b.zFirst + v.uu)] }); }
+        for (const v of vs) col.push({ id: vert(v.c.r, v.c.z, phi), key: [pi, d * (b.zFirst + v.uu)] });
         col.push({ id: vert(endR(ze), ze, phi), key: [pi, Infinity] });
       });
       return col;
@@ -931,7 +942,7 @@
   function getWorker() {
     if (worker || workerFailed) return worker;
     try {
-      const src = [processMesh, ngonFaces, bevelReach, cornerPoints, toothPattern, toothAt, runoutOf, runsOf, runoutDelta, runoutPattern, runoutCorner, threadProfile, expandProfile, runVertices, revolve, holeMesh, nodeMesh, evaluateScene, soup, runJob]
+      const src = [processMesh, ngonFaces, bevelReach, cornerPoints, toothPattern, toothAt, runoutOf, runsOf, runoutDelta, runoutPattern, runoutCorner, runoutRadiusAt, threadProfile, expandProfile, runVertices, revolve, holeMesh, nodeMesh, evaluateScene, soup, runJob]
         .map(f => f.toString()).join('\n') +
         '\nself.onmessage = async function (e) {' +
         '  try { const r = await runJob(e.data); self.postMessage({ job: e.data.job, result: r }, [r.buffer, r.preview.tris.buffer, r.preview.lines.buffer, r.preview.bad.buffer]); }' +
@@ -1477,12 +1488,13 @@
   // and edges; everything else is the same at every angle. theta: radians, as in the revolve.
   function bandSection(b, phi, helical) {
     const ro = b.runout, pat = ro ? runoutPattern(b) : toothPattern(b), P = b.pitch, d = b.dir, shift = (helical ? (b.hand || 0) : 0) * P * phi / (2 * Math.PI);
-    const endR = (z) => { const r = toothAt(b, pat, z - b.zFirst - shift); return ro ? runoutCorner(ro, { r, kind: 'crest' }, z).r : r; };
+    const endR = (z) => ro ? runoutRadiusAt(b, pat, z, shift) : toothAt(b, pat, z - b.zFirst - shift);
     const zs = d > 0 ? b.zMin : b.zMax, ze = d > 0 ? b.zMax : b.zMin, out = [{ y: endR(zs), z: zs }], vs = [];
     const mLo = Math.floor((b.zMin - b.zFirst - shift) / P) - 1, mHi = Math.ceil((b.zMax - b.zFirst - shift) / P) + 1;
     for (let m = mLo; m <= mHi; m++) for (const e of pat) {
       const z = b.zFirst + m * P + e.u + shift;
-      if (z - b.zMin > 1e-7 && b.zMax - z > 1e-7) { const c = ro ? runoutCorner(ro, e, z) : { r: e.r, z }; vs.push({ y: c.r, z: c.z, o: z }); }
+      const c = ro ? runoutCorner(ro, e, z) : { r: e.r, z };
+      if (c.z - b.zMin > 1e-7 && b.zMax - c.z > 1e-7) vs.push({ y: c.r, z: c.z, o: z });
     }
     vs.sort((x, y) => d * (x.o - y.o));
     return out.concat(vs.map(v => ({ y: v.y, z: v.z })), [{ y: endR(ze), z: ze }]);
@@ -2494,7 +2506,8 @@
             // the same offset for the whole tooth: the one at its crest's centre
             const isRoot = (w) => w && Math.abs(w.y - ro.root) < 1e-9;
             const crestCentre = (j) => { const w = vs[j], o = [vs[j - 1], vs[j + 1]].find(x => x && x.role === 'mid' && Math.abs(x.y - w.y) < 1e-9); return o ? (w.z + o.z) / 2 : w.z; };
-            if (!isRoot(v) || v.role !== 'mid') p = { y: runoutCorner(ro, { r: v.y, kind: 'crest', c: v.role === 'mid' ? crestCentre(k) - v.z : 0 }, p.z).r, z: p.z };
+            if (v.role !== 'mid') { const bb = { ...r, runout: ro }, pt = runoutPattern(bb); p = { y: runoutRadiusAt(bb, pt, p.z, runShift(r)), z: p.z }; }
+            else if (!isRoot(v)) p = { y: runoutCorner(ro, { r: v.y, kind: 'crest', c: crestCentre(k) - v.z }, p.z).r, z: p.z };
             else {
               const j = !isRoot(vs[k + 1]) && vs[k + 1] && vs[k + 1].role === 'mid' ? k + 1 : !isRoot(vs[k - 1]) && vs[k - 1] && vs[k - 1].role === 'mid' ? k - 1 : -1;
               if (j >= 0) { const c = runoutCorner(ro, { r: v.y, kind: 'root', dir: Math.sign(vs[j].z - v.z) || 1, c: crestCentre(j) - v.z }, p.z); p = { y: c.r, z: c.z }; }
