@@ -620,21 +620,26 @@
     if (ro.bottom) t = Math.max(t, 1 - (z - ro.zMin) / ro.len);
     return ro.depth * Math.max(0, Math.min(1, t));
   }
-  // the tooth pattern with each root corner knowing which way its flank rises (a sharp root is split in two, so
-  // it can open into a flat as the flanks move in)
+  // The tooth pattern with each corner knowing its tooth: root corners which way their flank rises (a sharp root
+  // is split in two, so it can open into a flat), and every corner the offset c from it to its tooth's centre, so
+  // a whole tooth is offset by the same amount and shrinks evenly about its centre.
   function runoutPattern(b) {
-    const ro = b.runout, base = toothPattern(b), n = base.length, isRoot = (e) => Math.abs(e.r - ro.root) < 1e-12, out = [];
+    const ro = b.runout, base = toothPattern(b), n = base.length, P = b.pitch, isRoot = (e) => Math.abs(e.r - ro.root) < 1e-12, out = [];
+    // the crest's centre in the period (the middle of its flat, or its tip)
+    const crests = base.filter(e => !isRoot(e)), uc = crests.length ? (crests[0].u + crests[crests.length - 1].u) / 2 : P / 2;
     for (let i = 0; i < n; i++) {
       const e = base[i], pR = isRoot(base[(i - 1 + n) % n]), nR = isRoot(base[(i + 1) % n]);
-      if (!isRoot(e)) { out.push({ ...e, kind: 'crest' }); continue; }
-      if (!pR && !nR) { out.push({ ...e, kind: 'root', dir: -1 }); out.push({ ...e, u: e.u + 1e-7 * b.pitch, kind: 'root', dir: 1 }); }
-      else out.push({ ...e, kind: 'root', dir: nR ? -1 : 1 });
+      if (!isRoot(e)) { out.push({ ...e, kind: 'crest', c: uc - e.u }); continue; }
+      const toward = (dir, u) => { let c = uc; while (dir > 0 ? c < u : c > u) c += dir * P; while (dir > 0 ? c - P >= u : c + P <= u) c -= dir * P; return c - u; };
+      if (!pR && !nR) { out.push({ ...e, kind: 'root', dir: -1, c: toward(-1, e.u) }); const u2 = e.u + 1e-7 * P; out.push({ ...e, u: u2, kind: 'root', dir: 1, c: toward(1, u2) }); }
+      else { const dir = nR ? -1 : 1; out.push({ ...e, kind: 'root', dir, c: toward(dir, e.u) }); }
     }
     return out;
   }
-  // a corner after the offset: root corners slide along the root toward their flank, the rest move toward the root
+  // a corner after the offset: root corners slide along the root toward their flank, the rest move toward the root.
+  // The offset is the one at the corner's tooth centre (z + e.c), the same for the whole tooth.
   function runoutCorner(ro, e, z) {
-    const dl = runoutDelta(ro, z);
+    const dl = runoutDelta(ro, z + (e.c || 0));
     if (!(dl > 0)) return { r: e.r, z };
     if (e.kind === 'root') return { r: e.r, z: Math.max(ro.zMin, Math.min(ro.zMax, z + e.dir * Math.min(ro.fl * (1 - 1e-6), dl * ro.k))) };
     return { r: ro.root + ro.s * Math.max(0, ro.s * (e.r - ro.root) - dl), z };
@@ -2486,11 +2491,13 @@
           if (s && v.role === 'mid') { p = { y: v.y, z: v.z + s }; if (!(p.z - zMin > 1e-7 && zMax - p.z > 1e-7)) return; }
           // near a lead-in the teeth run out: the handles sit on the retracted tooth
           if (ro) {
+            // the same offset for the whole tooth: the one at its crest's centre
             const isRoot = (w) => w && Math.abs(w.y - ro.root) < 1e-9;
-            if (!isRoot(v) || v.role !== 'mid') p = { y: runoutCorner(ro, { r: v.y, kind: 'crest' }, p.z).r, z: p.z };
+            const crestCentre = (j) => { const w = vs[j], o = [vs[j - 1], vs[j + 1]].find(x => x && x.role === 'mid' && Math.abs(x.y - w.y) < 1e-9); return o ? (w.z + o.z) / 2 : w.z; };
+            if (!isRoot(v) || v.role !== 'mid') p = { y: runoutCorner(ro, { r: v.y, kind: 'crest', c: v.role === 'mid' ? crestCentre(k) - v.z : 0 }, p.z).r, z: p.z };
             else {
-              const nb = !isRoot(vs[k + 1]) && vs[k + 1] ? vs[k + 1] : !isRoot(vs[k - 1]) && vs[k - 1] ? vs[k - 1] : null;
-              if (nb) p = runoutCorner(ro, { r: v.y, kind: 'root', dir: Math.sign(nb.z - v.z) || 1 }, p.z), p = { y: p.r, z: p.z };
+              const j = !isRoot(vs[k + 1]) && vs[k + 1] && vs[k + 1].role === 'mid' ? k + 1 : !isRoot(vs[k - 1]) && vs[k - 1] && vs[k - 1].role === 'mid' ? k - 1 : -1;
+              if (j >= 0) { const c = runoutCorner(ro, { r: v.y, kind: 'root', dir: Math.sign(vs[j].z - v.z) || 1, c: crestCentre(j) - v.z }, p.z); p = { y: c.r, z: c.z }; }
             }
           }
           const q = xf.fwd(p); out.push({ key: id + '|r|' + ri + '|' + k, y: q.y, z: q.z, run: true });
