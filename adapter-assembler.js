@@ -1,10 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.5.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.6.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
+  const APP_VERSION = '3.6.0';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -29,6 +30,7 @@
     ssao: true,            // 3D view: ambient occlusion
     lenUnit: 'mm',         // displayed lengths: 'mm' or 'in'
     quality: 'high',       // 'high', or 'low': no animations and less detail (faster on slow machines)
+    collapsed: [],         // property groups the user has folded (by title)
     angUnit: 'deg',        // displayed angles: 'deg' or 'rad'
     ortho: false,          // 3D view: orthographic (true) or perspective projection
     flip: false,           // turn the part upside down (export and 3D view)
@@ -60,7 +62,7 @@
 
 
   // Settings remembered in this browser.
-  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'quality', 'cut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts'];
+  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'quality', 'collapsed', 'cut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts'];
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     for (const k of SAVED_SETTINGS) if (k in saved && typeof saved[k] === typeof state[k]) state[k] = saved[k];
@@ -927,10 +929,9 @@
       mesh = soup(r.mesh); engine = r.engine;
     }
     if (data.opts && data.opts.flip) {
-      // upside down: mirror Z and swap two corners of every triangle to keep the faces outward
+      // upside down: a half turn about the X axis (not a mirror), so a right-hand thread is still right-hand
       mesh = mesh.slice();
-      for (let o = 0; o < mesh.length; o += 7) mesh[o + 2] = -mesh[o + 2];
-      for (let t = 0; t < mesh.length; t += 21) for (let c = 0; c < 7; c++) { const x = mesh[t + 7 + c]; mesh[t + 7 + c] = mesh[t + 14 + c]; mesh[t + 14 + c] = x; }
+      for (let o = 0; o < mesh.length; o += 7) { mesh[o + 1] = -mesh[o + 1]; mesh[o + 2] = -mesh[o + 2]; }
     }
     const res = processMesh(mesh, data.opts);
     res.report.engine = engine;
@@ -1439,7 +1440,7 @@
       markEdited(); recalc(); return;
     }
     const params = defaultParams(view);
-    sc.nodes[id] = { id, type, name: (type === 'ngon' ? 'N-sided ' : 'Circle ') + id.slice(1), params, pts: tagPts(paramProfile(params)), custom: false };
+    sc.nodes[id] = { id, type, name: (type === 'ngon' ? 'N-sided ' : 'Circular ') + id.slice(1), params, pts: tagPts(paramProfile(params)), custom: false };
     place(sc, id, insertTarget());
     state.selNodes = new Set([id]); state.sel = new Set();
     markEdited(); recalc();
@@ -2115,10 +2116,10 @@
         selectRow('Quality', state.quality, [['high', 'high'], ['low', 'low (no animations, less detail)']], v => setUnit('quality', v))),
       checkRow('Flip upside down', () => state.flip, v => set('flip', v)),
       el('div', null,
-        numRow('Circle precision (edges)', state.precision, v => set('precision', Math.max(8, Math.min(300, Math.round(v)))), { step: '1', min: 8, max: 300, digits: 0, width: 64 }),
+        numRow('Circular precision (edges)', state.precision, v => set('precision', Math.max(8, Math.min(300, Math.round(v)))), { step: '1', min: 8, max: 300, digits: 0, width: 64 }),
         selectRow('Faces', state.faces, [['ngons', 'N-gons'], ['quads', 'Quads'], ['tris', 'Triangles']], v => set('faces', v)),
         selectRow('Format', state.format, [['stl', 'STL'], ['obj', 'OBJ']], v => set('format', v))),
-      state.faces !== 'tris' && state.format === 'stl' ? el('div', { style: 'color:#666;font-size:11px' }, 'STL files only hold triangles; ' + (state.faces === 'ngons' ? 'n-gons' : 'quads') + ' apply to OBJ export and the wireframe.') : null);
+      null);
   }
 
   function statusText() {
@@ -2172,23 +2173,24 @@
     const bar = el('div', { style: 'padding:3px 8px;border-bottom:1px solid #ddd;display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-right:36px' },
       el('b', { style: 'font-size:14px' }, 'Adapter Assembler'),
       el('button', { type: 'button', style: BTN2, onclick: () => showSplash(), title: 'Blank project, open a project file, or build an adapter between two threads' }, 'New / open…'),
-      el('span', { style: 'color:#666;font-size:12px' }, 'Click points, edges or objects (Shift/Ctrl adds); drag a box to select points. Drag to move — hold Ctrl to snap (points, midpoints, grid), Shift to lock a direction. Drag a bevel (yellow) to resize it. Right-click for more. Middle/right-drag pans, scroll zooms, double-click fits.'));
+      el('span', { style: 'margin-left:auto;color:#868e96;font-size:11px', title: 'Adapter Assembler version' }, 'v' + APP_VERSION));
 
     // left: cross-section
     const svg = sv('svg', { style: 'position:relative;width:100%;height:100%;display:block;touch-action:none;background:transparent;user-select:none;-webkit-user-select:none' });
     // the inside of the part seen through the middle, painted behind the cross-section
     const wrapCanvas = el('canvas', { style: 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none' });
     const left = el('div', { style: 'flex:0 0 ' + state.paneLeft + '%;position:relative;min-width:0;background:#fbfbfc' }, wrapCanvas, svg);
-    const coord = el('div', { style: 'position:absolute;right:30px;top:6px;font-size:11px;color:#555;background:rgba(255,255,255,.9);padding:2px 6px;border-radius:3px;pointer-events:none' });
+    const zoomTag = el('div', { style: 'position:absolute;right:30px;top:6px;font-size:11px;color:#495057;background:rgba(255,255,255,.9);padding:2px 6px;border-radius:3px;cursor:pointer;user-select:none', title: 'Zoom (100% = fitted). Click to fit.' });
+    zoomTag.addEventListener('click', () => { fit(); drawSection(); });
+    const coord = el('div', { style: 'position:absolute;right:30px;top:28px;font-size:11px;color:#555;background:rgba(255,255,255,.9);padding:2px 6px;border-radius:3px;pointer-events:none' });
     const legend = el('div', { style: 'position:absolute;left:70px;top:6px;font-size:11px;color:#555;background:rgba(255,255,255,.9);padding:3px 6px;border-radius:3px;pointer-events:none;line-height:1.5' });
-    legend.innerHTML = 'Cross-section: x = radius / diameter →, y = height (offset from the lowest point) ↑, in ' + UNIT_LABEL + '<br>' +
-      '<span style="color:#2f9e44">■ circle</span> <span style="color:#7048e8">■ n-sided</span> <span style="color:#d9480f">● thread</span> <span style="color:#e03131">▨ subtracted</span><br>' +
+    legend.innerHTML = '<span style="color:#2f9e44">■ circular</span> <span style="color:#7048e8">■ n-sided</span> <span style="color:#d9480f">● thread</span> <span style="color:#e03131">▨ subtracted</span><br>' +
       'n-sided: <span style="color:#0c8599">— face-centre radius (min)</span> <span style="color:#c2255c">- - edge radius (max)</span>';
     const loading = el('div', { style: 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#666;background:#fbfbfc' }, 'Start a project with New / open…');
     const overlay = el('div', { style: 'position:absolute;inset:0;pointer-events:none;overflow:hidden' });
     // 1-D compass under the cross-section: the angle of the section around the axis (drag to turn)
     const compass1 = el('canvas', { style: 'position:absolute;left:50%;transform:translateX(-50%);bottom:' + (44 + 4) + 'px;width:300px;height:26px;cursor:ew-resize;touch-action:none;z-index:2;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,.18)', title: 'Section angle: drag to turn the part (the 3D view turns with it)' });
-    left.append(overlay, coord, legend, loading, compass1);
+    left.append(overlay, zoomTag, coord, legend, loading, compass1);
 
     // right: 3D preview + side panel
     const canvas = el('canvas', { style: 'width:100%;height:100%;display:block;touch-action:none;cursor:grab;background:#1c1f24' });
@@ -2207,7 +2209,7 @@
       el('label', { style: 'cursor:pointer', title: 'Ambient occlusion: darkens creases and corners' }, ssaoBox, ' SSAO'),
       el('label', { style: 'cursor:pointer', title: 'Orthographic view (no perspective): parallel lines stay parallel' }, orthoBox, ' orthographic'),
       el('label', { style: 'cursor:pointer', title: 'Turn the part upside down (also in the exported file)' }, flipBox, ' flip upside down'));
-    const hint3d = el('div', { style: 'position:absolute;left:8px;bottom:5px;font-size:10px;color:#9aa;pointer-events:none' }, 'drag: turn the part · drag a handle: cut (X red, Y green up, Z blue; snaps to the origin, Alt: no snap) · Ctrl/right-drag: pan · wheel: zoom · middle-click: reset');
+    const hint3d = el('div', { style: 'position:absolute;left:8px;bottom:5px;font-size:10px;color:#9aa;pointer-events:none' }, 'drag: turn the part');
     const view3d = el('div', { style: 'flex:1;position:relative;min-height:0;min-width:0' }, canvas, busyTag, toggles3d, hint3d);
     // minimizing panes: a pane shrinks to a bar; click the bar to bring it back
     root.append(el('style', null, '.aa-min>:not(.aa-minbar){display:none!important}.aa-minbar{display:none}.aa-min>.aa-minbar{display:flex!important}'));
@@ -2407,9 +2409,9 @@
             return last ? card('Last scene', el('div', { style: 'color:#666;margin-bottom:8px' }, (last.name || 'Scene') + ', ' + new Date(last.date).toLocaleString() + ' — remembered in this browser.'),
               el('button', { type: 'button', style: BTN, onclick: () => { if (isFinite(last.angle)) state.viewAngle = last.angle; openScene(clone(last.scene)); } }, 'Continue')) : null;
           })(),
-          card('Blank project', el('div', { style: 'color:#666;margin-bottom:8px' }, 'An empty scene: add circles, n-sided objects, threads, cloners and booleans.'),
+          card('Blank project',
             el('button', { type: 'button', style: BTN, onclick: () => openScene({ nodes: {}, root: [], seq: 1 }) }, 'Start blank')),
-          card('Open a project', el('div', { style: 'color:#666;margin-bottom:8px' }, 'A scene or saved models exported as JSON from this tool.'),
+          card('Open a project',
             el('button', { type: 'button', style: BTN, onclick: () => { W.__aaOnProjectLoaded = () => { view = null; hideSplash(); }; pickJsonFile(); } }, 'Open JSON file…'),
             lib.length ? el('div', { style: 'margin-top:10px' }, el('div', { style: 'font-weight:700;margin-bottom:4px' }, 'My saved models'),
               ...lib.map(entry => el('div', { style: 'display:flex;gap:6px;align-items:center;margin:2px 0' },
@@ -2418,7 +2420,6 @@
                   Object.assign(sc.nodes, sub.nodes); sc.root.push(sub.rootId); openScene(sc, 'Opened "' + entry.name + '".');
                 } }, 'Open'), el('span', null, entry.name)))) : null),
           card('Adapter assembler',
-            el('div', { style: 'color:#666;margin-bottom:6px' }, 'Builds an adapter from thread A (bottom) to thread B (top), as editable rings and threads with lead-in tapers at the ends.'),
             el('div', { style: 'display:flex;gap:18px;flex-wrap:wrap' }, A.el, B.el),
             pgrid(2, ['Total length (' + UNIT_LABEL + ')', lenIn], ['Wall (' + UNIT_LABEL + ')', wallIn], ['Fit clearance (' + UNIT_LABEL + ')', clrIn], GBR,
               ['Avoid right angles', el('label', { style: 'display:inline-flex;gap:4px;align-items:center' }, steepBox, 'steep walls, at least'), angIn, ANG_LABEL.trim() + ' from horizontal']),
@@ -2435,7 +2436,7 @@
     const onKey = (e) => {
       if (!root.isConnected) return;
       const ae = document.activeElement || {}, typing = /SELECT|TEXTAREA/.test(ae.tagName || '') || (ae.tagName === 'INPUT' && !/^(checkbox|radio|button|submit|range|color)$/.test(ae.type));
-      if (typing) { e.stopPropagation(); return; }
+      if (typing) { if (ae.__onKey) ae.__onKey(e); e.stopPropagation(); return; }
       if (e.key === 'Escape') {
         if (splash.style.display !== 'none' && state.scene) { hideSplash(); e.stopPropagation(); e.preventDefault(); return; }
         if (menu.style.display !== 'none') { hideMenu(); e.stopPropagation(); e.preventDefault(); return; }
@@ -2481,11 +2482,12 @@
       const { w, h } = size();
       const R = Math.max(Math.abs(y0), Math.abs(y1), 1e-6);    // both sides of the axis
       view = { cy: 0, cz: (z0 + z1) / 2, s: Math.min(w / (2 * R * 1.15), h / ((z1 - z0) * 1.2 || 1)) };
+      fitScale = view.s;
     }
     // The cross-section shows both sides of the axis: the section at the view angle on the right, and the one
     // opposite it (view angle + 180°) mirrored on the left, which works just the same. MS is the side being drawn
     // or worked on (1 right, -1 left); radii stay positive on both sides.
-    let MS = 1, dragSide = 1;
+    let MS = 1, dragSide = 1, fitScale = 0;
     const toScreen = (y, z) => { const { w, h } = size(); return [w / 2 + (MS * y - view.cy) * view.s, h / 2 - (z - view.cz) * view.s]; };
     const toWorld = (sx, sy) => { const { w, h } = size(); return [view.cy + (sx - w / 2) / view.s, view.cz - (sy - h / 2) / view.s]; };
     const local = (e) => { const r = svg.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
@@ -2963,13 +2965,34 @@
       if (drag && drag.type === 'bevel' && drag.label) label(svg, drag.labelAt[0] + 12, drag.labelAt[1] - 10, [drag.label], { border: '#ffc078', bg: 'rgba(255,249,219,.95)' });
       drawCursor();
       drawHover();
+      zoomTag.textContent = fitScale > 0 ? Math.round(view.s / fitScale * 100) + '%' : '';
       syncThreadBoxes();
       renderSelBox();
       MS = MS0;
     }
     // the object under the pointer (a soft halo round its section, both sides) and the edge under it, drawn over
     // the section on their own so moving the pointer does not redraw everything
-    let lastPolys = { 1: {}, '-1': {} }, treeAnchor = null;
+    let lastPolys = { 1: {}, '-1': {} }, treeAnchor = null, lastRowClick = { id: null, t: 0 };
+    function renameRow(id) {
+      const n = state.scene && state.scene.nodes[id], row = side.querySelector('[data-node="' + id + '"]');
+      if (!n || !row) return;
+      const inp = el('input', { type: 'text', value: n.name || '', style: 'width:100%;max-width:220px' });
+      let done = false;
+      const finish = (keep) => {
+        if (done) return; done = true;
+        const v = inp.value.trim();
+        if (keep && v && v !== n.name) { pushUndo(); n.name = v; if (n.type === 'thread') for (const r of n.runs) r.label = v; markEdited(); rememberScene(); }
+        inp.blur(); renderAll();
+      };
+      inp.__onKey = (e) => { if (e.key === 'Enter') { e.preventDefault(); finish(true); } else if (e.key === 'Escape') { e.preventDefault(); finish(false); } };
+      inp.addEventListener('blur', () => finish(true));
+      inp.addEventListener('click', (e) => e.stopPropagation());
+      inp.addEventListener('pointerdown', (e) => e.stopPropagation());
+      row.draggable = false;
+      const icon = row.firstChild;
+      row.textContent = ''; if (icon) row.append(icon); row.append(inp);
+      inp.focus(); inp.select();
+    }
     function drawHover() {
       for (const r of side.querySelectorAll('[data-node]')) r.classList.toggle('aa-hov', !drag && r.dataset.node === hoverNode);
       const old = svg.querySelector('#aa-hover'); if (old) old.remove();
@@ -3176,7 +3199,7 @@
       const box = el('div', { style: 'position:absolute;pointer-events:auto;background:rgba(255,249,219,.96);border:1px solid #ffc078;border-radius:5px;padding:4px 6px;font:11px/1.35 sans-serif;color:#343a40;box-shadow:0 1px 4px rgba(0,0,0,.12)' });
       const title = el('div', { style: 'font-weight:700;cursor:pointer;user-select:none;display:flex;gap:6px;align-items:center' });
       const body = el('div', { style: 'display:grid;grid-template-columns:auto auto auto auto;gap:2px 6px;align-items:center;margin-top:3px' });
-      const hand = el('select', { style: 'font-size:11px' }, el('option', { value: '1' }, 'right-hand'), el('option', { value: '-1' }, 'left-hand'));
+      const hand = el('select', { style: 'font-size:11px' }, el('option', { value: '1' }, 'standard'), el('option', { value: '-1' }, 'reverse'));
       hand.addEventListener('change', () => { const o = runOf(nodeId, ri); if (!o) return; pushUndo(); o.r.hand = +hand.value; recalc(); });
       const tb = { box, inputs: {}, collapsed: true };
       body.style.display = 'none';
@@ -3375,7 +3398,7 @@
       const piv = el('select', { style: 'font-size:11px;max-width:100%' }, el('option', { value: 'centre' }, 'selection centre'), el('option', { value: 'origin' }, 'axis at the lowest point'));
       piv.value = tf.pivot; piv.addEventListener('change', () => { tf.pivot = piv.value; });
       add('About', { span: [piv] }, null);
-      selBox.append(grid, el('div', { style: 'color:#888;margin-top:5px;width:0;min-width:100%' }, 'x = radius / diameter, y = height. Threads move with their centre but keep their shape. Arrow keys nudge ' + (UNIT_SCALE === MM ? '0.1 mm (Shift: 1 mm).' : '0.01 in (Shift: 0.1 in).')));
+      selBox.append(grid);
     }
 
     // ---- pointer interaction ----
@@ -3616,7 +3639,6 @@
       menu.textContent = '';
       const what = [pts.length ? pts.length + ' point' + (pts.length === 1 ? '' : 's') : null, edges.length ? edges.length + ' edge' + (edges.length === 1 ? '' : 's') : null, runs.length ? runs.length + ' thread point' + (runs.length === 1 ? '' : 's') : null].filter(Boolean).join(', ');
       menu.append(el('div', { style: 'font-weight:700;margin-bottom:4px' }, what + ' selected'));
-      if (runs.length) menu.append(el('div', { style: 'color:#666;margin-bottom:4px' }, 'Thread points are skipped for bevels, inserting and deleting.'));
       // insert points on edges: any number, evenly spaced
       if (edges.length) {
         const nIn = el('input', { type: 'number', min: '1', max: '200', step: '1', value: '1', style: 'width:52px' });
@@ -3639,8 +3661,7 @@
         const oIn = selectInput(bv.out ? 'convex' : 'concave', [['convex', 'convex (rounded)'], ['concave', 'concave (cove)']], () => {});
         menu.append(
           el('div', { style: 'margin:2px 0' }, 'Bevel radius (' + UNIT_LABEL + ', 0 = none) ', rIn),
-          el('div', { style: 'margin:2px 0' }, 'edges ', sIn, ' shape ', oIn),
-          el('div', { style: 'color:#666;font-size:11px' }, 'Changes apply as you type. A bevel may reach past the middle of an edge; the neighbouring bevel shrinks to make room.'));
+          el('div', { style: 'margin:2px 0' }, 'edges ', sIn, ' shape ', oIn));
         // live: every change re-applies the bevel (one undo step for this menu)
         let bevelUndo = false;
         const applyBevel = (live) => {
@@ -3698,6 +3719,10 @@
           r.addEventListener('dragstart', (e) => { dragNodeId = opts.id; e.dataTransfer.setData('text/plain', opts.id); e.dataTransfer.effectAllowed = 'copyMove'; });
           r.addEventListener('dragend', () => { dragNodeId = null; });
           r.addEventListener('click', (e) => {
+            // a second click on the same row soon after: rename it right there
+            const now = performance.now();
+            if (!e.shiftKey && !e.ctrlKey && !e.metaKey && lastRowClick.id === opts.id && now - lastRowClick.t < 400) { lastRowClick = { id: null, t: 0 }; renameRow(opts.id); return; }
+            lastRowClick = { id: opts.id, t: now };
             // Shift: everything listed between the last clicked object and this one; Ctrl: add / remove one
             const rows = [...side.querySelectorAll('[data-node]')].map(x => x.dataset.node), a = rows.indexOf(treeAnchor), b = rows.indexOf(opts.id);
             if (e.shiftKey && a >= 0 && b >= 0) {
@@ -3760,12 +3785,11 @@
           if (!n.children.length) mkRow({ drop: { parent: id, slot: null }, style: 'padding:1px 4px;margin-left:' + (depth + 1) * 14 + 'px;color:#999;font-style:italic;border-radius:4px', kids: ['empty — drop objects here'] });
         }
       };
-      mkRow({ drop: { parent: null, slot: null }, style: 'color:#666;padding:1px 4px;border-radius:4px', kids: ['Scene (union of everything below) — drop here to move to the top level (hold Ctrl to copy)'] });
+      mkRow({ drop: { parent: null, slot: null }, style: 'color:#666;padding:1px 4px;border-radius:4px', kids: ['Scene'], title: 'Drop here to move to the top level (hold Ctrl to copy)' });
       sc.root.forEach((id, i) => nodeRow(id, 1, null, { parent: null, slot: i }));
       return el('div', { style: BOX },
         el('div', { style: H }, 'Objects'),
-        rows,
-        el('div', { style: 'color:#666;font-size:11px;margin-top:3px' }, 'Shift/Ctrl-click to select several. Drag rows into groups, boolean slots or the scene; hold Ctrl while dropping to place a copy instead. Right-click a row for more (Duplicate: Ctrl+D).'));
+        rows);
     }
 
     function parentChoices(id) {
@@ -3782,7 +3806,7 @@
     function propsBlock() {
       const sc = state.scene, ids = topSelected(sc);
       if (!ids.length) return el('div', { style: BOX }, el('div', { style: H }, 'Properties'), 'Select an object in the list or click inside its cross-section.');
-      if (ids.length > 1) return el('div', { style: BOX }, el('div', { style: H }, ids.length + ' objects selected'), el('div', { style: 'color:#666' }, ids.length + ' objects selected: use the buttons in the header, or right-click for more.'));
+      if (ids.length > 1) return el('div', { style: BOX }, el('div', { style: H }, ids.length + ' objects selected'), el('div', { style: 'color:#666' }, ids.length + ' objects selected'));
       const n = sc.nodes[ids[0]], U = ' (' + UNIT_LABEL + ')', UX = ', ' + UNIT_LABEL + ')';
       const box = el('div', { style: BOX }, el('div', { style: H }, 'Properties — ' + (n.name || n.id)));
       const nameIn = el('input', { type: 'text', value: n.name || '', style: 'width:160px;box-sizing:border-box' });
@@ -3793,22 +3817,29 @@
           const t = v === 'root' ? { parent: null, slot: null } : v.endsWith(':g') ? { parent: v.slice(0, -2), slot: null } : { parent: v.split(':')[0], slot: +v.split(':')[1] };
           if (moveNodeTo(sc, n.id, t)) { pushSnap(snap); markEdited(); recalc(); }
         }, 'max-width:180px')]));
-      const note = (t) => ({ wide: el('div', { style: 'color:#666;font-size:11px' }, t) });
-      const sect = (title, ...kids) => el('div', { style: 'border-top:1px solid #e9ecef;margin-top:5px;padding-top:3px' },
-        el('div', { style: 'font:700 10px/1.4 sans-serif;letter-spacing:.05em;text-transform:uppercase;color:#868e96' }, title), ...kids.filter(k => k != null));
+      // a titled group; clicking its title folds it (remembered across objects and visits)
+      const sect = (title, ...kids) => {
+        const folded = (state.collapsed || []).includes(title), body = el('div', { style: folded ? 'display:none' : '' }, ...kids.filter(k => k != null));
+        const head = el('div', { style: 'font:700 10px/1.4 sans-serif;letter-spacing:.05em;text-transform:uppercase;color:#868e96;cursor:pointer;user-select:none', title: folded ? 'Show' : 'Hide' },
+          el('span', { style: 'display:inline-block;width:10px' }, folded ? '▸' : '▾'), title);
+        head.addEventListener('click', () => {
+          const set = new Set(state.collapsed || []);
+          if (set.has(title)) set.delete(title); else set.add(title);
+          state.collapsed = [...set]; saveSettings(); renderSide();
+        });
+        return el('div', { style: 'border-top:1px solid #e9ecef;margin-top:5px;padding-top:3px' }, head, body);
+      };
       // circle precision for this object (blank = the export setting)
-      const precisionField = () => ['Circle precision (edges)', numInput(() => n.precision || '', v => {
+      const precisionField = () => ['Circular precision (edges)', numInput(() => n.precision || '', v => {
         pushUndo(); n.precision = v == null ? null : Math.max(3, Math.min(300, Math.round(v))); markEdited(); recalc();
       }, { step: '1', min: 3, max: 300, digits: 0, width: 96, allowEmpty: true, placeholder: 'default ' + state.precision, title: 'Edges around a full circle for this object; leave blank to use the export setting' })];
-      const handNote = () => n.custom ? { wide: el('div', { style: 'color:#9a6700;margin-top:2px' }, 'Outline edited by hand — parameter changes are applied on top of your edits. ',
-        el('button', { type: 'button', style: BTN2, onclick: () => { pushUndo(); regenNode(n); markEdited(); recalc(); } }, 'Regenerate from parameters')) } : null;
 
       if (n.type === 'boolean') {
         box.append(sect('Boolean', pgrid(1, ['Operation', selectInput(n.op, [['union', 'Union (A ∪ B)'], ['difference', 'Difference (A − B)'], ['intersection', 'Intersection (A ∩ B)']], v => { pushUndo(); n.op = v; markEdited(); recalc(); }),
           el('button', { type: 'button', style: BTN2, onclick: () => { pushUndo(); n.children.reverse(); markEdited(); recalc(); } }, 'Swap A ↔ B')])));
         return box;
       }
-      if (n.type === 'group') { box.append(sect('Group', el('div', { style: 'color:#666' }, 'A group combines its objects (union). Drag objects in or out in the list.'))); return box; }
+      if (n.type === 'group') return box;
       if (n.type === 'cloner') {
         const q = n.params;
         const setC = (k, v) => { pushUndo(); q[k] = v; markEdited(); recalc(); };
@@ -3819,10 +3850,7 @@
           ['Spread (' + ANG_LABEL.trim() + ')', numInput(() => q.spread * ANG_SCALE, v => setC('spread', Math.max(0, Math.min(360, v / ANG_SCALE))), { step: ANG_SCALE === 1 ? '5' : '0.05', min: 0, max: 360 * ANG_SCALE, digits: 4, width: 80 })])),
           sect('Placement', pgrid(2,
           ['Distance from axis (x' + UX, numInput(() => mm(q.radius), v => setC('radius', Math.max(0, v / UNIT_SCALE)), { min: 0 })],
-          q.orient === 'radial' ? ['Copies\' axis height (y' + UX, numInput(() => hDisp(q.height, zBase()), v => setC('height', v / UNIT_SCALE + zBase()))] : null)),
-          sect('Notes', pgrid(1, note('Children are built around their own axis and copied around the main axis: 360° spreads the copies evenly, less spreads them from the first angle to the last. ' +
-            'Drag the orange diamond in the cross-section to set the distance from the axis' + (q.orient === 'radial' ? ' and the height' : '') + '. The cross-section shows the first copy (dashed: its other half). ' +
-            'For bolt holes, put a solid circle (inner radius 0) in an axial cloner and subtract the cloner in a boolean.'))));
+          q.orient === 'radial' ? ['Copies\' axis height (y' + UX, numInput(() => hDisp(q.height, zBase()), v => setC('height', v / UNIT_SCALE + zBase()))] : null)));
         return box;
       }
       if (n.type === 'thread') {
@@ -3842,7 +3870,7 @@
         box.append(sect('Standard', pgrid(2,
           ['Standard', presetSel], GBR,
           ['Gender', selectInput(q.kind, [['external', 'male (external)'], ['internal', 'female (internal)']], v => setT(t => { t.kind = v; }))],
-          ['Hand', selectInput(String(q.hand), [['1', 'right-hand'], ['-1', 'left-hand']], v => setT(t => { t.hand = +v; }))])),
+          ['Direction', selectInput(String(q.hand), [['1', 'standard (right-hand)'], ['-1', 'reverse (left-hand)']], v => setT(t => { t.hand = +v; }), 'max-width:180px')])),
           sect('Size', pgrid(2,
           ['Nominal Ø' + U, numInput(() => mm(q.d), v => setT(t => { t.d = Math.max(0.1 / UNIT_SCALE, v / UNIT_SCALE); t.preset = ''; }), { min: 0.1 })],
           ['Pitch' + U, numInput(() => mm(q.pitch), v => setT(t => {
@@ -3863,10 +3891,7 @@
           sect('Ends and fit', pgrid(2,
           ['Lead-in taper', checkInput(() => q.taperBottom, v => setT(t => { t.taperBottom = v; }), 'bottom'), checkInput(() => q.taperTop, v => setT(t => { t.taperTop = v; }), 'top')],
           ['Clearance (x' + UX, numInput(() => mm(q.clearance || 0), v => setT(t => { t.clearance = v / UNIT_SCALE; }), { step: '0.05', title: 'Shrinks a male thread / enlarges a female one, for printed fits' })])),
-          sect('Detail', pgrid(2, precisionField())),
-          sect('Notes', pgrid(1, note('Lead-in taper cuts the end of the thread, backing included, at the flank angle of the teeth, so it does not end in a sharp half tooth and starts easily. ' +
-            'Backing is the solid material ' + (q.kind === 'internal' ? 'outside' : 'inside') + ' the teeth. Dragging the thread, its backing wall or its ends in the cross-section updates these values.'),
-          handNote())));
+          sect('Detail', pgrid(2, precisionField())));
         return box;
       }
       if (n.type === 'holes') {
@@ -3874,7 +3899,7 @@
         return box;
       }
       if (n.type === 'source') {
-        box.append(sect('Detail', pgrid(2, precisionField())), sect('Notes', el('div', { style: 'color:#666' }, 'A profile from an imported project file: edit its points and edges in the cross-section.')));
+        box.append(sect('Detail', pgrid(2, precisionField())));
         if ((n.holes || []).length) box.append(el('div', { style: 'color:#666' }, n.holes.length + ' hole(s) are cut out.'));
         return box;
       }
@@ -3903,9 +3928,7 @@
         ['Bevel radius' + U, len('bevel', { min: 0 })],
         ['Bevel edges', numInput(() => q.bevelSegs, v => setP(t => { t.bevelSegs = Math.max(1, Math.min(64, Math.round(v))); }), { step: '1', min: 1, max: 64, digits: 0 })],
         ['Bevel shape', selectInput(q.bevelOut ? 'convex' : 'concave', [['convex', 'convex (rounded)'], ['concave', 'concave (cove)']], v => setP(t => { t.bevelOut = v === 'convex'; }))])),
-        ng ? null : sect('Detail', pgrid(2, precisionField())),
-        sect('Notes', pgrid(1, note('Radii in ' + UNIT_LABEL + (ng ? ', measured ' + (q.about === 'faces' ? 'to the face centres' : 'to the edges') : '') + '. Editing the outline in the cross-section updates these values while it still matches them.'),
-        handNote())));
+        ng ? null : sect('Detail', pgrid(2, precisionField())));
       return box;
     }
 
@@ -3913,7 +3936,7 @@
       const list = libLoad();
       const box = el('div', null, el('div', { style: H + ';display:flex;align-items:center;gap:6px' }, 'Saved models (this browser)',
         list.length ? hbtn('json', 'Export all', () => exportModelsJson(list, 'saved-models'), { title: 'All saved models in one JSON file' }) : null));
-      if (!list.length) box.append(el('div', { style: 'color:#666' }, 'Nothing saved yet. Select objects and use Save (Properties header or right-click), or Save scene (Project header).'));
+      if (!list.length) box.append(el('div', { style: 'color:#666' }, 'Nothing saved yet.'));
       for (const entry of list) {
         const nameIn = el('input', { type: 'text', value: entry.name, style: 'flex:1 1 120px;min-width:80px;font-size:12px' });
         nameIn.addEventListener('change', () => { const l = libLoad(), it = l.find(x => x.id === entry.id); if (it) { it.name = nameIn.value; libStore(l); } });
@@ -3925,7 +3948,6 @@
           hbtn('json', 'JSON', () => exportModelsJson([entry], entry.name), { title: 'A file that can be loaded again (Import JSON) to rebuild this model' }),
           hbtn('trash', '', () => { libStore(libLoad().filter(x => x.id !== entry.id)); state.libMessage = null; renderAll(); }, { title: 'Delete', color: '#b42318' })));
       }
-      box.append(el('div', { style: 'color:#666;font-size:11px;margin-top:3px' }, 'Each saved model keeps its own outlines, threads and bevels. Export them as JSON to keep a copy or move them to another browser.'));
       return box;
     }
 
@@ -3975,7 +3997,7 @@
         panels.objects.body.append(bare(treeBlock()));
         const nSel = state.selNodes.size;
         appendKids(panels.objects.tools,
-          hbtn('circle', 'Circle', () => addObject('circle', view), { title: 'Add a circle (ring)', color: COLORS.circle }),
+          hbtn('circle', 'Circular', () => addObject('circle', view), { title: 'Add a circular ring', color: COLORS.circle }),
           hbtn('ngon', 'N-sided', () => addObject('ngon', view), { title: 'Add an n-sided ring', color: COLORS.ngon }),
           hbtn('thread', 'Thread', () => addObject('thread', view), { title: 'Add a threaded ring, with standard sizes', color: COLORS.thread }),
           hbtn('cloner', 'Cloner', () => wrapSelection('cloner'), { title: nSel ? 'Put the selected objects in a radial cloner' : 'Add an empty radial cloner' }),
