@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.6.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.7.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.6.0';
+  const APP_VERSION = '3.7.0';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -30,7 +30,8 @@
     ssao: true,            // 3D view: ambient occlusion
     lenUnit: 'mm',         // displayed lengths: 'mm' or 'in'
     quality: 'high',       // 'high', or 'low': no animations and less detail (faster on slow machines)
-    collapsed: [],         // property groups the user has folded (by title)
+    collapsed: [],
+    secMode: 'section',    // cross-section pane: 'section' (radius / height) or 'top' (seen from above)         // property groups the user has folded (by title)
     angUnit: 'deg',        // displayed angles: 'deg' or 'rad'
     ortho: false,          // 3D view: orthographic (true) or perspective projection
     flip: false,           // turn the part upside down (export and 3D view)
@@ -62,7 +63,7 @@
 
 
   // Settings remembered in this browser.
-  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'quality', 'collapsed', 'cut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts'];
+  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'quality', 'collapsed', 'secMode', 'cut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts'];
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     for (const k of SAVED_SETTINGS) if (k in saved && typeof saved[k] === typeof state[k]) state[k] = saved[k];
@@ -70,6 +71,7 @@
   // always on: true helical threads, and welding / T-junction repair of the exported mesh
   state.helical = true; state.optimize = true;
   if (!['ngons', 'quads', 'tris'].includes(state.faces)) state.faces = 'ngons';
+  if (state.secMode !== 'top') state.secMode = 'section';
   state.precision = Math.max(8, Math.min(300, Math.round(+state.precision) || 100));   // circle precision: 8…300 edges
   function applyUnits() {
     if (state.lenUnit !== 'in') state.lenUnit = 'mm';
@@ -696,10 +698,11 @@
   //   (n-sided objects sized about their face centres); phase: start angle;
   //   helical: thread bands climb (hand ±1) or stay rings (false).
   function revolve(items, opts) {
-    const N = Math.max(3, opts.segments | 0), TAU = Math.PI * 2, scale = opts.scale || 1, phase = opts.phase || 0;
-    const V = [], axisCache = new Map();
+    const A = opts.angles, N = A ? A.length : Math.max(3, opts.segments | 0), TAU = Math.PI * 2, scale = opts.scale || 1, phase = opts.phase || 0;
+    const V = [], axisCache = new Map(), warp = opts.warp;
+    let col = 0;
     function vert(r, z, phi) {
-      r *= scale;
+      r = warp ? warp(r, col) : r * scale;
       if (r < 1e-12) {
         const k = String(z); let id = axisCache.get(k);
         if (id === undefined) { id = V.length / 3; V.push(0, 0, z); axisCache.set(k, id); }
@@ -712,13 +715,14 @@
     const patOf = (b) => { let p = pats.get(b); if (!p) { p = b.runout ? runoutPattern(b) : toothPattern(b); pats.set(b, p); } return p; };
     const hand = (b) => opts.helical ? (b.hand || 0) : 0;
     function column(j) {
-      const phi = TAU * j / N, col = [];
+      col = j;
+      const phi = A ? A[j] : TAU * j / N, out = [];
       items.forEach((it, pi) => {
-        if (!it.band) { col.push({ id: vert(it.y, it.z, phi), key: [pi, 0] }); return; }
+        if (!it.band) { out.push({ id: vert(it.y, it.z, phi), key: [pi, 0] }); return; }
         const b = it.band, shift = hand(b) * b.pitch * phi / TAU, d = b.dir, P = b.pitch, pat = patOf(b), ro = b.runout;
         const zs = d > 0 ? b.zMin : b.zMax, ze = d > 0 ? b.zMax : b.zMin;
         const endR = (z) => ro ? runoutRadiusAt(b, pat, z, shift) : toothAt(b, pat, z - b.zFirst - shift);
-        col.push({ id: vert(endR(zs), zs, phi), key: [pi, -Infinity] });
+        out.push({ id: vert(endR(zs), zs, phi), key: [pi, -Infinity] });
         // tooth corners lie on helices: z = zFirst + (m·pitch + corner phase) + shift
         const mLo = Math.floor((b.zMin - b.zFirst - shift) / P) - 1, mHi = Math.ceil((b.zMax - b.zFirst - shift) / P) + 1;
         const vs = [];
@@ -728,10 +732,10 @@
           if (c.z - b.zMin > 1e-7 && b.zMax - c.z > 1e-7) vs.push({ uu, z, c });
         }
         vs.sort((x, y) => d * (x.z - y.z));
-        for (const v of vs) col.push({ id: vert(v.c.r, v.c.z, phi), key: [pi, d * (b.zFirst + v.uu)] });
-        col.push({ id: vert(endR(ze), ze, phi), key: [pi, Infinity] });
+        for (const v of vs) out.push({ id: vert(v.c.r, v.c.z, phi), key: [pi, d * (b.zFirst + v.uu)] });
+        out.push({ id: vert(endR(ze), ze, phi), key: [pi, Infinity] });
       });
-      return col;
+      return out;
     }
     const cmp = (a, b) => a[0] !== b[0] ? a[0] - b[0] : (a[1] === b[1] ? 0 : (a[1] < b[1] ? -1 : 1));
     const T = [];
@@ -821,12 +825,72 @@
     };
   }
 
+  // A cog (spur gear with involute teeth), seen from above: its outline as radii at increasing angles over one
+  // turn, one tooth per 2π/teeth. q: teeth, module, pressure (°), addendum and dedendum (× module), backlash
+  // (taken off each tooth at the pitch circle), rotation (°). perFlank: points along each tooth side.
+  // An internal cog (ring gear, teeth pointing inward): the spaces between its teeth have the shape of an outside
+  // cog's teeth, so it is built as that shape (addendum and dedendum swapped, backlash widening the spaces),
+  // turned half a tooth so its teeth sit where an outside cog's would.
+  function cogShape(q, perFlank) {
+    if (q.kind === 'internal') {
+      const n = Math.max(3, Math.round(q.teeth) || 3), m = Math.max(1e-4, q.module);
+      const s = cogShape({ ...q, kind: 'external', addendum: q.dedendum, dedendum: q.addendum, backlash: -(q.backlash || 0), rotation: (q.rotation || 0) + 180 / n }, perFlank);
+      return { ...s, ra: s.rf, rf: s.ra, tip: m * (n / 2 - Math.max(0, q.addendum)), internal: true };
+    }
+    const N = Math.max(3, Math.round(q.teeth) || 3), m = Math.max(1e-4, q.module), al = Math.max(1, Math.min(45, q.pressure || 20)) * Math.PI / 180;
+    const rp = m * N / 2, rb = rp * Math.cos(al), ra0 = rp + Math.max(0, q.addendum) * m, rf = Math.max(m * 0.05, rp - Math.max(0, q.dedendum) * m);
+    const inv = (a) => Math.tan(a) - a, half = Math.PI / N;
+    const psiP = Math.max(1e-4, (Math.PI * m / 2 - (q.backlash || 0)) / (2 * rp));
+    const psiInv = (r) => psiP + inv(al) - inv(Math.acos(Math.min(1, rb / r)));      // half the tooth's angle at radius r (r ≥ rb)
+    // a tooth too thin for its tip ends in a point
+    let ra = ra0;
+    if (psiInv(ra) < 0) { let lo = Math.max(rb, rf), hi = ra; for (let k = 0; k < 50; k++) { const mid = (lo + hi) / 2; if (psiInv(mid) > 0) lo = mid; else hi = mid; } ra = lo; }
+    const r0 = Math.max(rb, rf), psiB = psiInv(r0);
+    // below the base circle the side runs down to the root, widening a little into it (a simple fillet)
+    const fil = rf < rb ? Math.max(0, 0.25 * (half - psiB)) : 0;
+    const psi = (r) => r >= r0 ? psiInv(r) : psiB + fil * (r0 - r) / Math.max(1e-12, r0 - rf);
+    const K = Math.max(2, perFlank | 0), side = [];
+    if (rf < rb) for (let i = 0; i < 2; i++) side.push(rf + (r0 - rf) * i / 2);
+    for (let i = 0; i <= K; i++) side.push(r0 + (ra - r0) * (1 - Math.cos(Math.PI / 2 * i / K)));   // denser near the base
+    const arc = (a0, a1) => Math.max(1, Math.ceil((a1 - a0) / (Math.PI / 90)));
+    const tooth = [], psiR = psi(rf), psiA = Math.max(0, psi(ra));
+    const push = (a, r) => { if (!tooth.length || a - tooth[tooth.length - 1][0] > 1e-9) tooth.push([a, r]); };
+    { const n = arc(-half, -psiR); for (let i = 0; i <= n; i++) push(-half + (half - psiR) * i / n, rf); }
+    for (const r of side) push(-psi(r), r);
+    { const n = arc(-psiA, psiA); for (let i = 0; i <= n; i++) push(-psiA + 2 * psiA * i / n, ra); }
+    for (let i = side.length - 1; i >= 0; i--) push(psi(side[i]), side[i]);
+    { const n = arc(psiR, half); for (let i = 0; i < n; i++) push(psiR + (half - psiR) * i / n, rf); }
+    const rot = (q.rotation || 0) * Math.PI / 180, ang = new Float64Array(N * tooth.length), rad = new Float64Array(N * tooth.length);
+    for (let k = 0, o = 0; k < N; k++) for (const [a, r] of tooth) { ang[o] = rot + 2 * half * k + a; rad[o] = r; o++; }
+    return { ang, rad, N, rp, rb, ra, rf, tip: ra0 };
+  }
+  // The cog's radius at an angle (between its outline points).
+  function cogRadiusAt(sh, theta) {
+    const A = sh.ang, n = A.length, TAU = 2 * Math.PI, t = A[0] + ((((theta - A[0]) % TAU) + TAU) % TAU);
+    let lo = 0, hi = n;
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (A[mid] <= t) lo = mid; else hi = mid; }
+    const a0 = A[lo], a1 = lo + 1 < n ? A[lo + 1] : A[0] + TAU, r1 = sh.rad[(lo + 1) % n];
+    return sh.rad[lo] + (r1 - sh.rad[lo]) * (t - a0) / Math.max(1e-12, a1 - a0);
+  }
+  // A cog's profile is drawn with its outer edge at the tip radius; around the axis the outer edge follows the teeth,
+  // and everything between the bore and the tip is stretched to match (the bore stays round).
+  //   rFix: the edge that stays round (an outside cog's bore, an inside cog's rim); tip: the edge drawn at the teeth's tips.
+  function cogWarp(y, R, rFix, tip) {
+    const span = tip - rFix;
+    if (Math.abs(span) < 1e-9 || (y - rFix) / span <= 0) return y;
+    return rFix + (y - rFix) * Math.max((R - rFix) / span, 0.02);
+  }
+
   // Mesh for one leaf node of the scene.
   function nodeMesh(node, settings) {
     if (node.type === 'source' || node.type === 'thread') {
       return revolve(expandProfile(node.pts, runsOf(node)), { segments: Math.min(300, node.precision > 2 ? node.precision : settings.precision), helical: settings.helical });
     }
     const items = expandProfile(node.pts, []);
+    if (node.type === 'cog') {
+      const sh = cogShape(node.params, settings.precision >= 96 ? 10 : 6), ys = items.map(it => it.y), fix = sh.internal ? Math.max(...ys) : Math.min(...ys);
+      return revolve(items, { angles: sh.ang, warp: (r, j) => cogWarp(r, sh.rad[j], fix, sh.tip) });
+    }
     if (node.type === 'ngon') {
       const n = Math.max(3, node.params.sides | 0);
       return revolve(items, { segments: n, scale: node.params.about === 'faces' ? 1 / Math.cos(Math.PI / n) : 1, phase: (node.params.rotation || 0) * Math.PI / 180 });
@@ -943,7 +1007,7 @@
   function getWorker() {
     if (worker || workerFailed) return worker;
     try {
-      const src = [processMesh, ngonFaces, bevelReach, cornerPoints, toothPattern, toothAt, runoutOf, runsOf, runoutDelta, runoutPattern, runoutCorner, runoutRadiusAt, threadProfile, expandProfile, runVertices, revolve, holeMesh, nodeMesh, evaluateScene, soup, runJob]
+      const src = [processMesh, ngonFaces, bevelReach, cornerPoints, toothPattern, toothAt, runoutOf, runsOf, runoutDelta, runoutPattern, runoutCorner, runoutRadiusAt, threadProfile, expandProfile, runVertices, cogShape, cogWarp, revolve, holeMesh, nodeMesh, evaluateScene, soup, runJob]
         .map(f => f.toString()).join('\n') +
         '\nself.onmessage = async function (e) {' +
         '  try { const r = await runJob(e.data); self.postMessage({ job: e.data.job, result: r }, [r.buffer, r.preview.tris.buffer, r.preview.lines.buffer, r.preview.bad.buffer]); }' +
@@ -1201,7 +1265,7 @@
   }
   const hDisp = (z, base) => (z - base) * UNIT_SCALE;
   function newId(prefix) { state.scene.seq = (state.scene.seq || 1) + 1; return prefix + state.scene.seq; }
-  const PREFIX = { circle: 'c', ngon: 'n', boolean: 'b', group: 'g', source: 's', thread: 't', cloner: 'k', holes: 'h' };
+  const PREFIX = { circle: 'c', ngon: 'n', cog: 'w', boolean: 'b', group: 'g', source: 's', thread: 't', cloner: 'k', holes: 'h' };
 
   // Children of a radial cloner are built in their own frame; in the cross-section the editor
   // shows its first copy. xfOf gives the mapping between an object's own frame and the view.
@@ -1334,12 +1398,19 @@
   // Generated points carry their index (g), so a parameter change can be applied on top of hand edits,
   // and an outline edited in the cross-section is read back into the parameters when it still fits them.
   const tagPts = (pts) => { pts.forEach((p, i) => { p.g = i; }); return pts; };
+  // a cog's outer edge is its tip circle, set by the teeth, module and addendum
+  //   (an inside cog's inner edge is its teeth's tips, and its outer edge a round rim)
+  const cogIn = (q) => q.kind === 'internal';
+  const cogTip = (q) => q.module * (q.teeth / 2 + (cogIn(q) ? -q.addendum : q.addendum));
+  const cogRoot = (q) => q.module * (q.teeth / 2 + (cogIn(q) ? q.dedendum : -q.dedendum));
+  const profileOf = (type, q) => paramProfile(type !== 'cog' ? q : cogIn(q) ? { ...q, rib: cogTip(q), rit: cogTip(q), linkIn: true } : { ...q, rob: cogTip(q), rot: cogTip(q), linkOut: true });
+  const cogFix = (q, o) => cogIn(q) ? Math.max(...o.map(p => p.y)) : Math.min(...o.map(p => p.y));
   function genOf(n, q) {
     if (n.type === 'thread') { const t = threadProfile(q); return { pts: t.pts, runs: t.runs }; }
-    return { pts: paramProfile(q), runs: [] };
+    return { pts: profileOf(n.type, q), runs: [] };
   }
   function regenThread(n) { const t = threadProfile(n.params); n.pts = tagPts(t.pts); n.runs = t.runs.map(r => ({ ...r, label: n.name || 'Thread' })); n.custom = false; }
-  function regenNode(n) { if (n.type === 'thread') regenThread(n); else { n.pts = tagPts(paramProfile(n.params)); n.custom = false; } }
+  function regenNode(n) { if (n.type === 'thread') regenThread(n); else { n.pts = tagPts(profileOf(n.type, n.params)); n.custom = false; } }
   const bevelKey = (b) => b && (b.r > 0 || b.trim > 0) ? [b.r || 0, b.trim || 0, b.segs || 0, !!b.out].join('|') : '';
   const RUN_POS = ['rFirst', 'rOther', 'zFirst', 'zLast'], RUN_KEYS = ['pitch', 'pitchDrawn', 'hand', 'flatA', 'flatB', 'kind'];
   // Move the outline by exactly what the parameter change moves in the generated outline.
@@ -1402,17 +1473,28 @@
     if (P.length !== 4 || !near(P[0].z, P[1].z) || !near(P[2].z, P[3].z) || P[2].z - P[0].z <= 1e-9) return null;
     const f = { ...q, z: P[0].z, h: P[2].z - P[0].z, rib: P[0].y, rob: P[1].y, rot: P[2].y, rit: P[3].y };
     if (f.linkIn && !near(f.rib, f.rit)) f.linkIn = false;
+    if (n.type === 'cog') {
+      // the edge at the teeth's tips (outer, or inner for an inside cog) sets the tip: read back as the module
+      if (cogIn(f)) {
+        if (!near(f.rib, f.rit)) return null;
+        f.linkIn = true; f.module = f.rib / (f.teeth / 2 - f.addendum);
+      } else {
+        if (!near(f.rob, f.rot)) return null;
+        f.linkOut = true; f.module = f.rob / (f.teeth / 2 + f.addendum);
+      }
+      if (!(f.module > 0) || !isFinite(f.module)) return null;
+    }
     if (f.linkOut && !near(f.rob, f.rot)) f.linkOut = false;
     if (P.some(p => p.y <= 1e-9 && bevelKey(p.bevel))) return null;
     const kinds = [...new Set(P.filter(p => p.y > 1e-9).map(p => bevelKey(p.bevel)))];
     if (kinds.length > 1) return null;
     if (kinds[0]) { const b = P.find(p => p.y > 1e-9).bevel; if (b.trim) return null; f.bevel = b.r; f.bevelSegs = b.segs || f.bevelSegs; f.bevelOut = !!b.out; }
     else f.bevel = 0;
-    const g = paramProfile(f);
+    const g = profileOf(n.type, f);
     return g.every((p, i) => near(p.y, P[i].y) && near(p.z, P[i].z)) ? f : null;
   }
   function rationalize(n) {
-    if (!n || !n.params || !(n.type === 'thread' || n.type === 'circle' || n.type === 'ngon')) return;
+    if (!n || !n.params || !(n.type === 'thread' || n.type === 'circle' || n.type === 'ngon' || n.type === 'cog')) return;
     const f = fitParams(n);
     if (f) { Object.assign(n.params, f); n.custom = false; tagPts(n.pts); } else n.custom = true;
   }
@@ -1440,7 +1522,9 @@
       markEdited(); recalc(); return;
     }
     const params = defaultParams(view);
-    sc.nodes[id] = { id, type, name: (type === 'ngon' ? 'N-sided ' : 'Circular ') + id.slice(1), params, pts: tagPts(paramProfile(params)), custom: false };
+    // a cog: 24 teeth of module 1 mm round a 6 mm bore
+    if (type === 'cog') Object.assign(params, { teeth: 24, module: 1 / MM, pressure: 20, addendum: 1, dedendum: 1.25, backlash: 0, rotation: 0, rib: 3 / MM, rit: 3 / MM, linkIn: true, linkOut: true });
+    sc.nodes[id] = { id, type, name: (type === 'ngon' ? 'N-sided ' : type === 'cog' ? 'Cog ' : 'Circular ') + id.slice(1), params, pts: tagPts(profileOf(type, params)), custom: false };
     place(sc, id, insertTarget());
     state.selNodes = new Set([id]); state.sel = new Set();
     markEdited(); recalc();
@@ -1505,7 +1589,19 @@
     const a = (((theta - (q.rotation || 0) * Math.PI / 180) % seg) + seg) % seg;
     return scale * Math.cos(Math.PI / n) / Math.cos(a - Math.PI / n);
   }
+  // a cog's outline from above, cached per set of tooth parameters
+  const cogCache = new Map();
+  function cogShapeOf(q) {
+    const k = [q.kind, q.teeth, q.module, q.pressure, q.addendum, q.dedendum, q.backlash, q.rotation].join('|');
+    let s = cogCache.get(k);
+    if (!s) { if (cogCache.size > 64) cogCache.clear(); s = cogShape(q, 8); cogCache.set(k, s); }
+    return s;
+  }
   function sectionOutline(n, theta) {
+    if (n.type === 'cog') {
+      const sh = cogShapeOf(n.params), o = outlineOf(n.pts, []), fix = cogFix(n.params, o), R = cogRadiusAt(sh, theta);
+      return o.map(p => ({ y: cogWarp(p.y, R, fix, sh.tip), z: p.z }));
+    }
     if (n.type === 'ngon') { const s = ngonScaleAt(n.params, theta); return outlineOf(n.pts, []).map(p => ({ y: p.y * s, z: p.z })); }
     if (!(n.runs || []).length) return outlineOf(n.pts, n.runs);
     const out = [];
@@ -1659,7 +1755,7 @@
   // Lengths are in inches; every object keeps its own outline, thread parameters and bevels,
   // so the file rebuilds the scene on its own.
   const JSON_FORMAT = 'adapter-assembler', JSON_FORMATS_READ = new Set([JSON_FORMAT, 'preciseparts-stl-export']);
-  const NODE_TYPES = new Set(['source', 'circle', 'ngon', 'thread', 'group', 'boolean', 'cloner', 'holes']);
+  const NODE_TYPES = new Set(['source', 'circle', 'ngon', 'cog', 'thread', 'group', 'boolean', 'cloner', 'holes']);
   function sceneForFile(sc) {
     const s = clone(sc);
     return s;
@@ -1896,6 +1992,9 @@
   const ICONS = {
     circle: '<circle cx="8" cy="8" r="5.5"/>',
     ngon: '<path d="M8 2.2 13 5.1v5.8L8 13.8 3 10.9V5.1z"/>',
+    cog: '<path d="M12.85 6.79L14.75 7.20L14.75 8.80L12.85 9.21L12.28 10.58L13.34 12.21L12.21 13.34L10.58 12.28L9.21 12.85L8.80 14.75L7.20 14.75L6.79 12.85L5.42 12.28L3.79 13.34L2.66 12.21L3.72 10.58L3.15 9.21L1.25 8.80L1.25 7.20L3.15 6.79L3.72 5.42L2.66 3.79L3.79 2.66L5.42 3.72L6.79 3.15L7.20 1.25L8.80 1.25L9.21 3.15L10.58 3.72L12.21 2.66L13.34 3.79L12.28 5.42z"/><circle cx="8" cy="8" r="2.2"/>',
+    sideview: '<path d="M8 1.5v13" stroke-dasharray="1.6 1.6"/><rect x="10" y="4" width="3.8" height="8"/><rect x="2.2" y="4" width="3.8" height="8"/>',
+    topview: '<circle cx="8" cy="8" r="6"/><circle cx="8" cy="8" r="2.4"/><path d="M8 8h6"/>',
     thread: '<path d="M2 5l3-2 3 2 3-2 3 2M2 9l3-2 3 2 3-2 3 2M2 13l3-2 3 2 3-2 3 2"/>',
     cloner: '<circle cx="8" cy="8" r="1.3"/><circle cx="8" cy="2.9" r="1.3"/><circle cx="12.4" cy="10.6" r="1.3"/><circle cx="3.6" cy="10.6" r="1.3"/><path d="M8 6.7V4.2M9.1 8.6l2.2 1.3M6.9 8.6 4.7 9.9" stroke-width="1"/>',
     group: '<rect x="2" y="5" width="8.5" height="8.5" rx="1"/><path d="M5.5 5V2.5H14V11h-3.5"/>',
@@ -2180,17 +2279,23 @@
     // the inside of the part seen through the middle, painted behind the cross-section
     const wrapCanvas = el('canvas', { style: 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none' });
     const left = el('div', { style: 'flex:0 0 ' + state.paneLeft + '%;position:relative;min-width:0;background:#fbfbfc' }, wrapCanvas, svg);
-    const zoomTag = el('div', { style: 'position:absolute;right:30px;top:6px;font-size:11px;color:#495057;background:rgba(255,255,255,.9);padding:2px 6px;border-radius:3px;cursor:pointer;user-select:none', title: 'Zoom (100% = fitted). Click to fit.' });
+    const zoomTag = el('div', { style: 'font-size:11px;color:#495057;background:rgba(255,255,255,.9);padding:2px 6px;border-radius:3px;cursor:pointer;user-select:none', title: 'Zoom (100% = fitted). Click to fit.' });
     zoomTag.addEventListener('click', () => { fit(); drawSection(); });
-    const coord = el('div', { style: 'position:absolute;right:30px;top:28px;font-size:11px;color:#555;background:rgba(255,255,255,.9);padding:2px 6px;border-radius:3px;pointer-events:none' });
+    // the pane shows either the cross-section (radius / height) or the part from above
+    const modeBtn = (m, ic, label, title) => { const b = hbtn(ic, label, () => setSecMode(m), { title }); b.__mode = m; return b; };
+    const modeBar = el('div', { style: 'display:inline-flex;gap:2px' },
+      modeBtn('section', 'sideview', 'Radius/height', 'Cross-section: radius across, height up'),
+      modeBtn('top', 'topview', 'Overhead', 'Seen from above: teeth of cogs, sides of n-sided objects, the section\'s angle'));
+    const viewBar = el('div', { style: 'position:absolute;right:30px;top:6px;display:flex;gap:6px;align-items:center;z-index:2' }, modeBar, zoomTag);
+    const coord = el('div', { style: 'position:absolute;right:30px;top:32px;font-size:11px;color:#555;background:rgba(255,255,255,.9);padding:2px 6px;border-radius:3px;pointer-events:none' });
     const legend = el('div', { style: 'position:absolute;left:70px;top:6px;font-size:11px;color:#555;background:rgba(255,255,255,.9);padding:3px 6px;border-radius:3px;pointer-events:none;line-height:1.5' });
-    legend.innerHTML = '<span style="color:#2f9e44">■ circular</span> <span style="color:#7048e8">■ n-sided</span> <span style="color:#d9480f">● thread</span> <span style="color:#e03131">▨ subtracted</span><br>' +
-      'n-sided: <span style="color:#0c8599">— face-centre radius (min)</span> <span style="color:#c2255c">- - edge radius (max)</span>';
+    legend.innerHTML = '<span style="color:#2f9e44">■ circular</span> <span style="color:#7048e8">■ n-sided</span> <span style="color:#a61e4d">■ cog</span> <span style="color:#d9480f">● thread</span> <span style="color:#e03131">▨ subtracted</span><br>' +
+      '<span class="aa-sideonly">n-sided, cog: <span style="color:#0c8599">— smallest radius</span> <span style="color:#c2255c">- - largest radius</span></span>';
     const loading = el('div', { style: 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#666;background:#fbfbfc' }, 'Start a project with New / open…');
     const overlay = el('div', { style: 'position:absolute;inset:0;pointer-events:none;overflow:hidden' });
     // 1-D compass under the cross-section: the angle of the section around the axis (drag to turn)
     const compass1 = el('canvas', { style: 'position:absolute;left:50%;transform:translateX(-50%);bottom:' + (44 + 4) + 'px;width:300px;height:26px;cursor:ew-resize;touch-action:none;z-index:2;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,.18)', title: 'Section angle: drag to turn the part (the 3D view turns with it)' });
-    left.append(overlay, zoomTag, coord, legend, loading, compass1);
+    left.append(overlay, viewBar, coord, legend, loading, compass1);
 
     // right: 3D preview + side panel
     const canvas = el('canvas', { style: 'width:100%;height:100%;display:block;touch-action:none;cursor:grab;background:#1c1f24' });
@@ -2360,7 +2465,7 @@
     function openScene(sc, msg) {
       if (state.scene) pushUndo();
       state.scene = sc; state.sel = new Set(); state.selNodes = new Set(); state.edited = true; state.libMessage = msg || null;
-      view = null; hideSplash(); markEdited(); recalc();
+      view = null; views = { section: null, top: null }; hideSplash(); markEdited(); recalc();
     }
     function threadPicker(title, init) {
       // gender, standard (or custom diameter and pitch), thread length
@@ -2412,7 +2517,7 @@
           card('Blank project',
             el('button', { type: 'button', style: BTN, onclick: () => openScene({ nodes: {}, root: [], seq: 1 }) }, 'Start blank')),
           card('Open a project',
-            el('button', { type: 'button', style: BTN, onclick: () => { W.__aaOnProjectLoaded = () => { view = null; hideSplash(); }; pickJsonFile(); } }, 'Open JSON file…'),
+            el('button', { type: 'button', style: BTN, onclick: () => { W.__aaOnProjectLoaded = () => { view = null; views = { section: null, top: null }; hideSplash(); }; pickJsonFile(); } }, 'Open JSON file…'),
             lib.length ? el('div', { style: 'margin-top:10px' }, el('div', { style: 'font-weight:700;margin-bottom:4px' }, 'My saved models'),
               ...lib.map(entry => el('div', { style: 'display:flex;gap:6px;align-items:center;margin:2px 0' },
                 el('button', { type: 'button', style: BTN2, onclick: () => {
@@ -2467,6 +2572,7 @@
     // ---- geometry helpers for the view ----
     const size = () => { const r = svg.getBoundingClientRect(); return { w: r.width || 800, h: r.height || 600 }; };
     function fit() {
+      if (topMode()) { fitTop(); return; }
       let y0 = Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
       for (const id of leafOrder(state.scene)) {
         const n = state.scene.nodes[id];
@@ -2710,7 +2816,7 @@
     // Grid lines and axis ticks at round steps; the next finer step fades in as the zoom spreads it out, so
     // zooming moves the ticks smoothly instead of swapping them.
     const GRID_STEPS = [0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500];
-    function grid(g, base) {
+    function grid(g, base, top) {
       const { w, h } = size();
       const [ya, za] = toWorld(0, h), [yb, zb] = toWorld(w, 0);
       const pxu = view.s / UNIT_SCALE; let i = GRID_STEPS.findIndex(s => s * pxu >= 55); if (i < 0) i = GRID_STEPS.length - 1;
@@ -2721,7 +2827,23 @@
       const isMain = (v) => Math.abs(v / main - Math.round(v / main)) < 1e-6;
       const levels = [[main, 1, 1]];
       if (aLine > 0.01 && !lowQuality()) levels.unshift([fine, aLine, aLab]);
-      for (const [st, aL] of levels) {
+      if (top) {
+        // from above: rings at round distances from the axis, and spokes every 30° (15° faint)
+        const [ox, oy] = toScreen(0, 0), far = Math.max(...[[0, 0], [w, 0], [0, h], [w, h]].map(([x, y]) => Math.hypot(x - ox, y - oy))) / view.s;
+        const near0 = (ox < 0 || ox > w || oy < 0 || oy > h) ? Math.max(0, Math.hypot(Math.max(0 - ox, 0, ox - w), Math.max(0 - oy, 0, oy - h)) / view.s) : 0;
+        for (const [st, aL] of levels) {
+          if ((far - near0) / st > 600) continue;
+          for (let r = Math.max(st, Math.ceil(near0 / st) * st); r <= far; r += st) {
+            if (st !== main && isMain(r)) continue;
+            g.append(sv('circle', { cx: ox.toFixed(1), cy: oy.toFixed(1), r: (r * view.s).toFixed(1), fill: 'none', stroke: '#e9ecef', 'stroke-opacity': aL }));
+          }
+        }
+        const L = far * view.s;
+        for (let a = 0; a < 360; a += 15) {
+          const t = a * Math.PI / 180, ax = a % 90 === 0;
+          g.append(sv('line', { x1: ox, y1: oy, x2: ox + L * Math.cos(t), y2: oy - L * Math.sin(t), stroke: ax ? '#adb5bd' : '#e9ecef', 'stroke-opacity': ax || a % 30 === 0 ? 1 : 0.6 }));
+        }
+      } else for (const [st, aL] of levels) {
         for (let y = Math.ceil(ya / st) * st; y <= yb; y += st) {
           if (st !== main && isMain(y)) continue;
           const [x] = toScreen(y, 0);
@@ -2742,7 +2864,8 @@
           const [x] = toScreen(y, 0);
           if (x < AX_L) continue;
           g.append(sv('line', { x1: x, y1: h - AX_B, x2: x, y2: h - AX_B + (st === main ? 4 : 3), stroke: '#adb5bd', 'stroke-opacity': aL }));
-          if (aT > 0.01) {
+          if (aT > 0.01 && top) lab(x, h - 4, num(mm(Math.abs(y)), 3) + ' ' + UNIT_LABEL, { anchor: 'middle', op: aT });     // distance from the axis
+          else if (aT > 0.01) {
             lab(x, h - 4, num(mm(Math.abs(y)), 3) + ' ' + UNIT_LABEL, { anchor: 'middle', op: aT });                 // radius (positive on both sides)
             lab(x, h - 17, 'Ø' + num(mm(2 * Math.abs(y)), 3) + ' ' + UNIT_LABEL, { anchor: 'middle', fill: '#adb5bd', op: aT });  // diameter
           }
@@ -2752,17 +2875,17 @@
           const [, y] = toScreen(0, base + zr);
           if (y > h - AX_B) continue;
           g.append(sv('line', { x1: AX_L - (st === main ? 4 : 3), y1: y, x2: AX_L, y2: y, stroke: '#adb5bd', 'stroke-opacity': aL }));
-          if (aT > 0.01) lab(AX_L - 6, y + 3, num(zr * UNIT_SCALE, 3) + ' ' + UNIT_LABEL, { anchor: 'end', op: aT });
+          if (aT > 0.01) lab(AX_L - 6, y + 3, num((top ? Math.abs(zr) : zr) * UNIT_SCALE, 3) + ' ' + UNIT_LABEL, { anchor: 'end', op: aT });
         }
       }
-      const t1 = sv('text', { x: AX_L + 4, y: h - AX_B - 4, 'font-size': 10, fill: '#adb5bd' }); t1.textContent = 'x: radius / Ø →'; g.append(t1);
-      const t2 = sv('text', { x: 4, y: 12, 'font-size': 10, fill: '#adb5bd' }); t2.textContent = 'y: height ↑'; g.append(t2);
+      const t1 = sv('text', { x: AX_L + 4, y: h - AX_B - 4, 'font-size': 10, fill: '#adb5bd' }); t1.textContent = top ? 'distance from the axis' : 'x: radius / Ø →'; g.append(t1);
+      const t2 = sv('text', { x: 4, y: 12, 'font-size': 10, fill: '#adb5bd' }); t2.textContent = top ? 'distance' : 'y: height ↑'; g.append(t2);
     }
     // Ticks on both axes for the mouse position, or for the point being dragged.
     let cursorW = null;
     function drawCursor() {
       const old = svg.querySelector('#aa-cursor'); if (old) old.remove();
-      if (!state.scene || !view) return;
+      if (!state.scene || !view || topMode()) return;
       const P = drag && drag.cur ? drag.cur : cursorW;
       if (!P) return;
       const MSc = MS; MS = drag ? dragSide : (cursorW && cursorW.side) || 1;
@@ -2794,9 +2917,139 @@
       parent.append(g);
     }
     let sceneBase = 0;
-    const COLORS = { source: '#1f6feb', circle: '#2f9e44', ngon: '#7048e8', thread: '#e8590c', group: '#495057', boolean: '#495057', cloner: '#495057', holes: '#c92a2a' };
+    const COLORS = { source: '#1f6feb', circle: '#2f9e44', ngon: '#7048e8', cog: '#a61e4d', thread: '#e8590c', group: '#495057', boolean: '#495057', cloner: '#495057', holes: '#c92a2a' };
     const viewTheta = () => state.viewAngle * Math.PI / 180 + (MS < 0 ? Math.PI : 0);
+
+    // ---- the part seen from above: x across, y up (the plane the part turns in) ----
+    const topMode = () => state.secMode === 'top';
+    let views = { section: null, top: null }, lastTop = [];
+    function setSecMode(m) {
+      if (topMode() === (m === 'top')) return;
+      views[topMode() ? 'top' : 'section'] = view;
+      state.secMode = m === 'top' ? 'top' : 'section'; saveSettings();
+      view = views[state.secMode]; zoomAnim = null; drag = null; hoverNode = null; hoverEdge = null; cursorW = null;
+      syncModeBtns(); drawSection();
+    }
+    function syncModeBtns() {
+      for (const b of modeBar.children) { const on = (b.__mode === 'top') === topMode(); b.style.background = on ? '#ddf4ff' : '#fff'; b.style.borderColor = on ? '#54aeff' : '#ced4da'; }
+      for (const s of legend.querySelectorAll('.aa-sideonly')) s.style.display = topMode() ? 'none' : '';
+    }
+    // where new objects go: the cross-section's view, whichever is showing
+    const secView = () => topMode() ? views.section : view;
+    // an object from above in its own frame: outer edge, bore, and dashed details (pitch circle, thread roots)
+    function topLocal(n) {
+      const o = outlineOf(n.pts, n.runs);
+      if (o.length < 3) return null;
+      let r0 = Infinity, r1 = 0;
+      for (const p of o) { r0 = Math.min(r0, p.y); r1 = Math.max(r1, p.y); }
+      const ring = (r, k = 120) => { const a = []; for (let i = 0; i < k; i++) { const t = 2 * Math.PI * i / k; a.push([r * Math.cos(t), r * Math.sin(t)]); } return a; };
+      const S = { outer: null, inner: null, marks: [], outline: o, r0, r1 };
+      if (n.type === 'cog') {
+        const sh = cogShapeOf(n.params), teeth = (rr, fix) => Array.from(sh.ang, (a, j) => { const r = cogWarp(rr, sh.rad[j], fix, sh.tip); return [r * Math.cos(a), r * Math.sin(a)]; });
+        S.marks.push(ring(sh.rp));
+        if (sh.internal) { S.outer = ring(r1); S.inner = teeth(r0, r1); return S; }
+        S.outer = teeth(r1, r0);
+      } else if (n.type === 'ngon') {
+        const q = n.params, k = Math.max(3, q.sides | 0), sc = q.about === 'faces' ? 1 / Math.cos(Math.PI / k) : 1, ph = (q.rotation || 0) * Math.PI / 180;
+        const poly = (r) => { const a = []; for (let i = 0; i < k; i++) { const t = ph + 2 * Math.PI * i / k; a.push([r * sc * Math.cos(t), r * sc * Math.sin(t)]); } return a; };
+        S.outer = poly(r1); if (r0 > 1e-9) S.inner = poly(r0);
+        return S;
+      } else {
+        S.outer = ring(r1);
+        for (const r of n.runs || []) for (const rr of [r.rFirst, r.rOther]) if (rr > r0 + 1e-9 && rr < r1 - 1e-9) S.marks.push(ring(rr));
+      }
+      if (r0 > 1e-9) S.inner = ring(r0);
+      return S;
+    }
+    // ... placed in the scene: every copy of the radial cloners it is in
+    function topShapes(id) {
+      const sc = state.scene, L = topLocal(sc.nodes[id]);
+      if (!L) return [];
+      let shapes = [{ outer: L.outer, inner: L.inner, marks: L.marks }], first = true;
+      for (let cur = id, guard = 0; guard < 64; guard++) {
+        const p = findParent(sc, cur);
+        if (!p || p.parent === null) break;
+        const c = sc.nodes[p.parent]; cur = p.parent;
+        if (c.type !== 'cloner') continue;
+        const q = c.params, cnt = Math.max(1, q.count | 0), R = q.radius || 0, spread = q.spread == null ? 360 : q.spread;
+        const step = spread >= 360 - 1e-9 ? 360 / cnt : (cnt > 1 ? spread / (cnt - 1) : 0);
+        if (q.orient === 'radial' && first) {
+          // lying on its side, its axis along the copies' radius: from above, its length by its full width
+          let z0 = Infinity, z1 = -Infinity;
+          for (const v of L.outline) { z0 = Math.min(z0, v.z); z1 = Math.max(z1, v.z); }
+          shapes = [{ outer: [[z0, -L.r1], [z1, -L.r1], [z1, L.r1], [z0, L.r1]], inner: null, marks: [L.outline.map(v => [v.z, v.y]), L.outline.map(v => [v.z, -v.y])] }];
+        }
+        first = false;
+        const out = [];
+        for (let k = 0; k < cnt; k++) {
+          const a = ((q.angle || 0) + k * step) * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a);
+          const f = (v) => { const x = v[0] + R, y = v[1]; return [x * ca - y * sa, x * sa + y * ca]; };
+          for (const s of shapes) out.push({ outer: s.outer.map(f), inner: s.inner && s.inner.map(f), marks: s.marks.map(m => m.map(f)) });
+        }
+        shapes = out;
+      }
+      return shapes;
+    }
+    const inPoly2 = (x, y, P) => {
+      let c = false;
+      for (let i = 0, j = P.length - 1; i < P.length; j = i++) {
+        const [xi, yi] = P[i], [xj, yj] = P[j];
+        if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c;
+      }
+      return c;
+    };
+    function topNodeAt(x, y) {
+      for (let i = lastTop.length - 1; i >= 0; i--) for (const s of lastTop[i].shapes) if (inPoly2(x, y, s.outer) && !(s.inner && inPoly2(x, y, s.inner))) return lastTop[i].id;
+      return null;
+    }
+    function topItems() {
+      const rank = { positive: 0, intersect: 1, negative: 2 };
+      return frontOrder().map(id => ({ id, role: roleOf(state.scene, id), shapes: topShapes(id) })).sort((a, b) => rank[a.role] - rank[b.role]);
+    }
+    function fitTop() {
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+      for (const it of topItems()) for (const s of it.shapes) for (const [x, y] of s.outer) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+      if (!isFinite(x0)) { x0 = y0 = -1; x1 = y1 = 1; }
+      const { w, h } = size();
+      view = { cy: (x0 + x1) / 2, cz: (y0 + y1) / 2, s: Math.min((w - AX_L) / ((x1 - x0) * 1.2 || 1), (h - AX_B) / ((y1 - y0) * 1.2 || 1)) };
+      view.cy -= AX_L / 2 / view.s; view.cz -= AX_B / 2 / view.s;     // centred in the space between the axis strips
+      fitScale = view.s;
+    }
+    function drawTop(g) {
+      grid(g, 0, true);
+      const P = (v) => toScreen(v[0], v[1]).map(c => c.toFixed(1)).join(' ');
+      const pd = (pts) => pts.length ? 'M' + pts.map(P).join('L') + 'Z' : '';
+      lastTop = topItems(); lastPolys = { 1: {}, '-1': {} };
+      let reach = 0;
+      for (const it of lastTop) {
+        const n = state.scene.nodes[it.id], col = COLORS[n.type] || '#1f6feb', selected = selectedAncestorOf(it.id);
+        const d = it.shapes.map(s => pd(s.outer) + (s.inner ? pd(s.inner) : '')).join('');
+        const fill = it.role === 'negative' ? 'url(#aa-hatch)' : col + (it.role === 'intersect' ? '18' : '26');
+        g.append(sv('path', { d, fill, 'fill-rule': 'evenodd', stroke: it.role === 'negative' ? '#e03131' : col, 'stroke-width': selected ? 2.8 : 1.4,
+          'stroke-dasharray': it.role === 'negative' ? '6 3' : 'none', 'stroke-linejoin': 'round' }));
+        for (const s of it.shapes) {
+          for (const m of s.marks) g.append(sv('path', { d: pd(m), fill: 'none', stroke: col, 'stroke-width': 0.8, 'stroke-dasharray': '3 3', opacity: 0.7, 'pointer-events': 'none' }));
+          for (const [x, y] of s.outer) reach = Math.max(reach, Math.hypot(x, y));
+        }
+        lastPolys[1][it.id] = { d, col };
+      }
+      // the axis, and the plane the cross-section is cut in: its right half solid, the mirrored left half dashed
+      const { w, h } = size(), [ox, oy] = toScreen(0, 0), th = state.viewAngle * Math.PI / 180, far = Math.hypot(w, h) / view.s + Math.hypot(view.cy, view.cz);
+      const [ex, ey] = toScreen(far * Math.cos(th), far * Math.sin(th)), [bx, by] = toScreen(-far * Math.cos(th), -far * Math.sin(th));
+      g.append(sv('line', { x1: ox, y1: oy, x2: bx, y2: by, stroke: '#1f6feb', 'stroke-width': 1, 'stroke-dasharray': '6 4', opacity: 0.6, 'pointer-events': 'none' }));
+      g.append(sv('line', { x1: ox, y1: oy, x2: ex, y2: ey, stroke: '#1f6feb', 'stroke-width': 1.5, 'pointer-events': 'none' }));
+      g.append(sv('path', { d: 'M' + (ox - 6) + ' ' + oy + 'h12M' + ox + ' ' + (oy - 6) + 'v12', stroke: '#495057', 'stroke-width': 1.2, 'pointer-events': 'none' }));
+      const hit = sv('line', { x1: ox, y1: oy, x2: ex, y2: ey, stroke: 'transparent', 'stroke-width': 10, style: 'cursor:grab' });
+      hit.__secLine = true; g.append(hit);
+      const rh = Math.min(reach > 0 ? reach * 1.08 : 1, (Math.min(w, h) * 0.45) / view.s), [hx, hy] = toScreen(rh * Math.cos(th), rh * Math.sin(th));
+      const knob = sv('circle', { cx: hx.toFixed(1), cy: hy.toFixed(1), r: 6, fill: '#1f6feb', stroke: '#fff', 'stroke-width': 1.5, style: 'cursor:grab' });
+      knob.__secLine = true;
+      const tip = sv('title'); tip.textContent = 'Section angle: drag to turn'; knob.append(tip); hit.append(tip.cloneNode(true));
+      g.append(knob);
+      label(g, hx + 10, hy - 8, ['section ' + num(state.viewAngle * ANG_SCALE, ANG_SCALE === 1 ? 1 : 4) + ANG_LABEL]);
+    }
     function drawSection() {
+      syncModeBtns();
       svg.textContent = '';
       if (!state.scene) return;
       if (!view) fit();
@@ -2807,6 +3060,12 @@
       const g = sv('g'); svg.append(g);
       sceneBase = drag && drag.base != null ? drag.base : zBase();
       const MS0 = MS; MS = 1;
+      if (topMode()) {
+        drawWrap(); drawTop(g); drawHover();
+        zoomTag.textContent = fitScale > 0 ? Math.round(view.s / fitScale * 100) + '%' : '';
+        syncThreadBoxes(); renderSelBox();
+        MS = MS0; return;
+      }
       drawWrap();
       grid(g, sceneBase);
       // selected objects are drawn last (on top), so their points and edges can be picked over others
@@ -2826,6 +3085,12 @@
         lastPolys[MS][id] = { d: pathOf(poly), col };      // for the hover highlight
         g.append(sv('path', { d: pathOf(poly), fill, stroke: crossing || role === 'negative' ? '#e03131' : col, 'stroke-width': selected ? 2.8 : 1.4,
           'stroke-dasharray': role === 'negative' ? '6 3' : 'none', 'stroke-linejoin': 'round' }));
+        if (n.type === 'cog') {
+          // the range the section moves through as the view turns: root (min) and tip (max)
+          const sh = cogShapeOf(n.params), fix = cogFix(n.params, local), lo = Math.min(sh.rf, sh.ra), hi = Math.max(sh.rf, sh.ra);
+          for (const [R, st, dash] of [[lo, '#0c8599', 'none'], [hi, '#c2255c', '6 4']])
+            g.append(sv('path', { d: pathOf(local.map(p => xf.fwd({ y: cogWarp(p.y, R, fix, sh.tip), z: p.z }))), fill: 'none', stroke: st, 'stroke-width': 1.2, 'stroke-dasharray': dash, 'pointer-events': 'none' }));
+        }
         if (n.type === 'ngon') {
           // the range the section moves through as the view turns: face-centre radius (min) and edge radius (max)
           const k = Math.cos(Math.PI / Math.max(3, n.params.sides | 0)), faces = n.params.about === 'faces';
@@ -3001,7 +3266,7 @@
       for (const s of [1, -1]) {
         MS = s;
         const p = hoverNode && lastPolys[s][hoverNode];
-        if (p) g.append(sv('path', { d: p.d, fill: p.col + '1a', stroke: p.col, 'stroke-width': 6, 'stroke-opacity': 0.3, 'stroke-linejoin': 'round' }));
+        if (p) g.append(sv('path', { d: p.d, fill: p.col + '1a', 'fill-rule': 'evenodd', stroke: p.col, 'stroke-width': 6, 'stroke-opacity': 0.3, 'stroke-linejoin': 'round' }));
         if (hoverEdge && !state.sel.has(hoverEdge)) {
           const h = parseKey(hoverEdge), e = state.scene.nodes[h.node] && edgesOf(h.node).find(x => x.key === hoverEdge);
           if (e) { const [x1, y1] = toScreen(e.a.y, e.a.z), [x2, y2] = toScreen(e.b.y, e.b.z); g.append(sv('line', { x1, y1, x2, y2, stroke: 'rgba(224,49,49,.45)', 'stroke-width': 3, 'stroke-linecap': 'round' })); }
@@ -3056,6 +3321,12 @@
     }
     let wrapKey = '', wrapTimer = 0;
     function drawWrap() {
+      if (topMode()) {
+        // nothing behind the view from above
+        clearTimeout(wrapTimer);
+        if (wrapKey !== 'top') { const c = wrapCanvas.getContext('2d'); c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, wrapCanvas.width, wrapCanvas.height); wrapCanvas.style.transform = ''; wrapKey = 'top'; }
+        return;
+      }
       const { w, h } = size();
       const key = [state.job, state.viewAngle, view && view.s, view && view.cy, view && view.cz, w, h, UNIT_SCALE, state.quality, state.scene ? state.scene.root.length : 0].join('|');
       if (key === wrapKey) return;
@@ -3086,7 +3357,7 @@
       for (const id of leafOrder(state.scene)) {
         const n = state.scene.nodes[id], xf = xfOf(state.scene, id);
         if (!xf.id || roleOf(state.scene, id) === 'negative') continue;
-        objs.push({ n, col: COLORS[n.type] || '#1f6feb', turns: n.type === 'ngon' || (n.runs || []).some(r => r.hand) });
+        objs.push({ n, col: COLORS[n.type] || '#1f6feb', turns: n.type === 'ngon' || n.type === 'cog' || (n.runs || []).some(r => r.hand) });
       }
       if (!objs.length) return;
       const low = lowQuality() || quick, K = low ? 6 : 24, MSw = MS, theta = state.viewAngle * Math.PI / 180;
@@ -3250,7 +3521,7 @@
     }
     function syncThreadBoxes() {
       const seen = new Set(), { w, h } = size();
-      if (state.scene && state.threadCallouts) for (const id of leafOrder(state.scene)) {
+      if (state.scene && state.threadCallouts && !topMode()) for (const id of leafOrder(state.scene)) {
         const n = state.scene.nodes[id];
         (n.runs || []).forEach((r, ri) => {
           const key = id + '|' + ri;
@@ -3406,6 +3677,20 @@
     svg.addEventListener('pointerdown', (e) => {
       if (!state.scene) return;
       hideMenu();
+      if (topMode()) {
+        // from above: click an object to select it, drag the section line to turn the section; middle/right-drag pans
+        const [sx, sy] = local(e); MS = 1;
+        const [X, Y] = toWorld(sx, sy), add = e.shiftKey || e.ctrlKey || e.metaKey, hit = topNodeAt(X, Y);
+        if (e.button === 2 && hit) {
+          if (!selectedAncestorOf(hit)) { state.selNodes = new Set([hit]); state.sel = new Set(); renderAll(); }
+          showObjectMenu(e.clientX, e.clientY); return;
+        }
+        svg.setPointerCapture(e.pointerId);
+        if (e.button === 1 || e.button === 2) { drag = { type: 'pan', sx, sy, cy: view.cy, cz: view.cz }; return; }
+        if (e.target.__secLine) { drag = { type: 'angle' }; svg.style.cursor = 'grabbing'; return; }
+        drag = { type: 'topclick', hit, add };
+        return;
+      }
       const [sx, sy] = local(e), raw = toWorld(sx, sy), side = e.target.__side || (raw[0] < 0 ? -1 : 1);
       MS = dragSide = side;
       const wy = side * raw[0], wz = raw[1];
@@ -3471,6 +3756,24 @@
     });
     svg.addEventListener('pointermove', (e) => {
       if (!state.scene) return;
+      if (topMode()) {
+        const [sx, sy] = local(e); MS = 1;
+        const [X, Y] = toWorld(sx, sy), r = Math.hypot(X, Y), a = ((Math.atan2(Y, X) * 180 / Math.PI) + 360) % 360;
+        coord.textContent = 'x ' + fmt(X, 3) + ' · y ' + fmt(Y, 3) + ' · r ' + fmt(r, 3) + ' ' + UNIT_LABEL + ' · ' + num(a * ANG_SCALE, ANG_SCALE === 1 ? 1 : 4) + ANG_LABEL;
+        if (!drag) {
+          const hn = topNodeAt(X, Y);
+          if (hn !== hoverNode || hoverEdge) { hoverNode = hn; hoverEdge = null; drawHover(); }
+          svg.style.cursor = e.target.__secLine ? 'grab' : hn ? 'pointer' : '';
+          return;
+        }
+        if (drag.type === 'pan') { view.cy = drag.cy - (sx - drag.sx) / view.s; view.cz = drag.cz + (sy - drag.sy) / view.s; drawSection(); return; }
+        if (drag.type === 'angle') {
+          let deg = Math.atan2(Y, X) * 180 / Math.PI;
+          if (e.ctrlKey || e.metaKey) deg = Math.round(deg / 15) * 15;
+          setViewAngle(deg, false); drawSection();
+        }
+        return;
+      }
       const [sx, sy] = local(e), raw = toWorld(sx, sy), side = drag ? dragSide : (e.target.__side || (raw[0] < 0 ? -1 : 1));
       MS = side;
       const wy = side * raw[0], wz = raw[1];
@@ -3536,6 +3839,15 @@
       if (!drag) return;
       const d = drag; drag = null;
       if (d.type === 'pan') return;
+      if (d.type === 'angle') { svg.style.cursor = ''; drawSection(); return; }
+      if (d.type === 'topclick') {
+        if (d.hit) {
+          state.sel = d.add ? state.sel : new Set();
+          if (d.add) { if (state.selNodes.has(d.hit)) state.selNodes.delete(d.hit); else state.selNodes.add(d.hit); }
+          else state.selNodes = new Set([d.hit]);
+        } else if (!d.add) { state.sel = new Set(); state.selNodes = new Set(); }
+        renderAll(); return;
+      }
       if (d.type === 'box') {
         if (d.moved) {
           const [y0, z1] = toWorld(Math.min(d.sx, d.cx), Math.min(d.sy, d.cy)), [y1, z0] = toWorld(Math.max(d.sx, d.cx), Math.max(d.sy, d.cy));
@@ -3903,7 +4215,15 @@
         if ((n.holes || []).length) box.append(el('div', { style: 'color:#666' }, n.holes.length + ' hole(s) are cut out.'));
         return box;
       }
-      const q = n.params, setP = (mut) => setParams(n, mut);
+      const q = n.params, cg = n.type === 'cog';
+      // a cog's bore stays inside its root circle
+      const setP = (mut) => setParams(n, t => {
+        mut(t);
+        if (!cg) return;
+        // an outside cog's bore stays inside its root circle; an inside cog's rim outside its roots
+        if (cogIn(t)) { t.addendum = Math.min(t.addendum, t.teeth / 2 - 0.05); const lim = cogRoot(t) + 0.02 * t.module; t.rob = Math.max(t.rob, lim); t.rot = Math.max(t.rot, lim); }
+        else { const lim = Math.max(0, cogRoot(t) - 0.02 * t.module); t.rib = Math.min(t.rib, lim); t.rit = Math.min(t.rit, lim); }
+      });
       const len = (k, o) => numInput(() => mm(q[k]), v => setP(t => {
         t[k] = Math.max(k === 'h' ? 0.01 / UNIT_SCALE : 0, v / UNIT_SCALE);
         if (k === 'rib' && t.linkIn) t.rit = t.rib;
@@ -3914,10 +4234,32 @@
         ['Sides', numInput(() => q.sides, v => setP(t => { t.sides = Math.max(3, Math.min(256, Math.round(v))); }), { step: '1', min: 3, max: 256, digits: 0 })],
         ['Radius about', selectInput(q.about, [['faces', 'face centres'], ['edges', 'edges']], v => setP(t => { t.about = v; }))],
         ['Rotation (' + ANG_LABEL.trim() + ')', numInput(() => (q.rotation || 0) * ANG_SCALE, v => setP(t => { t.rotation = v / ANG_SCALE; }), { step: ANG_SCALE === 1 ? '1' : '0.01', digits: 4 })])) : null,
+        cg ? sect('Teeth', pgrid(2,
+        ['Teeth on the', selectInput(cogIn(q) ? 'internal' : 'external', [['external', 'outside (spur gear)'], ['internal', 'inside (ring gear)']], v => setP(t => {
+          t.kind = v;
+          if (v === 'internal') { const r = cogRoot(t) + 2.5 / MM; t.rob = Math.max(t.rob, r); t.rot = Math.max(t.rot, r); }
+          else { const r = Math.min(3 / MM, cogRoot(t) / 2); t.rib = Math.min(t.rib, r); t.rit = Math.min(t.rit, r); }
+        }), 'max-width:180px')], GBR,
+        ['Teeth', numInput(() => q.teeth, v => setP(t => { t.teeth = Math.max(3, Math.min(400, Math.round(v))); }), { step: '1', min: 3, max: 400, digits: 0 })],
+        ['Module' + U, numInput(() => mm(q.module), v => setP(t => { t.module = Math.max(0.01 / MM, v / UNIT_SCALE); }), { step: UNIT_SCALE === 1 ? '0.005' : '0.1', min: 0.01, title: 'Pitch diameter ÷ teeth' })],
+        ['Pressure angle (' + ANG_LABEL.trim() + ')', numInput(() => q.pressure * ANG_SCALE, v => setP(t => { t.pressure = Math.max(5, Math.min(40, v / ANG_SCALE)); }), { step: ANG_SCALE === 1 ? '0.5' : '0.01', digits: 4 })],
+        ['Rotation (' + ANG_LABEL.trim() + ')', numInput(() => (q.rotation || 0) * ANG_SCALE, v => setP(t => { t.rotation = v / ANG_SCALE; }), { step: ANG_SCALE === 1 ? '1' : '0.01', digits: 4 })],
+        ['Addendum (× module)', numInput(() => q.addendum, v => setP(t => { t.addendum = Math.max(0, Math.min(3, v)); }), { step: '0.05', min: 0, max: 3, digits: 3, title: 'Tooth height above the pitch circle' })],
+        ['Dedendum (× module)', numInput(() => q.dedendum, v => setP(t => { t.dedendum = Math.max(0, cogIn(t) ? Math.min(3, v) : Math.min(q.teeth / 2 - 0.05, v)); }), { step: '0.05', min: 0, max: 3, digits: 3, title: 'Tooth depth below the pitch circle' })],
+        ['Backlash' + U, numInput(() => mm(q.backlash || 0), v => setP(t => { t.backlash = Math.max(0, v / UNIT_SCALE); }), { step: UNIT_SCALE === 1 ? '0.001' : '0.02', min: 0, title: 'Taken off each tooth\'s width at the pitch circle, for a looser mesh' })],
+        { wide: dyn(() => 'Pitch Ø ' + num(mm(q.module * q.teeth), 3) + ', tip Ø ' + num(mm(2 * cogTip(q)), 3) + ', root Ø ' + num(mm(2 * cogRoot(q)), 3) + ' ' + UNIT_LABEL +
+          (UNIT_SCALE === 1 ? ' · diametral pitch ' + num(1 / q.module, 3) : '') + ' · circular pitch ' + num(mm(Math.PI * q.module), 3) + ' ' + UNIT_LABEL, 'color:#666;font-size:11px') })) : null,
         sect('Position and height', pgrid(2,
         ['Bottom y offset' + U, numInput(() => hDisp(q.z, zBase()), v => setP(t => { t.z = v / UNIT_SCALE + zBase(); }))],
         ['Height' + U, len('h', { min: 0.01 })])),
-        sect('Radii', pgrid(2,
+        cg && cogIn(q) ? sect('Rim', pgrid(2,
+        ['Rim radius bottom (x' + UX, len('rob', { min: 0 })],
+        ['Rim radius top (x' + UX, len('rot', { min: 0, disabled: q.linkOut })],
+        ['Linked', checkInput(() => q.linkOut, v => setP(t => { t.linkOut = v; t.rot = t.rob; }), 'top = bottom')])) :
+        cg ? sect('Bore', pgrid(2,
+        ['Bore radius bottom (x' + UX, len('rib', { min: 0 })],
+        ['Bore radius top (x' + UX, len('rit', { min: 0, disabled: q.linkIn })],
+        ['Linked', checkInput(() => q.linkIn, v => setP(t => { t.linkIn = v; t.rit = t.rib; }), 'top = bottom')])) : sect('Radii', pgrid(2,
         ['Inner bottom (x' + UX, len('rib', { min: 0 })],
         ['Inner top (x' + UX, len('rit', { min: 0, disabled: q.linkIn })],
         ['Outer bottom (x' + UX, len('rob', { min: 0 })],
@@ -3928,7 +4270,7 @@
         ['Bevel radius' + U, len('bevel', { min: 0 })],
         ['Bevel edges', numInput(() => q.bevelSegs, v => setP(t => { t.bevelSegs = Math.max(1, Math.min(64, Math.round(v))); }), { step: '1', min: 1, max: 64, digits: 0 })],
         ['Bevel shape', selectInput(q.bevelOut ? 'convex' : 'concave', [['convex', 'convex (rounded)'], ['concave', 'concave (cove)']], v => setP(t => { t.bevelOut = v === 'convex'; }))])),
-        ng ? null : sect('Detail', pgrid(2, precisionField())));
+        ng || cg ? null : sect('Detail', pgrid(2, precisionField())));
       return box;
     }
 
@@ -3997,9 +4339,10 @@
         panels.objects.body.append(bare(treeBlock()));
         const nSel = state.selNodes.size;
         appendKids(panels.objects.tools,
-          hbtn('circle', 'Circular', () => addObject('circle', view), { title: 'Add a circular ring', color: COLORS.circle }),
-          hbtn('ngon', 'N-sided', () => addObject('ngon', view), { title: 'Add an n-sided ring', color: COLORS.ngon }),
-          hbtn('thread', 'Thread', () => addObject('thread', view), { title: 'Add a threaded ring, with standard sizes', color: COLORS.thread }),
+          hbtn('circle', 'Circular', () => addObject('circle', secView()), { title: 'Add a circular ring', color: COLORS.circle }),
+          hbtn('ngon', 'N-sided', () => addObject('ngon', secView()), { title: 'Add an n-sided ring', color: COLORS.ngon }),
+          hbtn('cog', 'Cog', () => addObject('cog', secView()), { title: 'Add a cog (spur gear with involute teeth)', color: COLORS.cog }),
+          hbtn('thread', 'Thread', () => addObject('thread', secView()), { title: 'Add a threaded ring, with standard sizes', color: COLORS.thread }),
           hbtn('cloner', 'Cloner', () => wrapSelection('cloner'), { title: nSel ? 'Put the selected objects in a radial cloner' : 'Add an empty radial cloner' }),
           hbtn('group', 'Group', () => wrapSelection('group'), { title: nSel ? 'Group the selected objects' : 'Add an empty group' }),
           hbtn('boolean', 'Boolean', () => wrapSelection('boolean'), { title: 'Add a boolean: with one object selected it becomes A; with two, A and B' }),
