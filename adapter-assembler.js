@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.11.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.11.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.11.0';
+  const APP_VERSION = '3.11.1';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -2661,7 +2661,7 @@
     function openScene(sc, msg) {
       if (state.scene) pushUndo();
       state.scene = sc; state.sel = new Set(); state.selNodes = new Set(); state.edited = true; state.libMessage = msg || null;
-      view = null; views = { section: null, top: null }; hideSplash(); markEdited(); recalc();
+      view = null; hideSplash(); markEdited(); recalc();
     }
     function threadPicker(title, init) {
       // gender, standard (or custom diameter and pitch), thread length
@@ -2713,7 +2713,7 @@
           card('Blank project',
             el('button', { type: 'button', style: BTN, onclick: () => openScene({ nodes: {}, root: [], seq: 1 }) }, 'Start blank')),
           card('Open a project',
-            el('button', { type: 'button', style: BTN, onclick: () => { W.__aaOnProjectLoaded = () => { view = null; views = { section: null, top: null }; hideSplash(); }; pickJsonFile(); } }, 'Open JSON file…'),
+            el('button', { type: 'button', style: BTN, onclick: () => { W.__aaOnProjectLoaded = () => { view = null; hideSplash(); }; pickJsonFile(); } }, 'Open JSON file…'),
             lib.length ? el('div', { style: 'margin-top:10px' }, el('div', { style: 'font-weight:700;margin-bottom:4px' }, 'My saved models'),
               ...lib.map(entry => el('div', { style: 'display:flex;gap:6px;align-items:center;margin:2px 0' },
                 el('button', { type: 'button', style: BTN2, onclick: () => {
@@ -2796,8 +2796,21 @@
     // opposite it (view angle + 180°) mirrored on the left, which works just the same. MS is the side being drawn
     // or worked on (1 right, -1 left); radii stay positive on both sides.
     let MS = 1, dragSide = 1, fitScale = 0;
-    const toScreen = (y, z) => { const { w, h } = size(); return [w / 2 + (MS * y - view.cy) * view.s, h / 2 - (z - view.cz) * view.s]; };
-    const toWorld = (sx, sy) => { const { w, h } = size(); return [view.cy + (sx - w / 2) / view.s, view.cz - (sy - h / 2) / view.s]; };
+    // From above the part is turned so the section's direction points right, as the radius does from the side: the two
+    // views line up, scale for scale (rotOff: the grid's strips work in that turned frame directly).
+    let rotOff = false;
+    const topTurn = () => (topMode() && !rotOff ? state.viewAngle * Math.PI / 180 : 0);
+    const toScreen = (y, z) => {
+      const { w, h } = size(), t = topTurn();
+      if (t) { const c = Math.cos(t), s = Math.sin(t), a = y * c + z * s; z = -y * s + z * c; y = a; }
+      return [w / 2 + (MS * y - view.cy) * view.s, h / 2 - (z - view.cz) * view.s];
+    };
+    const toWorld = (sx, sy) => {
+      const { w, h } = size(), t = topTurn(), y = view.cy + (sx - w / 2) / view.s, z = view.cz - (sy - h / 2) / view.s;
+      if (!t) return [y, z];
+      const c = Math.cos(t), s = Math.sin(t);
+      return [y * c - z * s, y * s + z * c];
+    };
     const local = (e) => { const r = svg.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
     const pathOf = (poly) => poly.map((p, i) => (i ? 'L' : 'M') + toScreen(p.y, p.z).map(v => v.toFixed(1)).join(' ')).join(' ') + 'Z';
 
@@ -3019,6 +3032,10 @@
     // zooming moves the ticks smoothly instead of swapping them.
     const GRID_STEPS = [0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500];
     function grid(g, base, top) {
+      rotOff = !!top;
+      try { gridIn(g, base, top); } finally { rotOff = false; }
+    }
+    function gridIn(g, base, top) {
       const { w, h } = size();
       const [ya, za] = toWorld(0, h), [yb, zb] = toWorld(w, 0);
       const pxu = view.s / UNIT_SCALE; let i = GRID_STEPS.findIndex(s => s * pxu >= 55); if (i < 0) i = GRID_STEPS.length - 1;
@@ -3042,7 +3059,7 @@
         }
         const L = far * view.s;
         for (let a = 0; a < 360; a += 15) {
-          const t = a * Math.PI / 180, ax = a % 90 === 0;
+          const t = a * Math.PI / 180 - state.viewAngle * Math.PI / 180, ax = a % 90 === 0;     // spokes at the part's own angles
           g.append(sv('line', { x1: ox, y1: oy, x2: ox + L * Math.cos(t), y2: oy - L * Math.sin(t), stroke: ax ? '#adb5bd' : '#e9ecef', 'stroke-opacity': ax || a % 30 === 0 ? 1 : 0.6 }));
         }
       } else for (const [st, aL] of levels) {
@@ -3124,12 +3141,22 @@
 
     // ---- the part seen from above: x across, y up (the plane the part turns in) ----
     const topMode = () => state.secMode === 'top';
-    let views = { section: null, top: null }, lastTop = [];
+    let lastTop = [];
+    // the part's middle height: the overhead view's centre sits on it in the side view
+    function partZMid() {
+      let z0 = Infinity, z1 = -Infinity;
+      if (state.scene) for (const id of leafOrder(state.scene)) for (const p of viewOutline(state.scene, id)) { z0 = Math.min(z0, p.z); z1 = Math.max(z1, p.z); }
+      return isFinite(z0) ? (z0 + z1) / 2 : 0;
+    }
+    // the other view, lined up with this one
+    const otherView = (v, toTop) => v && { cy: v.cy, cz: toTop ? v.cz - partZMid() : v.cz + partZMid(), s: v.s, fit: v.fit };
     function setSecMode(m) {
       if (topMode() === (m === 'top')) return;
-      views[topMode() ? 'top' : 'section'] = view;
-      state.secMode = m === 'top' ? 'top' : 'section'; saveSettings();
-      view = views[state.secMode]; zoomAnim = null; drag = null; hoverNode = null; hoverEdge = null; cursorW = null; hoverTopH = null;
+      const toTop = m === 'top';
+      zoomAnim = null;
+      view = otherView(view, toTop);
+      state.secMode = toTop ? 'top' : 'section'; saveSettings();
+      drag = null; hoverNode = null; hoverEdge = null; cursorW = null; hoverTopH = null;
       // the old view tips away as the new one tips in (side → top: as if looking down onto the part; and back)
       const ghost = !reduceMotion() && svg.isConnected ? svg.cloneNode(true) : null;
       if (ghost) {
@@ -3138,7 +3165,10 @@
         try { shot.getContext('2d').drawImage(wrapCanvas, 0, 0); } catch (_) { /* ignore */ }
         shot.style.cssText = 'position:absolute;inset:0;width:100%;height:100%';
         ghost.style.position = 'absolute'; ghost.style.inset = '0';
-        const box = el('div', { style: 'position:absolute;inset:0;pointer-events:none;background:#fbfbfc;transform-origin:50% 50%' }, shot, ghost);
+        // both views turn about the same line: through the axis, at the part's middle height
+        const { w, h } = size(), pv = view ? (w / 2 - view.cy * view.s) + 'px ' + (h / 2 + (toTop ? view.cz : view.cz - partZMid()) * view.s) + 'px' : '50% 50%';
+        const box = el('div', { style: 'position:absolute;inset:0;pointer-events:none;background:#fbfbfc;transform-origin:' + pv }, shot, ghost);
+        for (const n of [svg, wrapCanvas]) n.style.transformOrigin = pv;
         left.insertBefore(box, overlay);
         const down = state.secMode === 'top', ms = 380, ease = 'cubic-bezier(.45,0,.2,1)';
         box.animate([{ transform: 'perspective(1400px) rotateX(0deg)', opacity: 1 }, { transform: 'perspective(1400px) rotateX(' + (down ? 70 : -70) + 'deg)', opacity: 0 }], { duration: ms, easing: ease, fill: 'forwards' })
@@ -3153,7 +3183,7 @@
       for (const s of legend.querySelectorAll('.aa-sideonly')) s.style.display = topMode() ? 'none' : '';
     }
     // where new objects go: the cross-section's view, whichever is showing
-    const secView = () => topMode() ? views.section : view;
+    const secView = () => topMode() ? otherView(view, false) : view;
     // an object from above in its own frame: outer edge, bore, and dashed details (pitch circle, thread roots)
     function topLocal(n) {
       const o = outlineOf(n.pts, n.runs);
@@ -3226,7 +3256,11 @@
     }
     function fitTop() {
       let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-      for (const it of topItems()) for (const s of it.shapes) for (const [x, y] of s.outer) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+      const t = state.viewAngle * Math.PI / 180, c = Math.cos(t), sn = Math.sin(t);
+      for (const it of topItems()) for (const s of it.shapes) for (const [x0w, y0w] of s.outer) {
+        const x = x0w * c + y0w * sn, y = -x0w * sn + y0w * c;
+        x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+      }
       if (!isFinite(x0)) { x0 = y0 = -1; x1 = y1 = 1; }
       const { w, h } = size();
       view = { cy: (x0 + x1) / 2, cz: (y0 + y1) / 2, s: Math.min((w - AX_L) / ((x1 - x0) * 1.2 || 1), (h - AX_B) / ((y1 - y0) * 1.2 || 1)) };
@@ -4171,7 +4205,7 @@
           } else if (!add) { state.selNodes = new Set([h.id]); state.sel = new Set(); }
           drawSection(); return;
         }
-        if (e.target.__secLine) { drag = { type: 'angle' }; svg.style.cursor = 'grabbing'; return; }
+        if (e.target.__secLine) { const [ox, oy] = toScreen(0, 0); drag = { type: 'angle', a0: state.viewAngle, sl: Math.atan2(oy - sy, sx - ox) * 180 / Math.PI, acc: 0, hit, add, sx, sy, moved: false }; svg.style.cursor = 'grabbing'; return; }
         drag = { type: 'topclick', hit, add };
         return;
       }
@@ -4266,7 +4300,12 @@
           return;
         }
         if (drag.type === 'angle') {
-          let deg = Math.atan2(Y, X) * 180 / Math.PI;
+          // the part turns with the pointer, under the level section line
+          if (!drag.moved && Math.hypot(sx - drag.sx, sy - drag.sy) < 3) return;
+          drag.moved = true;
+          const [ox, oy] = toScreen(0, 0), sNow = Math.atan2(oy - sy, sx - ox) * 180 / Math.PI;
+          drag.acc += ((sNow - drag.sl + 540) % 360) - 180; drag.sl = sNow;
+          let deg = drag.a0 - drag.acc;
           if (e.ctrlKey || e.metaKey) deg = Math.round(deg / 15) * 15;
           setViewAngle(deg, false); drawSection();
         }
@@ -4346,9 +4385,10 @@
       if (!drag) return;
       const d = drag; drag = null;
       if (d.type === 'pan') return;
-      if (d.type === 'angle') { svg.style.cursor = ''; drawSection(); return; }
+      if (d.type === 'angle' && d.moved) { svg.style.cursor = ''; drawSection(); return; }
       if (d.type === 'toph') { if (d.moved) recalc(); else renderAll(); return; }   // (points stay selected, for the right-click menu)
-      if (d.type === 'topclick') {
+      if (d.type === 'topclick' || d.type === 'angle') {      // (a click on the section line selects what is under it)
+        svg.style.cursor = '';
         if (d.hit) {
           state.sel = d.add ? state.sel : new Set();
           if (d.add) { if (state.selNodes.has(d.hit)) state.selNodes.delete(d.hit); else state.selNodes.add(d.hit); }
@@ -4396,7 +4436,10 @@
     // zooming eases toward its target over a few frames; the point under the pointer stays where it is
     let zoomAnim = null;
     function zoomTo(s, sx, sy) {
+      // the point under the pointer, in the view's own frame (from above: the turned one)
+      rotOff = true;
       const [wy, wz] = toWorld(sx, sy);
+      rotOff = false;
       const fresh = !zoomAnim;
       zoomAnim = { s, sx, sy, wy, wz };
       if (!fresh) return;
