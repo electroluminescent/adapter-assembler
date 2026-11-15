@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.11.2. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.11.3. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.11.2';
+  const APP_VERSION = '3.11.3';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -3088,8 +3088,7 @@
           const [x] = toScreen(y, 0);
           if (x < AX_L) continue;
           g.append(sv('line', { x1: x, y1: h - AX_B, x2: x, y2: h - AX_B + (st === main ? 4 : 3), stroke: '#adb5bd', 'stroke-opacity': aL }));
-          if (aT > 0.01 && top) lab(x, h - 4, num(mm(Math.abs(y)), 3) + ' ' + UNIT_LABEL, { anchor: 'middle', op: aT });     // distance from the axis
-          else if (aT > 0.01) {
+          if (aT > 0.01) {        // (from above too: the section line is level, so this is still the radius along it)
             lab(x, h - 4, num(mm(Math.abs(y)), 3) + ' ' + UNIT_LABEL, { anchor: 'middle', op: aT });                 // radius (positive on both sides)
             lab(x, h - 17, 'Ø' + num(mm(2 * Math.abs(y)), 3) + ' ' + UNIT_LABEL, { anchor: 'middle', fill: '#adb5bd', op: aT });  // diameter
           }
@@ -3102,7 +3101,7 @@
           if (aT > 0.01) lab(AX_L - 6, y + 3, num((top ? Math.abs(zr) : zr) * UNIT_SCALE, 3) + ' ' + UNIT_LABEL, { anchor: 'end', op: aT });
         }
       }
-      const t1 = sv('text', { x: AX_L + 4, y: h - AX_B - 4, 'font-size': 10, fill: '#adb5bd' }); t1.textContent = top ? 'distance from the axis' : 'x: radius / Ø →'; g.append(t1);
+      const t1 = sv('text', { x: AX_L + 4, y: h - AX_B - 4, 'font-size': 10, fill: '#adb5bd' }); t1.textContent = 'x: radius / Ø →'; g.append(t1);
       const t2 = sv('text', { x: 4, y: 12, 'font-size': 10, fill: '#adb5bd' }); t2.textContent = top ? 'distance' : 'y: height ↑'; g.append(t2);
     }
     // Ticks on both axes for the mouse position, or for the point being dragged.
@@ -3170,8 +3169,8 @@
         try { shot.getContext('2d').drawImage(wrapCanvas, 0, 0); } catch (_) { /* ignore */ }
         shot.style.cssText = 'position:absolute;inset:0;width:100%;height:100%';
         ghost.style.position = 'absolute'; ghost.style.inset = '0';
-        // both views turn about the same line: through the axis, at the part's middle height
-        const { w, h } = size(), pv = view ? (w / 2 - view.cy * view.s) + 'px ' + (h / 2 + (toTop ? view.cz : view.cz - partZMid()) * view.s) + 'px' : '50% 50%';
+        // both views turn about the same line
+        const pv = '50% 50%';      // a level line through the middle of the pane
         const box = el('div', { style: 'position:absolute;inset:0;pointer-events:none;background:#fbfbfc;transform-origin:' + pv }, shot, ghost);
         for (const n of [svg, wrapCanvas]) n.style.transformOrigin = pv;
         left.insertBefore(box, overlay);
