@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.10.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.10.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.10.0';
+  const APP_VERSION = '3.10.1';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -877,8 +877,7 @@
       // u: from the corner toward the rounding's middle; k: how far that is, per unit of radius
       return { V, d1, d2, phi, u: [bx / bl, by / bl], k: 1 / Math.max(1e-6, Math.cos(phi / 2)) - 1 };
     };
-    const lim = { rootL: [len(0, mark.rootL), len(mark.rootL, mark.tipL) / 2], tipL: [len(mark.rootL, mark.tipL) / 2, len(mark.tipL, mark.tipR) / 2],
-      tipR: [len(mark.tipL, mark.tipR) / 2, len(mark.tipR, mark.rootR) / 2], rootR: [len(mark.tipR, mark.rootR) / 2, len(mark.rootR, C.length - 1)] };
+    const lim = { rootL: [len(0, mark.rootL), len(mark.rootL, mark.tipL) / 2], tipL: [len(mark.rootL, mark.tipL) / 2, len(mark.tipL, mark.tipR) / 2] };
     const info = { tip: corner(mark.tipL), root: corner(mark.rootL) };
     const fillet = (c, r, lb, lf) => {
       if (!(r > 0) || c <= 0 || c >= C.length - 1) return;
@@ -906,11 +905,16 @@
       C = C.slice(0, A.i + 1).concat(arcPts, C.slice(B.i));
     };
     const tr = Math.max(0, q.tipRound || 0), rr0 = Math.max(0, q.rootRound || 0);
-    fillet(mark.rootR, rr0, ...lim.rootR);
-    if (mark.tipR !== mark.tipL) fillet(mark.tipR, tr, ...lim.tipR);
-    fillet(mark.tipL, tr, ...lim.tipL);
-    fillet(mark.rootL, rr0, ...lim.rootL);
-    if (tr > 0 || rr0 > 0) { tooth = []; for (const [x, y] of C) push(Math.atan2(y, x), Math.hypot(x, y)); }
+    if (tr > 0 || rr0 > 0) {
+      // round the leading side's corners only, then mirror that half: both sides of every tooth come out the same
+      if (mark.tipL === mark.tipR) lim.tipL[1] = len(mark.tipL, mark.rootR) / 2;      // a pointed tooth
+      fillet(mark.tipL, tr, ...lim.tipL);
+      fillet(mark.rootL, rr0, ...lim.rootL);
+      const lead = C.map(([x, y]) => [Math.atan2(y, x), Math.hypot(x, y)]).filter(([a]) => a < -1e-12);
+      tooth = [];
+      for (const [a, r] of lead) push(a, r);
+      for (let i = lead.length - 1; i >= 1; i--) push(-lead[i][0], lead[i][1]);       // not the gap's middle (the next tooth starts there)
+    }
     const rot = (q.rotation || 0) * Math.PI / 180, ang = new Float64Array(N * tooth.length), rad = new Float64Array(N * tooth.length);
     for (let k = 0, o = 0; k < N; k++) for (const [a, r] of tooth) { ang[o] = rot + 2 * half * k + a; rad[o] = r; o++; }
     const cr = Math.cos(rot), sr = Math.sin(rot), turn = (v) => [v[0] * cr - v[1] * sr, v[0] * sr + v[1] * cr];
