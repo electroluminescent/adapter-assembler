@@ -1,11 +1,11 @@
-// Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
-// https://github.com/electroluminescent/adapter-assembler
-// Version 3.16.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.16.1';
+  const APP_VERSION = '3.17.0';
+  // switching between radius/height and overhead: the overhead view tips in about the height it looks down from
+  // (set false to go back to both views tipping about the middle of the pane)
+  const TIP_FROM_CUT = true;
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -2468,7 +2468,7 @@
   installScrub();
 
   function settingsBlock() {
-    const set = (k, v) => { state[k] = v; saveSettings(); recalc(); };
+    const set = (k, v) => { if (k === 'flip') { setFlip(v); return; } state[k] = v; saveSettings(); recalc(); };
     // units: everything shown and typed follows them (files stay in millimetres)
     const setUnit = (k, v) => { state[k] = v; applyUnits(); saveSettings(); remountEditor(); };
     return el('div', null,
@@ -2512,6 +2512,13 @@
   }
 
   function renderAll() { if (editor) editor.render(); }
+  // turning the part over: the views turn with it, keeping the same part of it in the middle
+  function setFlip(v) {
+    if (!!state.flip === !!v) return;
+    state.flip = !!v; saveSettings();
+    if (editor && editor.flipped) editor.flipped();
+    recalc();
+  }
 
   // ---------------------------------------------------------------------------
   // 9. The editor fills the page.
@@ -2563,7 +2570,9 @@
     const overlay = el('div', { style: 'position:absolute;inset:0;pointer-events:none;overflow:hidden' });
     // 1-D compass under the cross-section: the angle of the section around the axis (drag to turn)
     const compass1 = el('canvas', { style: 'position:absolute;left:50%;transform:translateX(-50%);bottom:' + (44 + 4) + 'px;width:300px;height:26px;cursor:ew-resize;touch-action:none;z-index:2;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,.18)', title: 'Section angle: drag to turn the part (the 3D view turns with it)' });
-    // the band of heights shown from above: a slider at the right of the pane (overhead view only)
+    // the band of heights shown from above: a slider at the right of the pane. In the radius/height view it slices
+    // nothing; it is there to set where the view from above will look down from. Flipped, the slider turns over too
+    // (its top is what is shown on top).
     const TB_COL = '#12b886';
     const tbTrack = el('div', { style: 'position:absolute;left:50%;top:0;bottom:0;width:4px;margin-left:-2px;border-radius:2px;background:rgba(0,0,0,.12)' });
     const tbRange = el('div', { style: 'position:absolute;left:50%;width:4px;margin-left:-2px;border-radius:2px;background:' + TB_COL + ';cursor:grab' });
@@ -2575,10 +2584,11 @@
     const topBox = el('div', { style: 'position:absolute;right:6px;top:64px;bottom:64px;width:20px;touch-action:none;z-index:6', title: 'Heights shown from above' }, tbTrack, tbRange, tbHiL, tbLoL, tbHi, tbLo);
     let tbDrag = null;
     function syncTopBox() {
-      topBox.style.display = topMode() && state.scene ? '' : 'none';
-      const c = state.topCut || { lo: 0, hi: 1 }, lo = Math.max(0, Math.min(1, c.lo)), hi = Math.max(0, Math.min(1, c.hi)), top = (t) => (1 - t) * 100 + '%';
+      topBox.style.display = state.scene ? '' : 'none';
+      topBox.title = topMode() ? 'Heights shown from above' : 'Heights the view from above will show (nothing is cut here)';
+      const c = state.topCut || { lo: 0, hi: 1 }, lo = Math.max(0, Math.min(1, c.lo)), hi = Math.max(0, Math.min(1, c.hi)), top = (t) => (1 - tbF(t)) * 100 + '%';
       tbHi.style.top = top(hi); tbLo.style.top = top(lo); tbHiL.style.top = top(hi); tbLoL.style.top = top(lo);
-      tbRange.style.top = top(hi); tbRange.style.height = (hi - lo) * 100 + '%';
+      tbRange.style.top = (1 - Math.max(tbF(lo), tbF(hi))) * 100 + '%'; tbRange.style.height = (hi - lo) * 100 + '%';
       const r = sceneZRange(), at = (t) => r ? num(hDisp(r[0] + (r[1] - r[0]) * t, zBase()), 3) + ' ' + UNIT_LABEL : '';
       tbHiL.textContent = hi < 0.999 ? at(hi) : ''; tbLoL.textContent = lo > 0.001 ? at(lo) : '';
     }
@@ -2587,7 +2597,8 @@
       if (hi < lo + 0.005) { if (tbDrag && tbDrag.which === 'lo') lo = hi - 0.005; else hi = lo + 0.005; }
       state.topCut = { lo: Math.max(0, lo), hi: Math.min(1, hi) }; drawSection();
     };
-    const tbAt = (e) => { const r = topBox.getBoundingClientRect(); return Math.max(0, Math.min(1, 1 - (e.clientY - r.top) / Math.max(1, r.height))); };
+    const tbF = (t) => (state.flip ? 1 - t : t);     // height in the scene's range ↔ place up the slider
+    const tbAt = (e) => { const r = topBox.getBoundingClientRect(); return tbF(Math.max(0, Math.min(1, 1 - (e.clientY - r.top) / Math.max(1, r.height)))); };
     for (const [k, which] of [[tbHi, 'hi'], [tbLo, 'lo'], [tbRange, 'both']]) {
       k.addEventListener('pointerdown', (e) => {
         if (e.button !== 0) return;
@@ -2893,7 +2904,7 @@
       }
       const arrows = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
       if (arrows[e.key] && (state.sel.size || state.selNodes.size)) {
-        const step = (e.shiftKey ? 1 : 0.1) * (UNIT_SCALE === MM ? 1 : 0.1) / UNIT_SCALE, [ay, az] = arrows[e.key];
+        const step = (e.shiftKey ? 1 : 0.1) * (UNIT_SCALE === MM ? 1 : 0.1) / UNIT_SCALE, ay = arrows[e.key][0], az = arrows[e.key][1] * FZ();   // up the screen
         pushUndo();
         if (state.sel.size) moveKeysView(state.scene, [...state.sel], ay * step, az * step);
         else for (const id of leavesUnder(state.scene, topSelected(state.scene))) moveNodeView(state.scene, id, ay * step, az * step);
@@ -2923,7 +2934,7 @@
       }
       const { w, h } = size();
       const R = Math.max(Math.abs(y0), Math.abs(y1), 1e-6);    // both sides of the axis
-      view = { cy: 0, cz: (z0 + z1) / 2, s: Math.min(w / (2 * R * 1.15), h / ((z1 - z0) * 1.2 || 1)) };
+      view = { cy: 0, cz: FZ() * (z0 + z1) / 2, s: Math.min(w / (2 * R * 1.15), h / ((z1 - z0) * 1.2 || 1)) };
       fitScale = view.s; view.fit = view.s;
     }
     // The cross-section shows both sides of the axis: the section at the view angle on the right, and the one
@@ -2934,13 +2945,19 @@
     // views line up, scale for scale (rotOff: the grid's strips work in that turned frame directly).
     let rotOff = false;
     const topTurn = () => (topMode() && !rotOff ? state.viewAngle * Math.PI / 180 : 0);
+    // flipped upside down (a half turn about the radius axis): heights run down the screen; from above, the part is seen
+    // from what was its underside, so the second axis reverses too. The view's own frame (view.cy / cz) is the shown one.
+    const FZ = () => (state.flip ? -1 : 1);
     const toScreen = (y, z) => {
       const { w, h } = size(), t = topTurn();
       if (t) { const c = Math.cos(t), s = Math.sin(t), a = y * c + z * s; z = -y * s + z * c; y = a; }
+      if (!rotOff) z *= FZ();
       return [w / 2 + (MS * y - view.cy) * view.s, h / 2 - (z - view.cz) * view.s];
     };
     const toWorld = (sx, sy) => {
-      const { w, h } = size(), t = topTurn(), y = view.cy + (sx - w / 2) / view.s, z = view.cz - (sy - h / 2) / view.s;
+      const { w, h } = size(), t = topTurn(), y = view.cy + (sx - w / 2) / view.s;
+      let z = view.cz - (sy - h / 2) / view.s;
+      if (!rotOff) z *= FZ();
       if (!t) return [y, z];
       const c = Math.cos(t), s = Math.sin(t);
       return [y * c - z * s, y * s + z * c];
@@ -3171,7 +3188,7 @@
     }
     function gridIn(g, base, top) {
       const { w, h } = size();
-      const [ya, za] = toWorld(0, h), [yb, zb] = toWorld(w, 0);
+      const [ya, zA] = toWorld(0, h), [yb, zB] = toWorld(w, 0), za = Math.min(zA, zB), zb = Math.max(zA, zB);
       const pxu = view.s / UNIT_SCALE; let i = GRID_STEPS.findIndex(s => s * pxu >= 55); if (i < 0) i = GRID_STEPS.length - 1;
       const main = GRID_STEPS[i] / UNIT_SCALE, fine = i > 0 ? GRID_STEPS[i - 1] / UNIT_SCALE : main, finePx = i > 0 ? fine * view.s : 0;
       const clamp01 = (x) => Math.max(0, Math.min(1, x));
@@ -3193,7 +3210,7 @@
         }
         const L = far * view.s;
         for (let a = 0; a < 360; a += 15) {
-          const t = a * Math.PI / 180 - state.viewAngle * Math.PI / 180, ax = a % 90 === 0;     // spokes at the part's own angles
+          const t = FZ() * (a * Math.PI / 180 - state.viewAngle * Math.PI / 180), ax = a % 90 === 0;     // spokes at the part's own angles
           g.append(sv('line', { x1: ox, y1: oy, x2: ox + L * Math.cos(t), y2: oy - L * Math.sin(t), stroke: ax ? '#adb5bd' : '#e9ecef', 'stroke-opacity': ax || a % 30 === 0 ? 1 : 0.6 }));
         }
       } else for (const [st, aL] of levels) {
@@ -3231,7 +3248,7 @@
         }
       }
       const t1 = sv('text', { x: AX_L + 4, y: h - AX_B - 4, 'font-size': 10, fill: '#adb5bd' }); t1.textContent = 'x: radius / Ø →'; g.append(t1);
-      const t2 = sv('text', { x: 4, y: 12, 'font-size': 10, fill: '#adb5bd' }); t2.textContent = top ? 'distance' : 'y: height ↑'; g.append(t2);
+      const t2 = sv('text', { x: 4, y: 12, 'font-size': 10, fill: '#adb5bd' }); t2.textContent = top ? 'distance' : state.flip ? 'y: height ↓ (flipped)' : 'y: height ↑'; g.append(t2);
     }
     // Ticks on both axes for the mouse position, or for the point being dragged.
     let cursorW = null;
@@ -3491,11 +3508,12 @@
       return isFinite(z0) ? (z0 + z1) / 2 : 0;
     }
     // the other view, lined up with this one
-    const otherView = (v, toTop) => v && { cy: v.cy, cz: toTop ? v.cz - partZMid() : v.cz + partZMid(), s: v.s, fit: v.fit };
+    const otherView = (v, toTop) => v && { cy: v.cy, cz: toTop ? v.cz - FZ() * partZMid() : v.cz + FZ() * partZMid(), s: v.s, fit: v.fit };
     function setSecMode(m) {
       if (topMode() === (m === 'top')) return;
       const toTop = m === 'top';
       zoomAnim = null;
+      const before = view;
       view = otherView(view, toTop);
       state.secMode = toTop ? 'top' : 'section'; saveSettings();
       drag = null; hoverNode = null; hoverEdge = null; cursorW = null; hoverTopH = null;
@@ -3507,10 +3525,19 @@
         try { shot.getContext('2d').drawImage(wrapCanvas, 0, 0); } catch (_) { /* ignore */ }
         shot.style.cssText = 'position:absolute;inset:0;width:100%;height:100%';
         ghost.style.position = 'absolute'; ghost.style.inset = '0';
-        // both views turn about the same line
-        const pv = '50% 50%';      // a level line through the middle of the pane
-        const box = el('div', { style: 'position:absolute;inset:0;pointer-events:none;background:#fbfbfc;transform-origin:' + pv }, shot, ghost);
-        for (const n of [svg, wrapCanvas]) n.style.transformOrigin = pv;
+        // the radius/height view turns about a level line through the middle of the pane
+        const pv = '50% 50%';
+        // TIP_FROM_CUT: the view from above turns about the height it looks down from (the top of its height band),
+        // where that height was in the radius/height view, so it seems to be seen from that place in the part.
+        // (false: both views turn about the middle of the pane, as before.)
+        let pTop = pv;
+        if (TIP_FROM_CUT) {
+          const sideV = toTop ? before : view, r = sceneZRange(), band = topBand(), up = state.flip ? 0 : 1;
+          const zTop = band ? (up ? band.hi : band.lo) : r ? r[up] : null;
+          if (sideV && zTop != null) pTop = '50% ' + (size().h / 2 - (FZ() * zTop - sideV.cz) * sideV.s).toFixed(1) + 'px';
+        }
+        const box = el('div', { style: 'position:absolute;inset:0;pointer-events:none;background:#fbfbfc;transform-origin:' + (toTop ? pv : pTop) }, shot, ghost);
+        for (const n of [svg, wrapCanvas]) n.style.transformOrigin = toTop ? pTop : pv;
         left.insertBefore(box, overlay);
         const down = state.secMode !== 'top', ms = 380, ease = 'cubic-bezier(.45,0,.2,1)';
         box.animate([{ transform: 'perspective(1400px) rotateX(0deg)', opacity: 1 }, { transform: 'perspective(1400px) rotateX(' + (down ? 70 : -70) + 'deg)', opacity: 0 }], { duration: ms, easing: ease, fill: 'forwards' })
@@ -3525,6 +3552,8 @@
     }
     // where new objects go: the cross-section's view, whichever is showing
     const secView = () => topMode() ? otherView(view, false) : view;
+    // where new objects go: the middle of the cross-section, in the scene's own heights
+    const addView = () => { const v = secView(); return v && { ...v, cz: FZ() * v.cz }; };
     // an object from above in its own frame: outer edge, bore, and dashed details (pitch circle, thread roots)
     // the outline cut to the heights a ≤ z ≤ b (Sutherland–Hodgman)
     function clipZ(poly, a, b) {
@@ -3633,7 +3662,7 @@
       let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
       const t = state.viewAngle * Math.PI / 180, c = Math.cos(t), sn = Math.sin(t);
       for (const it of topItems()) for (const s of it.shapes) for (const [x0w, y0w] of s.outer) {
-        const x = x0w * c + y0w * sn, y = -x0w * sn + y0w * c;
+        const x = x0w * c + y0w * sn, y = FZ() * (-x0w * sn + y0w * c);
         x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
       }
       if (!isFinite(x0)) { x0 = y0 = -1; x1 = y1 = 1; }
@@ -4044,6 +4073,17 @@
       }
       drawWrap();
       grid(g, sceneBase);
+      // the heights the view from above will show (set with the slider at the right): guides only, nothing is cut
+      const bandS = topBand();
+      if (bandS) {
+        const { w: wS } = size();
+        for (const z of [bandS.lo, bandS.hi]) {
+          const yS = toScreen(0, z)[1];
+          g.append(sv('line', { x1: AX_L, y1: yS, x2: wS, y2: yS, stroke: '#12b886', 'stroke-width': 1, 'stroke-dasharray': '8 4', opacity: 0.8, 'pointer-events': 'none' }));
+        }
+        const [y0S, y1S] = [toScreen(0, bandS.lo)[1], toScreen(0, bandS.hi)[1]].sort((a, b) => a - b);
+        g.append(sv('rect', { x: AX_L, y: y0S, width: Math.max(0, wS - AX_L), height: y1S - y0S, fill: '#12b886', opacity: 0.04, 'pointer-events': 'none' }));
+      }
       // selected objects are drawn last (on top), so their points and edges can be picked over others
       const order = frontOrder(), ext = { y0: Infinity, y1: -Infinity, z0: Infinity, z1: -Infinity };
       lastPolys = { 1: {}, '-1': {} };
@@ -4342,7 +4382,7 @@
         return;
       }
       const { w, h } = size();
-      const key = [state.job, state.viewAngle, view && view.s, view && view.cy, view && view.cz, w, h, UNIT_SCALE, state.quality, state.scene ? state.scene.root.length : 0].join('|');
+      const key = [state.job, state.viewAngle, !!state.flip, view && view.s, view && view.cy, view && view.cz, w, h, UNIT_SCALE, state.quality, state.scene ? state.scene.root.length : 0].join('|');
       if (key === wrapKey) return;
       const busy = !!((drag && drag.moved) || zoomAnim);
       clearTimeout(wrapTimer);
@@ -4442,7 +4482,7 @@
         tag(xx, h - 17, 'Ø' + num(mm(2 * r), 3) + ' ' + UNIT_LABEL, anchor, !out);
       } });
       for (const z of [ext.z0, ext.z1]) {
-        const y = h / 2 - (z - view.cz) * view.s;
+        const y = toScreen(0, z)[1];
         if (y < 0 || y > h - AX_B) continue;
         g.append(sv('line', { x1: AX_L - 7, y1: y, x2: AX_L + 5, y2: y, stroke: '#000', 'stroke-width': 2 }));
         tag(AX_L - 6, y + 3, num(hDisp(z, base), 3) + ' ' + UNIT_LABEL, 'end');
@@ -4816,7 +4856,7 @@
           drag.moved = true;
           const [ox, oy] = toScreen(0, 0), sNow = Math.atan2(oy - sy, sx - ox) * 180 / Math.PI;
           drag.acc += ((sNow - drag.sl + 540) % 360) - 180; drag.sl = sNow;
-          let deg = drag.a0 - drag.acc;
+          let deg = drag.a0 - FZ() * drag.acc;
           if (e.ctrlKey || e.metaKey) deg = Math.round(deg / 15) * 15;
           setViewAngle(deg, false); drawSection();
         }
@@ -4909,7 +4949,7 @@
       }
       if (d.type === 'box') {
         if (d.moved) {
-          const [y0, z1] = toWorld(Math.min(d.sx, d.cx), Math.min(d.sy, d.cy)), [y1, z0] = toWorld(Math.max(d.sx, d.cx), Math.max(d.sy, d.cy));
+          const [y0, zP] = toWorld(Math.min(d.sx, d.cx), Math.min(d.sy, d.cy)), [y1, zQ] = toWorld(Math.max(d.sx, d.cx), Math.max(d.sy, d.cy)), z0 = Math.min(zP, zQ), z1 = Math.max(zP, zQ);
           if (!d.add) state.sel = new Set();
           const MSb = MS;
           for (const s of [1, -1]) {
@@ -5439,10 +5479,10 @@
         panels.objects.body.append(bare(treeBlock()));
         const nSel = state.selNodes.size;
         appendKids(panels.objects.tools,
-          hbtn('circle', 'Circular', () => addObject('circle', secView()), { title: 'Add a circular ring', color: COLORS.circle }),
-          hbtn('ngon', 'N-sided', () => addObject('ngon', secView()), { title: 'Add an n-sided ring', color: COLORS.ngon }),
-          hbtn('cog', 'Cog', () => addObject('cog', secView()), { title: 'Add a cog (spur gear with involute teeth)', color: COLORS.cog }),
-          hbtn('thread', 'Thread', () => addObject('thread', secView()), { title: 'Add a threaded ring, with standard sizes', color: COLORS.thread }),
+          hbtn('circle', 'Circular', () => addObject('circle', addView()), { title: 'Add a circular ring', color: COLORS.circle }),
+          hbtn('ngon', 'N-sided', () => addObject('ngon', addView()), { title: 'Add an n-sided ring', color: COLORS.ngon }),
+          hbtn('cog', 'Cog', () => addObject('cog', addView()), { title: 'Add a cog (spur gear with involute teeth)', color: COLORS.cog }),
+          hbtn('thread', 'Thread', () => addObject('thread', addView()), { title: 'Add a threaded ring, with standard sizes', color: COLORS.thread }),
           hbtn('cloner', 'Cloner', () => wrapSelection('cloner'), { title: nSel ? 'Put the selected objects in a radial cloner' : 'Add an empty radial cloner' }),
           hbtn('group', 'Group', () => wrapSelection('group'), { title: nSel ? 'Group the selected objects' : 'Add an empty group' }),
           hbtn('boolean', 'Boolean', () => wrapSelection('boolean'), { title: 'Add a boolean: with one object selected it becomes A; with two, A and B' }),
@@ -6448,7 +6488,7 @@
       compass1.addEventListener('dblclick', (e) => { e.stopPropagation(); setViewAngle(Math.round(state.viewAngle / 15) * 15); });
     }
     drawCompasses();
-    flipBox.addEventListener('change', () => { state.flip = flipBox.checked; saveSettings(); recalc(); });
+    flipBox.addEventListener('change', () => setFlip(flipBox.checked));
 
     const ro = new ResizeObserver(() => { if (root.isConnected) { if (state.scene && !view) fit(); drawSection(); draw3d(); } });
     ro.observe(left); ro.observe(view3d);
@@ -6467,7 +6507,8 @@
       busyTag.textContent = state.busy ? 'Updating…' : '';
     }
     function destroy() { ro.disconnect(); roSide.disconnect(); window.removeEventListener('keydown', onKey, true); window.removeEventListener('keyup', onKeyUp, true); root.remove(); }
-    return { root, render, destroy, showSplash };
+    const flipped = () => { if (view) view.cz = -view.cz; flipBox.checked = !!state.flip; drawSection(); };
+    return { root, render, destroy, showSplash, flipped };
   }
 
   // ---- Boot: the editor fills the page; the last scene comes back, otherwise the start screen ----
