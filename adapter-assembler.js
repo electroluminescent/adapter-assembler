@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.14.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.14.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.14.0';
+  const APP_VERSION = '3.14.1';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -2668,10 +2668,13 @@
       const arrow = el('span', { style: 'display:inline-block;width:12px;color:#495057;transition:transform .2s' }, '▾');
       const extra = el('span', { style: 'flex:0 1 auto;font-weight:400;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0' });
       const tools = el('div', { style: 'margin-left:auto;display:flex;align-items:center;gap:3px;flex:0 0 auto' });
-      const head = el('div', { style: 'flex:0 0 auto;display:flex;align-items:center;gap:5px;height:24px;box-sizing:border-box;padding:0 ' + (i ? 4 : 28) + 'px 0 6px;background:#f1f3f5;border-bottom:1px solid #dee2e6;font:700 12px sans-serif;color:#343a40;cursor:pointer;user-select:none', title: 'Fold / unfold' }, arrow, el('span', { style: 'flex:0 0 auto' }, title), extra, tools);
+      // only the arrow, the title and what follows it fold the section (up to the buttons), so a missed button does not
+      const fold = el('div', { 'data-fold': '1', style: 'flex:1 1 auto;min-width:0;align-self:stretch;display:flex;align-items:center;gap:5px;cursor:pointer', title: 'Fold / unfold' },
+        arrow, el('span', { style: 'flex:0 0 auto' }, title), extra);
+      const head = el('div', { style: 'flex:0 0 auto;display:flex;align-items:center;gap:5px;height:24px;box-sizing:border-box;padding:0 ' + (i ? 4 : 28) + 'px 0 6px;background:#f1f3f5;border-bottom:1px solid #dee2e6;font:700 12px sans-serif;color:#343a40;user-select:none' }, fold, tools);
       const body = el('div', { style: 'flex:1 1 auto;overflow:auto;padding:4px 6px;min-height:0' });
       const wrap = el('div', { style: 'display:flex;flex-direction:column;min-height:0;overflow:hidden;border-bottom:1px solid #dee2e6' }, head, body);
-      head.addEventListener('click', () => { sp[k].min = !sp[k].min; saveSettings(); applyPanels(true); });
+      fold.addEventListener('click', () => { sp[k].min = !sp[k].min; saveSettings(); applyPanels(true); });
       panels[k] = { wrap, head, body, arrow, extra, tools };
       if (i) {
         // between two views: drag to give one more height than the other
@@ -2708,7 +2711,8 @@
     // header labels hide (icons stay) when a header has no room for them
     function fitHead(h, keep) {
       h.classList.remove('aa-icononly');
-      const kids = [...h.children].filter(c => c.tagName !== 'STYLE');
+      // (the folding part fills the space up to the buttons: what it needs is what it holds)
+      const kids = [...h.children].filter(c => c.tagName !== 'STYLE').flatMap(c => c.dataset && c.dataset.fold ? [...c.children] : [c]);
       const need = kids.reduce((s, c) => s + (c === keep ? Math.min(c.scrollWidth, 70) : c.scrollWidth), 0) + 5 * kids.length;
       const cs = getComputedStyle(h), room = h.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
       if (need > room) h.classList.add('aa-icononly');
@@ -4978,7 +4982,7 @@
       // a titled group; clicking its title folds it (remembered across objects and visits)
       const sect = (title, ...kids) => {
         const folded = (state.collapsed || []).includes(title), body = el('div', { style: folded ? 'display:none' : '' }, ...kids.filter(k => k != null));
-        const head = el('div', { style: 'font:700 10px/1.4 sans-serif;letter-spacing:.05em;text-transform:uppercase;color:#868e96;cursor:pointer;user-select:none', title: folded ? 'Show' : 'Hide' },
+        const head = el('div', { style: 'display:inline-block;font:700 10px/1.4 sans-serif;letter-spacing:.05em;text-transform:uppercase;color:#868e96;cursor:pointer;user-select:none', title: folded ? 'Show' : 'Hide' },
           el('span', { style: 'display:inline-block;width:10px' }, folded ? '▸' : '▾'), title);
         head.addEventListener('click', () => {
           const set = new Set(state.collapsed || []);
