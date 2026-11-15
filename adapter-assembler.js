@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.9.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.9.2. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.9.1';
+  const APP_VERSION = '3.9.2';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -3141,12 +3141,12 @@
       label(g, hx + 10, hy - 8, ['section ' + num(state.viewAngle * ANG_SCALE, ANG_SCALE === 1 ? 1 : 4) + ANG_LABEL]);
       // handles: drag them to edit from above
       for (const hd of topHandles()) {
-        const [x, y] = toScreen(hd.x, hd.y), on = drag && drag.h && drag.h.key === hd.key;
+        const [x, y] = toScreen(hd.x, hd.y), on = (drag && drag.h && drag.h.key === hd.key) || (hd.pkey && state.sel.has(hd.pkey));
         const shape = hd.shape === 'diamond' ? sv('path', { d: 'M' + x.toFixed(1) + ' ' + (y - 6).toFixed(1) + 'l6 6l-6 6l-6-6z' })
           : sv('circle', { cx: x.toFixed(1), cy: y.toFixed(1), r: hd.shape === 'ring' ? 5 : 4.5 });
         shape.setAttribute('fill', on ? '#e03131' : hd.shape === 'ring' ? '#fff' : hd.col);
-        shape.setAttribute('stroke', hd.shape === 'ring' ? hd.col : '#fff'); shape.setAttribute('stroke-width', hd.shape === 'ring' ? 2.2 : 1.4);
-        shape.setAttribute('style', 'cursor:' + (hd.kind === 'rot' || hd.kind === 'clone' ? 'move' : 'ew-resize'));
+        shape.setAttribute('stroke', hd.shape === 'ring' ? hd.col : hd.bevel ? '#fab005' : '#fff'); shape.setAttribute('stroke-width', hd.shape === 'ring' || hd.bevel ? 2.2 : 1.4);
+        shape.setAttribute('style', 'cursor:' + (hd.kind === 'radius' || hd.kind === 'cog' || hd.kind === 'thr' ? 'ew-resize' : 'move'));
         shape.__topH = hd;
         const tip = sv('title'); tip.textContent = hd.tip; shape.append(tip);
         svg.append(shape);
@@ -3156,77 +3156,169 @@
         label(svg, lx, drag.labelAt[1] - 14, [drag.label], { border: '#ffc078', bg: 'rgba(255,249,219,.95)' });
       }
     }
-    // Handles from above, along the section's direction: each radius of an object's outline (its points at that radius
-    // move together, in or out), a cog's teeth (tip, pitch circle, root) and its turn, an n-sided object's turn, and
-    // where a radial cloner's first copy sits.
+    // Where an object sits from above: its first copy in the radial cloners around it, as a turn a and a centre C
+    // (world = rot(a)·own + C). side: the innermost cloner lays it on its side, so from above its outline is seen
+    // edge on, as (height along the copies' radius, ± radius across).
+    function topPlace(sc, id) {
+      let a = 0, C = [0, 0], side = false, first = true;
+      for (let cur = id, guard = 0; guard < 64; guard++) {
+        const p = findParent(sc, cur);
+        if (!p || p.parent === null) break;
+        const c = sc.nodes[p.parent]; cur = p.parent;
+        if (c.type !== 'cloner') continue;
+        const q = c.params, as = (q.angle || 0) * Math.PI / 180, R = q.radius || 0, x = C[0] + R, y = C[1];
+        if (q.orient === 'radial' && first) side = true;
+        first = false;
+        C = [x * Math.cos(as) - y * Math.sin(as), x * Math.sin(as) + y * Math.cos(as)]; a += as;
+      }
+      const ca = Math.cos(a), sa = Math.sin(a);
+      return { a, C, side, w: (x, y) => [x * ca - y * sa + C[0], x * sa + y * ca + C[1]], inv: (dx, dy) => [dx * ca + dy * sa, -dx * sa + dy * ca] };
+    }
+    // Handles from above:
+    //  · an object lying on its side (in a radial cloner): every point of its outline, as in the cross-section (drag,
+    //    select, right-click for bevels);
+    //  · otherwise each radius of its outline (those points move in or out together) on the section's direction, and
+    //    for the selected object a quarter turn apart all round; an n-sided object's corners (drag: size and turn);
+    //  · a cog's teeth (tip, pitch circle, root) and a ring to turn it;
+    //  · a radial cloner's first copy (distance from the axis and angle).
     function topHandles() {
-      const sc = state.scene, out = [], th = state.viewAngle * Math.PI / 180, c = Math.cos(th), s = Math.sin(th), pad = 9 / view.s;
+      const sc = state.scene, out = [], th = state.viewAngle * Math.PI / 180, pad = 9 / view.s;
       for (const it of lastTop) {
-        const n = sc.nodes[it.id], col = COLORS[n.type] || '#1f6feb', name = n.name || n.id;
-        if (!xfOf(sc, it.id).id) continue;
-        const cog = n.type === 'cog', q = n.params || {};
-        const k = n.type === 'ngon' ? ngonScaleAt(q, th) : 1;
-        // a cog keeps only its round edge (bore or rim) as plain points; its toothed edge has the tooth handles
-        let only = null;
-        if (cog) { const o = outlineOf(n.pts, []); only = cogFix(q, o); }
-        const groups = new Map();
+        const n = sc.nodes[it.id], col = COLORS[n.type] || '#1f6feb', name = n.name || n.id, P = topPlace(sc, it.id), q = n.params || {};
+        if (P.side) {
+          n.pts.forEach((p, i) => {
+            if (inRunIndex(n, i)) return;
+            const key = it.id + '|p|' + i, bev = !!(p.bevel && (p.bevel.r > 0 || p.bevel.trim > 0));
+            for (const m of [1, -1]) {
+              const [x, y] = P.w(p.z, m * p.y);
+              out.push({ key: key + '|' + m, pkey: key, id: it.id, kind: 'pt', m, P, x, y, col, shape: 'dot', bevel: bev,
+                tip: name + ': r ' + num(mm(p.y), 3) + ', y ' + num(mm(p.z), 3) + ' ' + UNIT_LABEL + (bev ? ' (bevelled)' : '') + ' — right-click for bevels' });
+            }
+          });
+          continue;
+        }
+        const sel = !!selectedAncestorOf(it.id), dirs = sel ? [0, 1, 2, 3].map(k => th + k * Math.PI / 2) : [th];
+        const at = (r, phi) => P.w(r * Math.cos(phi - P.a), r * Math.sin(phi - P.a));    // phi: world direction from the object's centre
+        const cog = n.type === 'cog', ngon = n.type === 'ngon';
+        if (ngon) {
+          // corners of the outer and inner outline: drag to size and turn it
+          const o = outlineOf(n.pts, []), k = Math.max(3, q.sides | 0), sv0 = q.about === 'faces' ? 1 / Math.cos(Math.PI / k) : 1;
+          const rs = [...new Set(o.map(p => +p.y.toFixed(9)))].filter(r => r > 1e-9), shown = k <= 24 ? k : 1;
+          for (const r of rs) for (let j = 0; j < shown; j++) {
+            const loc = (q.rotation || 0) * Math.PI / 180 + 2 * Math.PI * j / k, [x, y] = P.w(r * sv0 * Math.cos(loc), r * sv0 * Math.sin(loc));
+            const keys = n.pts.map((p, i) => Math.abs(p.y - r) < 1e-9 ? it.id + '|p|' + i : null).filter(Boolean);
+            out.push({ key: it.id + '|v|' + r + '|' + j, id: it.id, kind: 'vtx', j, k, sv: sv0, r0: r, keys, P, x, y, col, shape: 'dot',
+              tip: name + ': corner — drag out or in to size it, round to turn it' });
+          }
+          continue;
+        }
+        // radii (a cog keeps only its round edge here; its toothed edge has the tooth handles)
+        const only = cog ? cogFix(q, outlineOf(n.pts, [])) : null, groups = new Map();
         n.pts.forEach((p, i) => {
-          if (inRunIndex(n, i)) return;
-          if (only != null && Math.abs(p.y - only) > 1e-9) return;
+          if (inRunIndex(n, i) || (only != null && Math.abs(p.y - only) > 1e-9)) return;
           const g = Math.round(p.y * 1e6);
           if (!groups.has(g)) groups.set(g, { r: p.y, keys: [] });
           groups.get(g).keys.push(it.id + '|p|' + i);
         });
-        for (const [g, gr] of groups) {
-          const r = gr.r * k;
-          out.push({ key: it.id + '|g|' + g, id: it.id, kind: 'radius', keys: gr.keys, r0: gr.r, k, x: r * c, y: r * s, col, shape: 'dot',
+        // a thread's crest and root: drag to change its diameter
+        for (const [ri, r] of (n.runs || []).entries()) for (const [what, rr] of [['crest', Math.max(r.rFirst, r.rOther)], ['root', Math.min(r.rFirst, r.rOther)]])
+          for (const phi of dirs) { const [x, y] = at(rr, phi); out.push({ key: it.id + '|t|' + ri + '|' + what + '|' + phi, id: it.id, kind: 'thr', ri, r0: rr, phi, P, x, y, col: '#d9480f', shape: 'dot', tip: name + ': thread ' + what + ' — drag in or out to change the diameter' }); }
+        for (const [g, gr] of groups) for (const phi of dirs) {
+          const [x, y] = at(gr.r, phi);
+          out.push({ key: it.id + '|g|' + g + '|' + phi, id: it.id, kind: 'radius', keys: gr.keys, r0: gr.r, phi, P, x, y, col, shape: 'dot',
             tip: name + ': radius ' + num(mm(gr.r), 3) + ' ' + UNIT_LABEL + ' (' + gr.keys.length + ' point' + (gr.keys.length > 1 ? 's' : '') + ') — drag in or out' });
         }
         if (cog) {
-          for (const ch of cogHandles(n)) out.push({ key: it.id + '|c|' + ch.what, id: it.id, kind: 'cog', what: ch.what, x: ch.r * c, y: ch.r * s, col: ch.col, shape: 'diamond', tip: name + ': ' + ch.tip });
-          const sh = cogShapeOf(q), a = (q.rotation || 0) * Math.PI / 180, R = Math.max(sh.ra, sh.rf) + pad;
-          out.push({ key: it.id + '|rot', id: it.id, kind: 'rot', x: R * Math.cos(a), y: R * Math.sin(a), col, shape: 'ring', tip: name + ': turn the teeth (rotation ' + num((q.rotation || 0) * ANG_SCALE, 3) + ANG_LABEL + ')' });
-        }
-        if (n.type === 'ngon') {
-          const o = outlineOf(n.pts, []), r1 = Math.max(...o.map(p => p.y)), sc2 = q.about === 'faces' ? 1 / Math.cos(Math.PI / Math.max(3, q.sides | 0)) : 1;
-          const a = (q.rotation || 0) * Math.PI / 180, R = r1 * sc2 + pad;
-          out.push({ key: it.id + '|rot', id: it.id, kind: 'rot', x: R * Math.cos(a), y: R * Math.sin(a), col, shape: 'ring', tip: name + ': turn it (rotation ' + num((q.rotation || 0) * ANG_SCALE, 3) + ANG_LABEL + ')' });
+          for (const ch of cogHandles(n)) for (const phi of dirs) { const [x, y] = at(ch.r, phi); out.push({ key: it.id + '|c|' + ch.what + '|' + phi, id: it.id, kind: 'cog', what: ch.what, phi, P, x, y, col: ch.col, shape: 'diamond', tip: name + ': ' + ch.tip }); }
+          const sh = cogShapeOf(q), loc = (q.rotation || 0) * Math.PI / 180, R = Math.max(sh.ra, sh.rf) + pad, [x, y] = P.w(R * Math.cos(loc), R * Math.sin(loc));
+          out.push({ key: it.id + '|rot', id: it.id, kind: 'rot', P, x, y, col, shape: 'ring', tip: name + ': turn the teeth (rotation ' + num((q.rotation || 0) * ANG_SCALE, 3) + ANG_LABEL + ')' });
         }
       }
       for (const n of Object.values(sc.nodes)) {
-        if (n.type !== 'cloner' || !findParent(sc, n.id) || !xfOf(sc, n.id).id) continue;
-        const q = n.params, a = (q.angle || 0) * Math.PI / 180, R = q.radius || 0;
-        out.push({ key: n.id + '|clone', id: n.id, kind: 'clone', x: R * Math.cos(a), y: R * Math.sin(a), col: '#d9480f', shape: 'diamond',
+        if (n.type !== 'cloner' || !findParent(sc, n.id)) continue;
+        const P = topPlace(sc, n.id), q = n.params, a = (q.angle || 0) * Math.PI / 180, R = q.radius || 0, [x, y] = P.w(R * Math.cos(a), R * Math.sin(a));
+        out.push({ key: n.id + '|clone', id: n.id, kind: 'clone', P, x, y, col: '#d9480f', shape: 'diamond',
           tip: (n.name || n.id) + ': the first copy — drag to set the copies\' distance from the axis and their angle' });
       }
       return out;
     }
+    // what a handle from above works on, drawn over the view while the pointer is on it: the ring of that radius, the
+    // n-sided outline through that corner, the edges at that point, or a radial cloner's copies
+    function topHandleLinks(h) {
+      const sc = state.scene, n = sc.nodes[h.id], out = [];
+      if (!n) return out;
+      const col = h.kind === 'clone' ? '#d9480f' : h.col || COLORS[n.type] || '#1f6feb', P = h.P;
+      const line = (pts, closed, o = {}) => out.push(sv('path', { d: pts.length ? 'M' + pts.map(v => toScreen(v[0], v[1]).map(c => c.toFixed(1)).join(' ')).join('L') + (closed ? 'Z' : '') : '',
+        fill: 'none', stroke: col, 'stroke-width': o.w || 3.5, 'stroke-opacity': o.op || 0.55, 'stroke-linejoin': 'round', 'stroke-linecap': 'round', 'stroke-dasharray': o.dash || 'none' }));
+      const ring = (r) => { const a = []; for (let i = 0; i < 120; i++) { const t = 2 * Math.PI * i / 120; a.push(P.w(r * Math.cos(t), r * Math.sin(t))); } return a; };
+      if (h.kind === 'radius' || h.kind === 'thr') line(ring(h.r0), true);
+      else if (h.kind === 'cog') {
+        // the teeth's tips, pitch circle or roots
+        const q = n.params, r = h.what === 'tip' ? cogTip(q) : h.what === 'root' ? cogRoot(q) : q.module * q.teeth / 2;
+        line(ring(r), true, h.what === 'pitch' ? { dash: '6 4' } : {});
+      } else if (h.kind === 'vtx') {
+        const q = n.params, a0 = (q.rotation || 0) * Math.PI / 180, pts = [];
+        for (let j = 0; j < h.k; j++) { const t = a0 + 2 * Math.PI * j / h.k; pts.push(P.w(h.r0 * h.sv * Math.cos(t), h.r0 * h.sv * Math.sin(t))); }
+        line(pts, true);
+      } else if (h.kind === 'pt') {
+        const i = +h.pkey.split('|')[2], np = n.pts.length, at = (j) => { const p = n.pts[(j + np) % np]; return P.w(p.z, h.m * p.y); };
+        line([at(i - 1), at(i), at(i + 1)], false);
+      } else if (h.kind === 'rot') {
+        const sh = cogShapeOf(n.params), o = outlineOf(n.pts, []), fix = cogFix(n.params, o), rr = cogIn(n.params) ? Math.min(...o.map(p => p.y)) : Math.max(...o.map(p => p.y));
+        line(Array.from(sh.ang, (a, j) => { const r = cogWarp(rr, sh.rad[j], fix, sh.tip); return P.w(r * Math.cos(a), r * Math.sin(a)); }), true);
+      } else if (h.kind === 'clone') {
+        for (const id of leavesUnder(sc, [h.id])) { const lp = lastPolys[1][id]; if (lp) out.push(sv('path', { d: lp.d, fill: col + '14', 'fill-rule': 'evenodd', stroke: col, 'stroke-width': 4, 'stroke-opacity': 0.4 })); }
+      }
+      return out;
+    }
     // drag a handle from above to (X, Y)
-    function dragTopHandle(X, Y, snap) {
-      const h = drag.h, th = state.viewAngle * Math.PI / 180, along = X * Math.cos(th) + Y * Math.sin(th);
-      const st = gridStep() / 2, rs = (v) => snap ? Math.round(v / st) * st : v;
+    function dragTopHandle(X, Y, snap, lock) {
+      const h = drag.h, st = gridStep() / 2, rs = (v) => snap ? Math.round(v / st) * st : v;
+      const P = h.P, rel = P.inv(X - P.C[0], Y - P.C[1]);          // the pointer in the object's own frame
+      const along = (phi) => { const u = phi - P.a; return rel[0] * Math.cos(u) + rel[1] * Math.sin(u); };
       state.scene = clone(drag.snap);
       const n = state.scene.nodes[h.id];
       if (!n) return;
-      if (h.kind === 'radius') {
-        const r = Math.max(0, rs(along) / h.k);
+      if (h.kind === 'pt') {
+        // a point of an object on its side: the move in its own frame (height along, radius across)
+        const d0 = P.inv(X - drag.from[0], Y - drag.from[1]);
+        let dz = d0[0], dy = h.m * d0[1];
+        if (lock) { if (Math.abs(dz) > Math.abs(dy)) dy = 0; else dz = 0; }
+        if (snap) { const p0 = drag.snap.nodes[h.id].pts[+h.pkey.split('|')[2]]; dz = rs(p0.z + dz) - p0.z; dy = rs(p0.y + dy) - p0.y; }
+        const keys = state.sel.has(h.pkey) ? [...state.sel].filter(k => parseKey(k).kind === 'p') : [h.pkey];
+        moveKeys(state.scene, keys, dy, dz);
+        const p = n.pts[+h.pkey.split('|')[2]];
+        drag.label = 'r ' + num(mm(p.y), 3) + ' · y ' + num(mm(p.z), 3) + ' ' + UNIT_LABEL;
+      } else if (h.kind === 'radius') {
+        const r = Math.max(0, rs(along(h.phi)));
         moveKeys(state.scene, h.keys, r - h.r0, 0);
         drag.label = 'radius ' + num(mm(r), 3) + ' / Ø ' + num(mm(2 * r), 3) + ' ' + UNIT_LABEL;
+      } else if (h.kind === 'thr') {
+        // the whole thread in or out (its diameter), as dragging the object in the cross-section
+        const r = Math.max(0, rs(along(h.phi)));
+        moveNode(n, r - h.r0, 0);
+        drag.label = 'thread ' + (n.params && n.params.d ? 'Ø ' + num(mm(n.params.d), 3) : 'r ' + num(mm(r), 3)) + ' ' + UNIT_LABEL;
+      } else if (h.kind === 'vtx') {
+        const q = n.params, r = Math.max(0, rs(Math.hypot(rel[0], rel[1]) / h.sv));
+        let rot = Math.atan2(rel[1], rel[0]) * 180 / Math.PI - 360 * h.j / h.k;
+        if (snap) rot = Math.round(rot / 5) * 5;
+        if (!lock || Math.abs(r - h.r0) * view.s < 4) q.rotation = ((rot % 360) + 540) % 360 - 180;
+        if (!lock || Math.abs(r - h.r0) * view.s >= 4) moveKeys(state.scene, h.keys, r - h.r0, 0);
+        drag.label = 'radius ' + num(mm(r), 3) + ' ' + UNIT_LABEL + ' · rotation ' + num(q.rotation * ANG_SCALE, ANG_SCALE === 1 ? 1 : 4) + ANG_LABEL;
       } else if (h.kind === 'cog') {
         drag.id = h.id; drag.what = h.what;
-        dragCog(Math.max(0, along), snap);
+        dragCog(Math.max(0, along(h.phi)), snap);
       } else if (h.kind === 'rot') {
-        const q = n.params, a = Math.atan2(Y, X) * 180 / Math.PI, a0 = Math.atan2(drag.from[1], drag.from[0]) * 180 / Math.PI;
+        const q = n.params, a = Math.atan2(rel[1], rel[0]) * 180 / Math.PI, f = P.inv(drag.from[0] - P.C[0], drag.from[1] - P.C[1]), a0 = Math.atan2(f[1], f[0]) * 180 / Math.PI;
         let rot = drag.snapRot + (a - a0);
         if (snap) rot = Math.round(rot / 5) * 5;
-        rot = ((rot % 360) + 540) % 360 - 180;
-        q.rotation = rot;
-        drag.label = 'rotation ' + num(rot * ANG_SCALE, ANG_SCALE === 1 ? 1 : 4) + ANG_LABEL;
+        q.rotation = ((rot % 360) + 540) % 360 - 180;
+        drag.label = 'rotation ' + num(q.rotation * ANG_SCALE, ANG_SCALE === 1 ? 1 : 4) + ANG_LABEL;
       } else if (h.kind === 'clone') {
         const q = n.params;
-        let a = Math.atan2(Y, X) * 180 / Math.PI;
+        let a = Math.atan2(rel[1], rel[0]) * 180 / Math.PI;
         if (snap) a = Math.round(a / 5) * 5;
-        q.radius = Math.max(0, rs(Math.hypot(X, Y))); q.angle = ((a % 360) + 360) % 360;
+        q.radius = Math.max(0, rs(Math.hypot(rel[0], rel[1]))); q.angle = ((a % 360) + 360) % 360;
         drag.label = 'distance ' + num(mm(q.radius), 3) + ' ' + UNIT_LABEL + ' · angle ' + num(q.angle * ANG_SCALE, ANG_SCALE === 1 ? 1 : 4) + ANG_LABEL;
       }
     }
@@ -3469,7 +3561,7 @@
     }
     // the object under the pointer (a soft halo round its section, both sides) and the edge under it, drawn over
     // the section on their own so moving the pointer does not redraw everything
-    let lastPolys = { 1: {}, '-1': {} }, treeAnchor = null, lastRowClick = { id: null, t: 0 };
+    let hoverTopH = null, lastPolys = { 1: {}, '-1': {} }, treeAnchor = null, lastRowClick = { id: null, t: 0 };
     function renameRow(id) {
       const n = state.scene && state.scene.nodes[id], row = side.querySelector('[data-node="' + id + '"]');
       if (!n || !row) return;
@@ -3505,6 +3597,7 @@
         }
       }
       MS = MSh;
+      if (topMode() && hoverTopH) g.append(...topHandleLinks(hoverTopH));
       // under the handles, so they stay on top and easy to grab
       const firstHandle = [...svg.children].find(c => c.tagName === 'circle');
       if (firstHandle) svg.insertBefore(g, firstHandle); else svg.append(g);
@@ -3913,6 +4006,11 @@
         // from above: click an object to select it, drag the section line to turn the section; middle/right-drag pans
         const [sx, sy] = local(e); MS = 1;
         const [X, Y] = toWorld(sx, sy), add = e.shiftKey || e.ctrlKey || e.metaKey, hit = topNodeAt(X, Y);
+        const th0 = e.target.__topH;
+        if (e.button === 2 && th0 && th0.pkey) {
+          if (!state.sel.has(th0.pkey)) { state.sel = new Set([th0.pkey]); state.selNodes = new Set([th0.id]); }
+          drawSection(); showPointMenu(e.clientX, e.clientY); return;
+        }
         if (e.button === 2 && hit) {
           if (!selectedAncestorOf(hit)) { state.selNodes = new Set([hit]); state.sel = new Set(); renderAll(); }
           showObjectMenu(e.clientX, e.clientY); return;
@@ -3922,7 +4020,12 @@
         if (e.target.__topH) {
           const h = e.target.__topH, n = state.scene.nodes[h.id];
           drag = { type: 'toph', h, from: [X, Y], snap: clone(state.scene), moved: false, snapRot: n && n.params ? n.params.rotation || 0 : 0 };
-          if (!add) { state.selNodes = new Set([h.id]); state.sel = new Set(); }
+          if (h.pkey) {
+            // a point: select it (Shift/Ctrl adds); dragging a selected point moves all the selected points
+            if (add) { if (state.sel.has(h.pkey)) state.sel.delete(h.pkey); else state.sel.add(h.pkey); }
+            else if (!state.sel.has(h.pkey)) state.sel = new Set([h.pkey]);
+            state.selNodes = new Set([h.id]);
+          } else if (!add) { state.selNodes = new Set([h.id]); state.sel = new Set(); }
           drawSection(); return;
         }
         if (e.target.__secLine) { drag = { type: 'angle' }; svg.style.cursor = 'grabbing'; return; }
@@ -4005,8 +4108,8 @@
         const [X, Y] = toWorld(sx, sy), r = Math.hypot(X, Y), a = ((Math.atan2(Y, X) * 180 / Math.PI) + 360) % 360;
         coord.textContent = 'x ' + fmt(X, 3) + ' · y ' + fmt(Y, 3) + ' · r ' + fmt(r, 3) + ' ' + UNIT_LABEL + ' · ' + num(a * ANG_SCALE, ANG_SCALE === 1 ? 1 : 4) + ANG_LABEL;
         if (!drag) {
-          const hn = topNodeAt(X, Y);
-          if (hn !== hoverNode || hoverEdge) { hoverNode = hn; hoverEdge = null; drawHover(); }
+          const th = e.target.__topH || null, hn = th ? th.id : topNodeAt(X, Y);
+          if (hn !== hoverNode || hoverEdge || th !== hoverTopH) { hoverNode = hn; hoverEdge = null; hoverTopH = th; drawHover(); }
           svg.style.cursor = e.target.__secLine ? 'grab' : hn ? 'pointer' : '';
           return;
         }
@@ -4014,7 +4117,7 @@
         if (drag.type === 'toph') {
           if (!drag.moved && Math.hypot(X - drag.from[0], Y - drag.from[1]) * view.s < 3) return;
           if (!drag.moved) { pushSnap(drag.snap); drag.moved = true; }
-          dragTopHandle(X, Y, e.ctrlKey || e.metaKey);
+          dragTopHandle(X, Y, e.ctrlKey || e.metaKey, e.shiftKey);
           drag.labelAt = [sx, sy];
           markEdited(); drawSection(); recalc({ fast: true });
           return;
@@ -4101,7 +4204,7 @@
       const d = drag; drag = null;
       if (d.type === 'pan') return;
       if (d.type === 'angle') { svg.style.cursor = ''; drawSection(); return; }
-      if (d.type === 'toph') { if (d.moved) recalc(); else renderAll(); return; }
+      if (d.type === 'toph') { if (d.moved) recalc(); else renderAll(); return; }   // (points stay selected, for the right-click menu)
       if (d.type === 'topclick') {
         if (d.hit) {
           state.sel = d.add ? state.sel : new Set();
@@ -4140,7 +4243,7 @@
     };
     svg.addEventListener('pointerup', endDrag);
     svg.addEventListener('pointercancel', endDrag);
-    svg.addEventListener('pointerleave', () => { cursorW = null; if ((hoverEdge || hoverNode) && !drag) { hoverEdge = null; hoverNode = null; drawHover(); } drawCursor(); });
+    svg.addEventListener('pointerleave', () => { cursorW = null; if (hoverTopH) { hoverTopH = null; drawHover(); } if ((hoverEdge || hoverNode) && !drag) { hoverEdge = null; hoverNode = null; drawHover(); } drawCursor(); });
     svg.addEventListener('wheel', (e) => {
       e.preventDefault();
       if (!view) return;
