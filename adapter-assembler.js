@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.11.3. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.11.4. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.11.3';
+  const APP_VERSION = '3.11.4';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -3315,6 +3315,12 @@
         const tip = sv('title'); tip.textContent = hd.tip; shape.append(tip);
         svg.append(shape);
       }
+      if (drag && drag.snapShow) {
+        const S = drag.snapShow, P2 = (v) => toScreen(v[0], v[1]);
+        if (S.circle) { const [cx, cy] = P2(S.circle.C); svg.append(sv('circle', { cx, cy, r: S.circle.r * view.s, fill: 'none', stroke: 'rgba(240,140,0,.75)', 'stroke-width': 1.2, 'stroke-dasharray': '5 4', 'pointer-events': 'none' })); }
+        for (const [a, b] of S.lines || []) { const [x1, y1] = P2(a), [x2, y2] = P2(b); svg.append(sv('line', { x1, y1, x2, y2, stroke: 'rgba(240,140,0,.7)', 'stroke-width': 1, 'stroke-dasharray': '5 4', 'pointer-events': 'none' })); }
+        if (S.mark) { const [x, y] = P2(S.mark); svg.append(sv('rect', { x: x - 6, y: y - 6, width: 12, height: 12, fill: 'none', stroke: '#f08c00', 'stroke-width': 1.5, 'pointer-events': 'none' })); }
+      }
       if (drag && drag.label && drag.labelAt) {
         const wpx = drag.label.length * 5.6 + 8, lx = drag.labelAt[0] + 12 + wpx > size().w ? drag.labelAt[0] - wpx - 12 : drag.labelAt[0] + 12;
         label(svg, lx, drag.labelAt[1] - 14, [drag.label], { border: '#ffc078', bg: 'rgba(255,249,219,.95)' });
@@ -3444,35 +3450,115 @@
       }
       return out;
     }
+    // ---- Ctrl-snapping from above: to the other objects' points (corners, handles, edge middles, the axis), to their
+    //      circles (the same radius round the same centre, touching them, or where the handle's line crosses them),
+    //      and to lines level or upright with a point; the grid when nothing is near. ----
+    function topSnapTargets(h) {
+      const sc = state.scene, pts = [{ p: [0, 0] }], circles = [], moving = new Set();
+      if (h.pkey) { if (state.sel.has(h.pkey)) for (const k of state.sel) moving.add(k); else moving.add(h.pkey); }
+      const own = (hd) => hd.id === h.id && (h.kind !== 'pt' || hd.kind !== 'pt' || moving.has(hd.pkey));
+      for (const hd of topHandles()) {
+        if (own(hd) || hd.kind === 'rot' || hd.kind === 'fillet') continue;
+        pts.push({ p: [hd.x, hd.y] });
+        const r = hd.kind === 'radius' || hd.kind === 'thr' ? hd.r0 : hd.kind === 'cog' ? Math.hypot(hd.x - hd.P.C[0], hd.y - hd.P.C[1]) : null;
+        if (r != null && r > 1e-9 && !circles.some(c => Math.abs(c.r - r) < 1e-9 && Math.hypot(c.C[0] - hd.P.C[0], c.C[1] - hd.P.C[1]) < 1e-9)) circles.push({ C: hd.P.C, r });
+        if (hd.kind === 'clone') pts.push({ p: [hd.x, hd.y] });
+      }
+      // middles of the edges of objects on their side
+      for (const it of lastTop) {
+        const n = sc.nodes[it.id], P = topPlace(sc, it.id);
+        if (!P.side) continue;
+        const np = n.pts.length;
+        for (let i = 0; i < np; i++) {
+          const a = n.pts[i], b = n.pts[(i + 1) % np];
+          if (moving.has(it.id + '|p|' + i) || moving.has(it.id + '|p|' + ((i + 1) % np))) continue;
+          for (const m of [1, -1]) pts.push({ p: P.w((a.z + b.z) / 2, m * (a.y + b.y) / 2), mid: true });
+        }
+      }
+      return { pts, circles };
+    }
+    const snapThr = () => 10 / view.s;
+    // a length along a ray from C (direction u) near r: the best snap, or null
+    function snapRadius(C, u, r, T) {
+      const thr = snapThr();
+      let best = null;
+      const offer = (v, g) => { if (v > 0 && Math.abs(v - r) < thr && (!best || Math.abs(v - r) < Math.abs(best.r - r))) best = { r: v, ...g }; };
+      for (const c of T.circles) {
+        const dx = c.C[0] - C[0], dy = c.C[1] - C[1], d = Math.hypot(dx, dy);
+        if (d < 1e-9) { offer(c.r, { circle: c }); continue; }
+        for (const v of [d - c.r, d + c.r, c.r - d]) offer(v, { circle: c });          // touching it
+        const b = dx * u[0] + dy * u[1], disc = b * b - (d * d - c.r * c.r);         // where the ray crosses it
+        if (disc >= 0) for (const v of [b - Math.sqrt(disc), b + Math.sqrt(disc)]) offer(v, { circle: c, mark: [C[0] + u[0] * v, C[1] + u[1] * v] });
+      }
+      for (const t of T.pts) {
+        const dx = t.p[0] - C[0], dy = t.p[1] - C[1], al = dx * u[0] + dy * u[1];
+        offer(Math.hypot(dx, dy), { through: t.p });                                   // a circle through the point
+        if (Math.abs(-dx * u[1] + dy * u[0]) < thr) offer(al, { mark: t.p });          // the point on the ray
+      }
+      return best;
+    }
+    // a point near p: the best snap { p, mark, lines }, or null
+    function snapPoint2(p, T) {
+      const thr = snapThr();
+      let best = null;
+      for (const t of T.pts) { const d = Math.hypot(t.p[0] - p[0], t.p[1] - p[1]); if (d < thr && (!best || d < best.d)) best = { d, p: t.p }; }
+      if (best) return { p: best.p, mark: best.p, lines: [] };
+      // level or upright with a point (on screen)
+      const th = state.viewAngle * Math.PI / 180, c = Math.cos(th), s = Math.sin(th);
+      const F = (v) => [v[0] * c + v[1] * s, -v[0] * s + v[1] * c], Wd = (f) => [f[0] * c - f[1] * s, f[0] * s + f[1] * c];
+      const fp = F(p);
+      let bx = null, by = null;
+      for (const t of T.pts) {
+        const ft = F(t.p);
+        if (Math.abs(ft[0] - fp[0]) < thr && (!bx || Math.abs(ft[0] - fp[0]) < Math.abs(bx[0] - fp[0]))) bx = ft;
+        if (Math.abs(ft[1] - fp[1]) < thr && (!by || Math.abs(ft[1] - fp[1]) < Math.abs(by[1] - fp[1]))) by = ft;
+      }
+      if (!bx && !by) return null;
+      const out = [bx ? bx[0] : fp[0], by ? by[1] : fp[1]], lines = [];
+      if (bx) lines.push([Wd(bx), Wd(out)]);
+      if (by) lines.push([Wd(by), Wd(out)]);
+      return { p: Wd(out), lines };
+    }
     // drag a handle from above to (X, Y)
     function dragTopHandle(X, Y, snap, lock) {
       const h = drag.h, st = gridStep() / 2, rs = (v) => snap ? Math.round(v / st) * st : v;
       const P = h.P, rel = P.inv(X - P.C[0], Y - P.C[1]);          // the pointer in the object's own frame
       const along = (phi) => { const u = phi - P.a; return rel[0] * Math.cos(u) + rel[1] * Math.sin(u); };
+      drag.snapShow = null;
+      // a radius along the handle's line: snapped to the others, or to the grid
+      const radial = (r, phi) => {
+        if (!snap) return Math.max(0, r);
+        const u = [Math.cos(phi), Math.sin(phi)], s = snapRadius(P.C, u, r, drag.targets);
+        if (s) { drag.snapShow = { circle: s.circle || (s.through ? { C: P.C, r: s.r } : null), mark: s.mark || s.through || [P.C[0] + u[0] * s.r, P.C[1] + u[1] * s.r], C: P.C, r: s.r }; return s.r; }
+        return Math.max(0, rs(r));
+      };
       state.scene = clone(drag.snap);
       const n = state.scene.nodes[h.id];
       if (!n) return;
       if (h.kind === 'pt') {
         // a point of an object on its side: the move in its own frame (height along, radius across)
-        const d0 = P.inv(X - drag.from[0], Y - drag.from[1]);
+        const p0 = drag.snap.nodes[h.id].pts[+h.pkey.split('|')[2]], W0 = P.w(p0.z, h.m * p0.y);
+        let Wt = [W0[0] + X - drag.from[0], W0[1] + Y - drag.from[1]], gridded = false;
+        if (snap && !lock) { const s = snapPoint2(Wt, drag.targets); if (s) { Wt = s.p; drag.snapShow = { mark: s.mark, lines: s.lines }; } else gridded = true; }
+        const d0 = P.inv(Wt[0] - W0[0], Wt[1] - W0[1]);
         let dz = d0[0], dy = h.m * d0[1];
         if (lock) { if (Math.abs(dz) > Math.abs(dy)) dy = 0; else dz = 0; }
-        if (snap) { const p0 = drag.snap.nodes[h.id].pts[+h.pkey.split('|')[2]]; dz = rs(p0.z + dz) - p0.z; dy = rs(p0.y + dy) - p0.y; }
+        if ((snap && lock) || gridded) { dz = rs(p0.z + dz) - p0.z; dy = rs(p0.y + dy) - p0.y; }
         const keys = state.sel.has(h.pkey) ? [...state.sel].filter(k => parseKey(k).kind === 'p') : [h.pkey];
         moveKeys(state.scene, keys, dy, dz);
         const p = n.pts[+h.pkey.split('|')[2]];
         drag.label = 'r ' + num(mm(p.y), 3) + ' · y ' + num(mm(p.z), 3) + ' ' + UNIT_LABEL;
       } else if (h.kind === 'radius') {
-        const r = Math.max(0, rs(along(h.phi)));
+        const r = radial(along(h.phi), h.phi);
         moveKeys(state.scene, h.keys, r - h.r0, 0);
         drag.label = 'radius ' + num(mm(r), 3) + ' / Ø ' + num(mm(2 * r), 3) + ' ' + UNIT_LABEL;
       } else if (h.kind === 'thr') {
         // the whole thread in or out (its diameter), as dragging the object in the cross-section
-        const r = Math.max(0, rs(along(h.phi)));
+        const r = radial(along(h.phi), h.phi);
         moveNode(n, r - h.r0, 0);
         drag.label = 'thread ' + (n.params && n.params.d ? 'Ø ' + num(mm(n.params.d), 3) : 'r ' + num(mm(r), 3)) + ' ' + UNIT_LABEL;
       } else if (h.kind === 'vtx') {
-        const q = n.params, r = Math.max(0, rs(Math.hypot(rel[0], rel[1]) / h.sv));
+        const q = n.params, wa = Math.atan2(rel[1], rel[0]) + P.a, r = radial(Math.hypot(rel[0], rel[1]), wa) / h.sv;
         let rot = Math.atan2(rel[1], rel[0]) * 180 / Math.PI - 360 * h.j / h.k;
         if (snap) rot = Math.round(rot / 5) * 5;
         if (!lock || Math.abs(r - h.r0) * view.s < 4) q.rotation = ((rot % 360) + 540) % 360 - 180;
@@ -3480,7 +3566,8 @@
         drag.label = 'radius ' + num(mm(r), 3) + ' ' + UNIT_LABEL + ' · rotation ' + num(q.rotation * ANG_SCALE, ANG_SCALE === 1 ? 1 : 4) + ANG_LABEL;
       } else if (h.kind === 'cog') {
         drag.id = h.id; drag.what = h.what;
-        dragCog(Math.max(0, along(h.phi)), snap);
+        const r0 = along(h.phi), r = snap ? radial(r0, h.phi) : r0;
+        dragCog(Math.max(0, r), snap && !drag.snapShow);
       } else if (h.kind === 'fillet') {
         // how far into the corner, along its bisector, sets the rounding's radius
         const q = n.params, d = (rel[0] - h.c.V[0]) * h.c.u[0] + (rel[1] - h.c.V[1]) * h.c.u[1];
@@ -3496,7 +3583,8 @@
         q.rotation = ((rot % 360) + 540) % 360 - 180;
         drag.label = 'rotation ' + num(q.rotation * ANG_SCALE, ANG_SCALE === 1 ? 1 : 4) + ANG_LABEL;
       } else if (h.kind === 'clone') {
-        const q = n.params;
+        const q = n.params, s = snap ? snapPoint2([X, Y], drag.targets) : null;
+        if (s) { const r2 = P.inv(s.p[0] - P.C[0], s.p[1] - P.C[1]); rel[0] = r2[0]; rel[1] = r2[1]; drag.snapShow = { mark: s.mark, lines: s.lines }; snap = false; }
         let a = Math.atan2(rel[1], rel[0]) * 180 / Math.PI;
         if (snap) a = Math.round(a / 5) * 5;
         q.radius = Math.max(0, rs(Math.hypot(rel[0], rel[1]))); q.angle = ((a % 360) + 360) % 360;
@@ -4207,6 +4295,7 @@
             else if (!state.sel.has(h.pkey)) state.sel = new Set([h.pkey]);
             state.selNodes = new Set([h.id]);
           } else if (!add) { state.selNodes = new Set([h.id]); state.sel = new Set(); }
+          drag.targets = topSnapTargets(h);      // what Ctrl can snap to, as things stand before the drag
           drawSection(); return;
         }
         if (e.target.__secLine) { const [ox, oy] = toScreen(0, 0); drag = { type: 'angle', a0: state.viewAngle, sl: Math.atan2(oy - sy, sx - ox) * 180 / Math.PI, acc: 0, hit, add, sx, sy, moved: false }; svg.style.cursor = 'grabbing'; return; }
