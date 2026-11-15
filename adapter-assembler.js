@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.10.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.11.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.10.1';
+  const APP_VERSION = '3.11.0';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -868,8 +868,7 @@
     mark.rootR = tooth.length - 1;
     { const n = arc(psiR, half); for (let i = 0; i < n; i++) push(psiR + (half - psiR) * i / n, rf); }
     // rounded corners (vertical bevels): at the teeth's tips and in their roots, worked on the outline seen from above
-    let C = tooth.map(([a, r]) => [r * Math.cos(a), r * Math.sin(a)]);
-    const len = (i, j) => { let L = 0; for (let k = Math.min(i, j); k < Math.max(i, j); k++) L += Math.hypot(C[k + 1][0] - C[k][0], C[k + 1][1] - C[k][1]); return L; };
+    const C = tooth.map(([a, r]) => [r * Math.cos(a), r * Math.sin(a)]);
     const corner = (c) => {
       const V = C[c], P = C[c - 1], Q = C[c + 1], l1 = Math.hypot(V[0] - P[0], V[1] - P[1]) || 1, l2 = Math.hypot(Q[0] - V[0], Q[1] - V[1]) || 1;
       const d1 = [(V[0] - P[0]) / l1, (V[1] - P[1]) / l1], d2 = [(Q[0] - V[0]) / l2, (Q[1] - V[1]) / l2];
@@ -877,43 +876,96 @@
       // u: from the corner toward the rounding's middle; k: how far that is, per unit of radius
       return { V, d1, d2, phi, u: [bx / bl, by / bl], k: 1 / Math.max(1e-6, Math.cos(phi / 2)) - 1 };
     };
-    const lim = { rootL: [len(0, mark.rootL), len(mark.rootL, mark.tipL) / 2], tipL: [len(mark.rootL, mark.tipL) / 2, len(mark.tipL, mark.tipR) / 2] };
     const info = { tip: corner(mark.tipL), root: corner(mark.rootL) };
-    const fillet = (c, r, lb, lf) => {
-      if (!(r > 0) || c <= 0 || c >= C.length - 1) return;
-      const k = corner(c);
-      if (k.phi < 1e-3) return;
-      const t = Math.min(r * Math.tan(k.phi / 2), 0.98 * lb, 0.98 * lf), rr = t / Math.tan(k.phi / 2);
-      const along = (dir) => {        // the point t along the outline from the corner, and the vertex just past it
-        let left = t, i = c;
-        for (;;) {
-          const j = i + dir;
-          if (j < 0 || j >= C.length) return { p: C[i], i };
-          const L = Math.hypot(C[j][0] - C[i][0], C[j][1] - C[i][1]);
-          if (L >= left) { const f = left / (L || 1); return { p: [C[i][0] + (C[j][0] - C[i][0]) * f, C[i][1] + (C[j][1] - C[i][1]) * f], i: j }; }
-          left -= L; i = j;
-        }
-      };
-      const A = along(-1), B = along(1), s = Math.sign(k.d1[0] * k.d2[1] - k.d1[1] * k.d2[0]) || 1;
-      const O = [A.p[0] - k.d1[1] * rr * s, A.p[1] + k.d1[0] * rr * s];
-      const a0 = Math.atan2(A.p[1] - O[1], A.p[0] - O[0]);
-      let da = Math.atan2(B.p[1] - O[1], B.p[0] - O[0]) - a0;
-      while (da > Math.PI) da -= 2 * Math.PI;
-      while (da < -Math.PI) da += 2 * Math.PI;
-      const m = Math.max(3, Math.ceil(Math.abs(da) / (Math.PI / 24))), arcPts = [];
-      for (let i = 0; i <= m; i++) arcPts.push([O[0] + rr * Math.cos(a0 + da * i / m), O[1] + rr * Math.sin(a0 + da * i / m)]);
-      C = C.slice(0, A.i + 1).concat(arcPts, C.slice(B.i));
-    };
     const tr = Math.max(0, q.tipRound || 0), rr0 = Math.max(0, q.rootRound || 0);
     if (tr > 0 || rr0 > 0) {
-      // round the leading side's corners only, then mirror that half: both sides of every tooth come out the same
-      if (mark.tipL === mark.tipR) lim.tipL[1] = len(mark.tipL, mark.rootR) / 2;      // a pointed tooth
-      fillet(mark.tipL, tr, ...lim.tipL);
-      fillet(mark.rootL, rr0, ...lim.rootL);
-      const lead = C.map(([x, y]) => [Math.atan2(y, x), Math.hypot(x, y)]).filter(([a]) => a < -1e-12);
+      // Round the leading side of the tooth, then mirror it, so both sides come out the same. Each rounding is a true
+      // fillet: a circle touching the side of the tooth and the root (or tip) circle. When it is too big for half the
+      // gap (or half the tip) it becomes the full round: centred on the gap's (or the tooth's) middle.
+      const rootArc = C.slice(0, mark.rootL + 1), flank = C.slice(mark.rootL, mark.tipL + 1), tipArc = C.slice(mark.tipL);
+      const S = [];
+      for (let i = 0; i + 1 < flank.length; i++) {
+        const P = flank[i], Q = flank[i + 1], L = Math.hypot(Q[0] - P[0], Q[1] - P[1]) || 1e-12, dd = [(Q[0] - P[0]) / L, (Q[1] - P[1]) / L];
+        S.push({ P, Q, gap: [dd[1], -dd[0]], tooth: [-dd[1], dd[0]] });
+      }
+      const nrm = (v) => Math.hypot(v[0], v[1]);
+      // nearest point of the tooth's side to O
+      const foot = (O) => {
+        let best = null;
+        S.forEach((g, i) => {
+          const vx = g.Q[0] - g.P[0], vy = g.Q[1] - g.P[1], L2 = vx * vx + vy * vy || 1e-24;
+          const t = Math.max(0, Math.min(1, ((O[0] - g.P[0]) * vx + (O[1] - g.P[1]) * vy) / L2)), p = [g.P[0] + vx * t, g.P[1] + vy * t], dd = Math.hypot(O[0] - p[0], O[1] - p[1]);
+          if (!best || dd < best.d) best = { p, d: dd, i, t };
+        });
+        return best;
+      };
+      // the centre at rho from the side (on the given side of it) and at radius target from the axis, searched from one end
+      const along = (rho, side, target, fromTip) => {
+        const order = S.map((_, i) => i); if (fromTip) order.reverse();
+        for (const i of order) {
+          const g = S[i], n = g[side], O0 = [g.P[0] + n[0] * rho, g.P[1] + n[1] * rho], O1 = [g.Q[0] + n[0] * rho, g.Q[1] + n[1] * rho];
+          const f0 = nrm(O0) - target, f1 = nrm(O1) - target;
+          if (f0 === 0 || f0 * f1 < 0 || f1 === 0) {
+            const t = f0 === f1 ? 0 : f0 / (f0 - f1);
+            return { O: [O0[0] + (O1[0] - O0[0]) * t, O0[1] + (O1[1] - O0[1]) * t], F: [g.P[0] + (g.Q[0] - g.P[0]) * t, g.P[1] + (g.Q[1] - g.P[1]) * t], i, t };
+          }
+        }
+        return null;
+      };
+      const bisect = (g, lo, hi) => { let flo = g(lo); for (let k = 0; k < 60; k++) { const m = (lo + hi) / 2, fm = g(m); if ((fm > 0) === (flo > 0)) { lo = m; flo = fm; } else hi = m; } return (lo + hi) / 2; };
+      const arcPts = (O, A, B) => {
+        const r = nrm([A[0] - O[0], A[1] - O[1]]), a0 = Math.atan2(A[1] - O[1], A[0] - O[0]);
+        let da = Math.atan2(B[1] - O[1], B[0] - O[0]) - a0;
+        while (da > Math.PI) da -= 2 * Math.PI;
+        while (da < -Math.PI) da += 2 * Math.PI;
+        const m = Math.max(4, Math.ceil(Math.abs(da) / (Math.PI / 32))), out = [];
+        for (let i = 0; i <= m; i++) out.push([O[0] + r * Math.cos(a0 + da * i / m), O[1] + r * Math.sin(a0 + da * i / m)]);
+        return out;
+      };
+      const ang = (p) => Math.atan2(p[1], p[0]);
+      let lower = null, upper = null;     // { pts (the rounding, in order of increasing angle), i, t: where it leaves the side }
+      if (rr0 > 0) {
+        let sol = along(rr0, 'gap', rf + rr0, false), A = sol && [sol.O[0] * rf / nrm(sol.O), sol.O[1] * rf / nrm(sol.O)];
+        if (!sol || ang(A) <= -half + 1e-9) {
+          // the full round: centred on the gap's middle, touching the root circle there
+          const u = [Math.cos(-half), Math.sin(-half)], Oof = (r) => [u[0] * (rf + r), u[1] * (rf + r)];
+          const r = bisect((x) => foot(Oof(x)).d - x, 0, ra - rf);
+          const O = Oof(r), f = foot(O);
+          sol = { O, F: f.p, i: f.i, t: f.t }; A = [u[0] * rf, u[1] * rf];
+        }
+        lower = { pts: arcPts(sol.O, A, sol.F), i: sol.i, t: sol.t };
+      }
+      if (tr > 0) {
+        let sol = along(tr, 'tooth', ra - tr, true), B = sol && [sol.O[0] * ra / nrm(sol.O), sol.O[1] * ra / nrm(sol.O)];
+        if (!sol || ang(B) >= -1e-9) {
+          // the full round: centred on the tooth's middle (for a pointed tooth: the given radius, inside the point)
+          const pointed = psiA < 1e-9;
+          let O, top;
+          if (pointed) { const x = bisect((xx) => foot([xx, 0]).d - tr, Math.max(rf, ra - 50 * tr), ra); O = [x, 0]; top = [x + tr, 0]; }
+          else { const r = bisect((x) => foot([ra - x, 0]).d - x, 0, ra - rf); O = [ra - r, 0]; top = [ra, 0]; }
+          const f = foot(O);
+          sol = { O, F: f.p, i: f.i, t: f.t }; B = top;
+        }
+        upper = { pts: arcPts(sol.O, sol.F, B), i: sol.i, t: sol.t, end: B };
+      }
+      // the leading half: root arc, (rounding), side, (rounding), tip arc up to the middle
+      const lead = [];
+      const add = (p) => { const a = ang(p); if (a <= 1e-12 && (!lead.length || a - ang(lead[lead.length - 1]) > 1e-10)) lead.push(p); };
+      const lowA = lower ? ang(lower.pts[0]) : Infinity;
+      for (const p of rootArc) if (ang(p) < lowA - 1e-10) add(p);
+      if (lower) lower.pts.forEach(add);
+      const fromI = lower ? lower.i : 0, fromT = lower ? lower.t : 0, toI = upper ? upper.i : S.length - 1, toT = upper ? upper.t : 1;
+      for (let i = fromI; i <= toI; i++) {
+        const t0 = i === fromI ? fromT : 0, t1 = i === toI ? toT : 1, g = S[i];
+        for (const t of [t0, t1]) add([g.P[0] + (g.Q[0] - g.P[0]) * t, g.P[1] + (g.Q[1] - g.P[1]) * t]);
+      }
+      if (upper) upper.pts.forEach(add);
+      const upA = upper ? ang(upper.end) : -Infinity;
+      for (const p of tipArc) if (ang(p) > upA + 1e-10) add(p);
       tooth = [];
-      for (const [a, r] of lead) push(a, r);
-      for (let i = lead.length - 1; i >= 1; i--) push(-lead[i][0], lead[i][1]);       // not the gap's middle (the next tooth starts there)
+      const polar = lead.map((p) => [ang(p), nrm(p)]);
+      for (const [a, r] of polar) push(a, r);
+      for (let i = polar.length - 1; i >= 1; i--) if (polar[i][0] < -1e-12) push(-polar[i][0], polar[i][1]);   // not the middle twice, nor the gap's middle
     }
     const rot = (q.rotation || 0) * Math.PI / 180, ang = new Float64Array(N * tooth.length), rad = new Float64Array(N * tooth.length);
     for (let k = 0, o = 0; k < N; k++) for (const [a, r] of tooth) { ang[o] = rot + 2 * half * k + a; rad[o] = r; o++; }
@@ -2719,7 +2771,8 @@
     window.addEventListener('keyup', onKeyUp, true);
 
     // ---- geometry helpers for the view ----
-    const size = () => { const r = svg.getBoundingClientRect(); return { w: r.width || 800, h: r.height || 600 }; };
+    // the pane's own size (not the drawn one, which shrinks while the view tips over in a transition)
+    const size = () => ({ w: left.clientWidth || 800, h: left.clientHeight || 600 });
     function fit() {
       if (topMode()) { fitTop(); return; }
       let y0 = Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
@@ -2737,7 +2790,7 @@
       const { w, h } = size();
       const R = Math.max(Math.abs(y0), Math.abs(y1), 1e-6);    // both sides of the axis
       view = { cy: 0, cz: (z0 + z1) / 2, s: Math.min(w / (2 * R * 1.15), h / ((z1 - z0) * 1.2 || 1)) };
-      fitScale = view.s;
+      fitScale = view.s; view.fit = view.s;
     }
     // The cross-section shows both sides of the axis: the section at the view angle on the right, and the one
     // opposite it (view angle + 180°) mirrored on the left, which works just the same. MS is the side being drawn
@@ -3076,7 +3129,23 @@
       if (topMode() === (m === 'top')) return;
       views[topMode() ? 'top' : 'section'] = view;
       state.secMode = m === 'top' ? 'top' : 'section'; saveSettings();
-      view = views[state.secMode]; zoomAnim = null; drag = null; hoverNode = null; hoverEdge = null; cursorW = null;
+      view = views[state.secMode]; zoomAnim = null; drag = null; hoverNode = null; hoverEdge = null; cursorW = null; hoverTopH = null;
+      // the old view tips away as the new one tips in (side → top: as if looking down onto the part; and back)
+      const ghost = !reduceMotion() && svg.isConnected ? svg.cloneNode(true) : null;
+      if (ghost) {
+        const shot = document.createElement('canvas');
+        shot.width = wrapCanvas.width; shot.height = wrapCanvas.height;
+        try { shot.getContext('2d').drawImage(wrapCanvas, 0, 0); } catch (_) { /* ignore */ }
+        shot.style.cssText = 'position:absolute;inset:0;width:100%;height:100%';
+        ghost.style.position = 'absolute'; ghost.style.inset = '0';
+        const box = el('div', { style: 'position:absolute;inset:0;pointer-events:none;background:#fbfbfc;transform-origin:50% 50%' }, shot, ghost);
+        left.insertBefore(box, overlay);
+        const down = state.secMode === 'top', ms = 380, ease = 'cubic-bezier(.45,0,.2,1)';
+        box.animate([{ transform: 'perspective(1400px) rotateX(0deg)', opacity: 1 }, { transform: 'perspective(1400px) rotateX(' + (down ? 70 : -70) + 'deg)', opacity: 0 }], { duration: ms, easing: ease, fill: 'forwards' })
+          .onfinish = () => box.remove();
+        for (const n of [svg, wrapCanvas])
+          n.animate([{ transform: 'perspective(1400px) rotateX(' + (down ? -70 : 70) + 'deg)', opacity: 0 }, { transform: 'perspective(1400px) rotateX(0deg)', opacity: 1 }], { duration: ms, easing: ease });
+      }
       syncModeBtns(); drawSection();
     }
     function syncModeBtns() {
@@ -3162,7 +3231,7 @@
       const { w, h } = size();
       view = { cy: (x0 + x1) / 2, cz: (y0 + y1) / 2, s: Math.min((w - AX_L) / ((x1 - x0) * 1.2 || 1), (h - AX_B) / ((y1 - y0) * 1.2 || 1)) };
       view.cy -= AX_L / 2 / view.s; view.cz -= AX_B / 2 / view.s;     // centred in the space between the axis strips
-      fitScale = view.s;
+      fitScale = view.s; view.fit = view.s;
     }
     function drawTop(g) {
       grid(g, 0, true);
@@ -3432,7 +3501,7 @@
       const MS0 = MS; MS = 1;
       if (topMode()) {
         drawWrap(); drawTop(g); drawHover();
-        zoomTag.textContent = fitScale > 0 ? Math.round(view.s / fitScale * 100) + '%' : '';
+        zoomTag.textContent = (view.fit || fitScale) > 0 ? Math.round(view.s / (view.fit || fitScale) * 100) + '%' : '';
         syncThreadBoxes(); renderSelBox();
         MS = MS0; return;
       }
@@ -3628,7 +3697,7 @@
       if (drag && drag.type === 'bevel' && drag.label) label(svg, drag.labelAt[0] + 12, drag.labelAt[1] - 10, [drag.label], { border: '#ffc078', bg: 'rgba(255,249,219,.95)' });
       drawCursor();
       drawHover();
-      zoomTag.textContent = fitScale > 0 ? Math.round(view.s / fitScale * 100) + '%' : '';
+      zoomTag.textContent = (view.fit || fitScale) > 0 ? Math.round(view.s / (view.fit || fitScale) * 100) + '%' : '';
       syncThreadBoxes();
       renderSelBox();
       MS = MS0;
