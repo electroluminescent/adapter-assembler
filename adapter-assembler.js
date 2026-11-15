@@ -2,7 +2,7 @@
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.18.0';
+  const APP_VERSION = '3.18.1';
   // switching between radius/height and overhead: radius/height tips about the height the overhead view looks down
   // from, overhead about its own x axis
   // (set false to go back to both views tipping about the middle of the pane)
@@ -3579,7 +3579,15 @@
       const b = topBand(); if (b) return [b.lo, b.hi];
       const r = sceneZRange(); return r ? [r[0], r[1]] : null;
     }
-    const otherView = (v, toTop) => v && { cy: v.cy, cz: toTop ? v.cz - FZ() * lookFromZ() : sideCz != null ? sideCz : v.cz + FZ() * partZMid(), s: v.s, fit: v.fit };
+    // (when that height is off the screen, the section line goes to the middle instead)
+    const onScreen = (y) => y >= 0 && y <= size().h - AX_B;
+    const otherView = (v, toTop) => {
+      if (!v) return v;
+      let cz;
+      if (toTop) { cz = v.cz - FZ() * lookFromZ(); if (!onScreen(size().h / 2 + cz * v.s)) cz = 0; }
+      else cz = sideCz != null ? sideCz : v.cz + FZ() * partZMid();
+      return { cy: v.cy, cz, s: v.s, fit: v.fit };
+    };
     function setSecMode(m) {
       if (topMode() === (m === 'top')) return;
       const toTop = m === 'top';
@@ -3605,8 +3613,10 @@
         let pSide = pv, pTop = pv;
         if (TIP_FROM_CUT) {
           const sideV = toTop ? before : view, topV = toTop ? view : before, zTop = lookFromZ(), H = size().h;
-          if (sideV && zTop != null) pSide = '50% ' + (H / 2 - (FZ() * zTop - sideV.cz) * sideV.s).toFixed(1) + 'px';
-          if (topV) pTop = '50% ' + (H / 2 + topV.cz * topV.s).toFixed(1) + 'px';
+          // (a line off the screen: about the middle instead)
+          const yS = sideV && zTop != null ? H / 2 - (FZ() * zTop - sideV.cz) * sideV.s : NaN, yT = topV ? H / 2 + topV.cz * topV.s : NaN;
+          if (onScreen(yS)) pSide = '50% ' + yS.toFixed(1) + 'px';
+          if (onScreen(yT)) pTop = '50% ' + yT.toFixed(1) + 'px';
         }
         const box = el('div', { style: 'position:absolute;inset:0;pointer-events:none;background:#fbfbfc;transform-origin:' + (toTop ? pSide : pTop) }, shot, ghost);
         for (const n of [svg, wrapCanvas]) n.style.transformOrigin = toTop ? pTop : pSide;
