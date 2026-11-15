@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.15.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.15.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.15.0';
+  const APP_VERSION = '3.15.1';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -350,7 +350,7 @@
 
     return {
       buffer, ext,
-      preview: { tris: pv, lines, bad: new Float32Array(badEdges) },
+      preview: { tris: pv, lines, bad: new Float32Array(badEdges), shift: [cx, cy, minZ] },   // shift: what was taken off (model units) to centre the part and stand it on Z = 0
       report: {
         optimize: opts.optimize,
         triangles: count,
@@ -1153,7 +1153,7 @@
       for (let o = 0; o < mesh.length; o += 7) { mesh[o + 1] = -mesh[o + 1]; mesh[o + 2] = -mesh[o + 2]; }
     }
     const res = processMesh(mesh, data.opts);
-    res.report.engine = engine;
+    res.report.engine = engine; res.preview.flip = !!(data.opts && data.opts.flip);
     return res;
   }
 
@@ -3299,10 +3299,10 @@
     function meshSection(theta) {
       const t = meshTris;
       if (!t || !t.length) return null;
-      if (meshSecCache && meshSecCache.t === t && meshSecCache.theta === theta && meshSecCache.flip === !!state.flip) return meshSecCache.loops;
-      const c = Math.cos(theta), s = Math.sin(theta), fy = state.flip ? -1 : 1, segs = [];
-      // a model point (mm, turned over when flipped) → across the plane, along it, height (scene units)
-      const P = (o) => { const x = t[o], y = t[o + 1] * fy, z = t[o + 2] * fy; return [(-x * s + y * c), (x * c + y * s) / MM, z / MM]; };
+      if (meshSecCache && meshSecCache.t === t && meshSecCache.theta === theta) return meshSecCache.loops;
+      const c = Math.cos(theta), s = Math.sin(theta), fy = meshFlip ? -1 : 1, segs = [], sh = meshShift || [0, 0, 0];
+      // a mesh point (mm, centred, stood on Z = 0, turned over when flipped) → back where the scene has it → across the plane, along it, height
+      const P = (o) => { const x = t[o] / MM + sh[0], y = (t[o + 1] / MM + sh[1]) * fy, z = (t[o + 2] / MM + sh[2]) * fy; return [(-x * s + y * c), (x * c + y * s), z]; };
       for (let o = 0; o + 17 < t.length; o += 18) {
         const A = P(o), B = P(o + 6), C = P(o + 12), pts = [];
         for (const [p, q] of [[A, B], [B, C], [C, A]]) {
@@ -3325,7 +3325,7 @@
         }
         if (loop.length > 2) loops.push(loop);
       }
-      meshSecCache = { t, theta, flip: !!state.flip, loops };
+      meshSecCache = { t, theta, loops };
       return loops;
     }
 
@@ -5457,7 +5457,7 @@
       shown = result;
       const firstMesh = !triCount;
       const t = result.preview.tris, l = result.preview.lines;
-      meshTris = t; cutEdgeCache = null;
+      meshTris = t; meshShift = result.preview.shift || null; meshFlip = !!result.preview.flip; cutEdgeCache = null;
       gl.bindBuffer(gl.ARRAY_BUFFER, triBuf); gl.bufferData(gl.ARRAY_BUFFER, t, gl.STATIC_DRAW); triCount = t.length / 6;
       const lv = new Float32Array(l.length * 2);
       for (let i = 0, j = 0; i < l.length; i += 3) { lv[j++] = l[i]; lv[j++] = l[i + 1]; lv[j++] = l[i + 2]; lv[j++] = 0; lv[j++] = 0; lv[j++] = 1; }
@@ -5687,7 +5687,7 @@
     // edges that keep the part from being solid, drawn on top in magenta
     // The outline where each active cut plane meets the part, as a bright line in that plane's colour
     // (cut back by the other planes). The crossings are found once per mesh and plane position.
-    let meshTris = null, cutEdgeCache = null, cutEdgeBuf = null;
+    let meshTris = null, meshShift = null, meshFlip = false, cutEdgeCache = null, cutEdgeBuf = null;
     const EDGE_COL = { x: [1, 0.28, 0.28, 1], y: [0.3, 1, 0.38, 1], z: [0.32, 0.62, 1, 1] };
     for (const k of ['x', 'y', 'z']) EDGE_COL[k + 'lo'] = EDGE_COL[k];
     function cutSegments(planes) {
@@ -6295,11 +6295,11 @@
       if (!root.isConnected) return;
       loading.style.display = state.scene ? 'none' : 'flex';
       if (state.scene) pruneSelection();
+      if (state.preview) setMesh(state.preview);
+      else if (triCount) { triCount = 0; lineCount = 0; shown = null; bbox = null; meshTris = null; draw3d(); }
       if (!drag) drawSection();
       if (!drag || !drag.moved) renderSide(); else headStatus(statusText());
       busyTag.textContent = state.busy ? 'Updating…' : '';
-      if (state.preview) setMesh(state.preview);
-      else if (triCount) { triCount = 0; lineCount = 0; shown = null; bbox = null; draw3d(); }
     }
     function destroy() { ro.disconnect(); roSide.disconnect(); window.removeEventListener('keydown', onKey, true); window.removeEventListener('keyup', onKeyUp, true); root.remove(); }
     return { root, render, destroy, showSplash };
