@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.16.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.16.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.16.0';
+  const APP_VERSION = '3.16.1';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -3340,6 +3340,52 @@
       wasm.setup(); W.__aaManifold = wasm;
       return wasm;
     }
+    // faces lying against faces turned the other way (two solids just touching): inside the part, not its surface
+    function ghostFaces(V, T, N) {
+      const nt = T.length / 3, ghost = new Uint8Array(nt), buckets = new Map();
+      for (let f = 0; f < nt; f++) {
+        const nx = N[f * 3], ny = N[f * 3 + 1], nz = N[f * 3 + 2];
+        if (!(nx || ny || nz)) continue;
+        const a = T[f * 3] * 3, d0 = nx * V[a] + ny * V[a + 1] + nz * V[a + 2];
+        const flip = (Math.abs(nx) > 1e-6 ? nx : Math.abs(ny) > 1e-6 ? ny : nz) < 0, s = flip ? -1 : 1;
+        const key = Math.round(nx * s * 500) + ',' + Math.round(ny * s * 500) + ',' + Math.round(nz * s * 500) + ',' + Math.round(d0 * s * 2000);
+        let b = buckets.get(key); if (!b) buckets.set(key, b = [[], []]);
+        b[flip ? 1 : 0].push(f);
+      }
+      const area = (P) => { let s = 0; for (let i = 0; i < P.length; i++) { const A = P[i], B = P[(i + 1) % P.length]; s += A[0] * B[1] - B[0] * A[1]; } return s / 2; };
+      const ccw = (P) => area(P) < 0 ? P.reverse() : P;
+      // the area two triangles share (one clipped by the other)
+      const shared = (P, Q) => {
+        let out = P;
+        for (let i = 0; i < 3 && out.length; i++) {
+          const A = Q[i], B = Q[(i + 1) % 3], inp = out; out = [];
+          const side = (p) => (B[0] - A[0]) * (p[1] - A[1]) - (B[1] - A[1]) * (p[0] - A[0]);
+          for (let k = 0; k < inp.length; k++) {
+            const p = inp[k], q = inp[(k + 1) % inp.length], sp = side(p), sq = side(q);
+            if (sp >= 0) out.push(p);
+            if ((sp >= 0) !== (sq >= 0)) { const t = sp / (sp - sq); out.push([p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]); }
+          }
+        }
+        return out.length > 2 ? Math.abs(area(out)) : 0;
+      };
+      for (const [up, dn] of buckets.values()) {
+        if (!up.length || !dn.length) continue;
+        const f0 = up[0], big = [0, 1, 2].reduce((m, i) => Math.abs(N[f0 * 3 + i]) > Math.abs(N[f0 * 3 + m]) ? i : m, 0), ax = [[1, 2], [0, 2], [0, 1]][big];
+        const tri = (f) => { const o = []; for (let k = 0; k < 3; k++) { const v = T[f * 3 + k] * 3; o.push([V[v + ax[0]], V[v + ax[1]]]); } return ccw(o); };
+        const box = (P) => [Math.min(P[0][0], P[1][0], P[2][0]), Math.max(P[0][0], P[1][0], P[2][0]), Math.min(P[0][1], P[1][1], P[2][1]), Math.max(P[0][1], P[1][1], P[2][1])];
+        const U = up.map(tri), D = dn.map(tri), UB = U.map(box), DB = D.map(box);
+        const cu = new Float64Array(up.length), cd = new Float64Array(dn.length);
+        for (let i = 0; i < up.length; i++) for (let j = 0; j < dn.length; j++) {
+          const a = UB[i], b = DB[j];
+          if (a[1] <= b[0] || b[1] <= a[0] || a[3] <= b[2] || b[3] <= a[2]) continue;
+          const s = shared(U[i], D[j]); cu[i] += s; cd[j] += s;
+        }
+        // mostly against another face: inside
+        up.forEach((f, i) => { if (cu[i] > 0.6 * Math.abs(area(U[i]))) ghost[f] = 1; });
+        dn.forEach((f, j) => { if (cd[j] > 0.6 * Math.abs(area(D[j]))) ghost[f] = 1; });
+      }
+      return ghost;
+    }
     // the model welded, in scene units where the scene has it; its sharp edges as 3D segments
     function topMonoMesh(t) {
       const fy = meshFlip ? -1 : 1, sh = meshShift || [0, 0, 0], ids = new Map(), V = [], T = new Uint32Array(t.length / 6);
@@ -3360,10 +3406,12 @@
           const s = edges.get(key); if (s) s.push(f); else edges.set(key, [f]);
         }
       }
-      const seg = [], COS = Math.cos(25 * Math.PI / 180);
-      for (const [key, fs] of edges) {
-        let sharp = fs.length !== 2;
-        if (!sharp) {
+      // where two solids just touch, their touching faces are inside the part: no lines from them
+      const ghost = ghostFaces(V, T, N), seg = [], COS = Math.cos(25 * Math.PI / 180);
+      for (const [key, fs0] of edges) {
+        const fs = fs0.filter(f => !ghost[f]);
+        let sharp = false;
+        if (fs.length === 2) {
           const [f, g] = fs, dot = N[f * 3] * N[g * 3] + N[f * 3 + 1] * N[g * 3 + 1] + N[f * 3 + 2] * N[g * 3 + 2];
           const zf = N[f * 3 + 2], zg = N[g * 3 + 2];
           sharp = dot < COS || (zf > 1e-3 && zg < -1e-3) || (zf < -1e-3 && zg > 1e-3);   // a crease, or where the surface turns away from above
