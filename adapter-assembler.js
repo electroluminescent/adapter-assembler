@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.7.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.7.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.7.0';
+  const APP_VERSION = '3.7.1';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -1404,6 +1404,11 @@
   const cogTip = (q) => q.module * (q.teeth / 2 + (cogIn(q) ? -q.addendum : q.addendum));
   const cogRoot = (q) => q.module * (q.teeth / 2 + (cogIn(q) ? q.dedendum : -q.dedendum));
   const profileOf = (type, q) => paramProfile(type !== 'cog' ? q : cogIn(q) ? { ...q, rib: cogTip(q), rit: cogTip(q), linkIn: true } : { ...q, rob: cogTip(q), rot: cogTip(q), linkOut: true });
+  // an outside cog's bore stays inside its root circle; an inside cog's rim outside its roots
+  function cogClamp(t) {
+    if (cogIn(t)) { t.addendum = Math.min(t.addendum, t.teeth / 2 - 0.05); const lim = cogRoot(t) + 0.02 * t.module; t.rob = Math.max(t.rob, lim); t.rot = Math.max(t.rot, lim); }
+    else { t.dedendum = Math.min(t.dedendum, t.teeth / 2 - 0.05); const lim = Math.max(0, cogRoot(t) - 0.02 * t.module); t.rib = Math.min(t.rib, lim); t.rit = Math.min(t.rit, lim); }
+  }
   const cogFix = (q, o) => cogIn(q) ? Math.max(...o.map(p => p.y)) : Math.min(...o.map(p => p.y));
   function genOf(n, q) {
     if (n.type === 'thread') { const t = threadProfile(q); return { pts: t.pts, runs: t.runs }; }
@@ -3048,6 +3053,28 @@
       g.append(knob);
       label(g, hx + 10, hy - 8, ['section ' + num(state.viewAngle * ANG_SCALE, ANG_SCALE === 1 ? 1 : 4) + ANG_LABEL]);
     }
+    // where a cog's tooth handles sit: the tip, pitch and root radii, half way up its toothed edge
+    function cogHandles(n) {
+      const q = n.params, o = outlineOf(n.pts, []), z = (Math.min(...o.map(p => p.z)) + Math.max(...o.map(p => p.z))) / 2, rp = q.module * q.teeth / 2;
+      return [
+        { what: 'tip', r: cogTip(q), z, col: '#c2255c', tip: 'teeth tips — drag across to change the addendum' },
+        { what: 'pitch', r: rp, z, col: '#495057', tip: 'pitch circle — drag across to change the module (the size of the teeth)' },
+        { what: 'root', r: cogRoot(q), z, col: '#0c8599', tip: 'teeth roots — drag across to change the dedendum' }];
+    }
+    // drag a cog's tooth handle to radius r (in the object's own frame)
+    function dragCog(r, snap) {
+      const n = state.scene.nodes[drag.id], q = n.params, before = clone(q), N = q.teeth, m = q.module, inside = cogIn(q);
+      const step = (v, s) => snap ? Math.round(v / s) * s : v;
+      if (drag.what === 'pitch') q.module = Math.max(0.01 / MM, step(2 * r / N * UNIT_SCALE, UNIT_SCALE === 1 ? 0.005 : 0.05) / UNIT_SCALE);
+      else if (drag.what === 'tip') q.addendum = Math.max(0, Math.min(3, step((inside ? N / 2 - r / m : r / m - N / 2), 0.05)));
+      else q.dedendum = Math.max(0, Math.min(3, step((inside ? r / m - N / 2 : N / 2 - r / m), 0.05)));
+      cogClamp(q);
+      transferParams(n, before, q);
+      drag.label = drag.what === 'pitch' ? 'module ' + num(mm(q.module), 3) + ' ' + UNIT_LABEL + ' · pitch Ø ' + num(mm(q.module * N), 3)
+        : drag.what === 'tip' ? 'addendum ' + num(q.addendum, 3) + ' × module · tip Ø ' + num(mm(2 * cogTip(q)), 3)
+        : 'dedendum ' + num(q.dedendum, 3) + ' × module · root Ø ' + num(mm(2 * cogRoot(q)), 3);
+      drag.label += ' ' + UNIT_LABEL;
+    }
     function drawSection() {
       syncModeBtns();
       svg.textContent = '';
@@ -3088,7 +3115,7 @@
         if (n.type === 'cog') {
           // the range the section moves through as the view turns: root (min) and tip (max)
           const sh = cogShapeOf(n.params), fix = cogFix(n.params, local), lo = Math.min(sh.rf, sh.ra), hi = Math.max(sh.rf, sh.ra);
-          for (const [R, st, dash] of [[lo, '#0c8599', 'none'], [hi, '#c2255c', '6 4']])
+          for (const [R, st, dash] of [[lo, '#0c8599', 'none'], [hi, '#c2255c', '6 4'], [sh.rp, '#868e96', '2 3']])
             g.append(sv('path', { d: pathOf(local.map(p => xf.fwd({ y: cogWarp(p.y, R, fix, sh.tip), z: p.z }))), fill: 'none', stroke: st, 'stroke-width': 1.2, 'stroke-dasharray': dash, 'pointer-events': 'none' }));
         }
         if (n.type === 'ngon') {
@@ -3173,6 +3200,21 @@
           svg.append(c);
         }
       }
+      // cogs' teeth, like a thread's: handles at the tips, the pitch circle and the roots, half way up the toothed edge
+      // (drag across to change the addendum, the module or the dedendum)
+      for (const id of order) {
+        const n = state.scene.nodes[id];
+        if (n.type !== 'cog') continue;
+        const xf = xfOf(state.scene, id);
+        if (MS < 0 && !xf.id) continue;
+        for (const ch of cogHandles(n)) {
+          const at = xf.fwd({ y: ch.r, z: ch.z }), [x, y] = toScreen(at.y, at.z), hot = drag && drag.type === 'cog' && drag.id === id && drag.what === ch.what;
+          const c = sv('path', { d: 'M' + x.toFixed(1) + ' ' + (y - 6).toFixed(1) + 'l6 6l-6 6l-6-6z', fill: hot ? '#e03131' : ch.col, stroke: '#fff', 'stroke-width': 1.4, style: 'cursor:ew-resize' });
+          c.__cog = { id, what: ch.what }; c.__side = MS;
+          const tip = sv('title'); tip.textContent = (n.name || id) + ': ' + ch.tip; c.append(tip);
+          svg.append(c);
+        }
+      }
       }
       MS = 1;
       boldExtents(g, ext);
@@ -3226,6 +3268,10 @@
       if (drag && drag.type === 'box') {
         const x0 = Math.min(drag.sx, drag.cx), y0 = Math.min(drag.sy, drag.cy);
         svg.append(sv('rect', { x: x0, y: y0, width: Math.abs(drag.cx - drag.sx), height: Math.abs(drag.cy - drag.sy), fill: 'rgba(31,111,235,.08)', stroke: '#1f6feb', 'stroke-dasharray': '4 3' }));
+      }
+      if (drag && drag.type === 'cog' && drag.label && drag.labelAt) {
+        const wpx = drag.label.length * 5.6 + 8, lx = drag.labelAt[0] + 12 + wpx > size().w ? drag.labelAt[0] - wpx - 12 : drag.labelAt[0] + 12;
+        label(svg, lx, drag.labelAt[1] - 14, [drag.label], { border: '#faa2c1', bg: 'rgba(255,240,246,.95)' });
       }
       if (drag && drag.type === 'bevel' && drag.label) label(svg, drag.labelAt[0] + 12, drag.labelAt[1] - 10, [drag.label], { border: '#ffc078', bg: 'rgba(255,249,219,.95)' });
       drawCursor();
@@ -3721,6 +3767,12 @@
           drawSection(); return;
         }
       }
+      if (e.target.__cog) {
+        const { id, what } = e.target.__cog;
+        drag = { type: 'cog', id, what, snap: clone(state.scene), moved: false };
+        state.selNodes = new Set([id]); state.sel = new Set();
+        drawSection(); return;
+      }
       if (e.target.__cloner) {
         const id = e.target.__cloner;
         drag = { type: 'cloner', id, from: [wy, wz], q0: { ...state.scene.nodes[id].params }, snap: clone(state.scene), moved: false };
@@ -3800,6 +3852,15 @@
         markEdited(); drawSection(); recalc({ fast: true });
         return;
       }
+      if (drag.type === 'cog') {
+        if (!state.scene.nodes[drag.id]) return;
+        if (!drag.moved) { pushSnap(drag.snap); drag.moved = true; }
+        state.scene = clone(drag.snap);
+        dragCog(xfOf(state.scene, drag.id).invP(wy, wz).y, e.ctrlKey || e.metaKey);
+        drag.labelAt = [sx, sy];
+        markEdited(); drawSection(); recalc({ fast: true });
+        return;
+      }
       if (drag.type === 'cloner') {
         const k = state.scene.nodes[drag.id];
         if (!k) return;
@@ -3867,6 +3928,7 @@
         } else if (!d.add) { state.sel = new Set(); state.selNodes = new Set(); }
         renderAll(); return;
       }
+      if (d.type === 'cog' && !d.moved) { renderAll(); return; }
       if (d.type === 'cloner' && !d.moved) { state.selNodes = new Set([d.id]); state.sel = new Set(); renderAll(); return; }
       if (d.type === 'points' && !d.moved) {
         if (d.toggleOff) state.sel.delete(d.key);
@@ -4217,13 +4279,7 @@
       }
       const q = n.params, cg = n.type === 'cog';
       // a cog's bore stays inside its root circle
-      const setP = (mut) => setParams(n, t => {
-        mut(t);
-        if (!cg) return;
-        // an outside cog's bore stays inside its root circle; an inside cog's rim outside its roots
-        if (cogIn(t)) { t.addendum = Math.min(t.addendum, t.teeth / 2 - 0.05); const lim = cogRoot(t) + 0.02 * t.module; t.rob = Math.max(t.rob, lim); t.rot = Math.max(t.rot, lim); }
-        else { const lim = Math.max(0, cogRoot(t) - 0.02 * t.module); t.rib = Math.min(t.rib, lim); t.rit = Math.min(t.rit, lim); }
-      });
+      const setP = (mut) => setParams(n, t => { mut(t); if (cg) cogClamp(t); });
       const len = (k, o) => numInput(() => mm(q[k]), v => setP(t => {
         t[k] = Math.max(k === 'h' ? 0.01 / UNIT_SCALE : 0, v / UNIT_SCALE);
         if (k === 'rib' && t.linkIn) t.rit = t.rib;
