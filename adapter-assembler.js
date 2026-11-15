@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.12.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.12.2. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.12.1';
+  const APP_VERSION = '3.12.2';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -4925,7 +4925,13 @@
           // the cog keeps its size: more teeth are smaller ones (the tips stay on the same circle; the module follows)
           const tip = cogTip(t), n = Math.max(3, Math.min(400, Math.round(v))), per = n / 2 + (cogIn(t) ? -t.addendum : t.addendum);
           t.teeth = n;
-          if (per > 0.05 && tip > 0) t.module = Math.max(0.01 / MM, tip / per);
+          if (per > 0.05 && tip > 0) {
+            // ... and keep their shape: the lengths set per tooth (roundings, backlash) scale with the module
+            const m0 = t.module;
+            t.module = Math.max(0.01 / MM, tip / per);
+            const f = t.module / m0;
+            for (const k of ['tipRound', 'rootRound', 'backlash']) if (t[k]) t[k] *= f;
+          }
         }), { step: '1', min: 3, max: 400, digits: 0, title: 'The cog keeps its size; the teeth get smaller or bigger to fit' })],
         ['Module' + U, numInput(() => mm(q.module), v => setP(t => { t.module = Math.max(0.01 / MM, v / UNIT_SCALE); }), { step: UNIT_SCALE === 1 ? '0.005' : '0.1', min: 0.01, title: 'Pitch diameter ÷ teeth' })],
         ['Pressure angle (' + ANG_LABEL.trim() + ')', numInput(() => q.pressure * ANG_SCALE, v => setP(t => { t.pressure = Math.max(5, Math.min(40, v / ANG_SCALE)); }), { step: ANG_SCALE === 1 ? '0.5' : '0.01', digits: 4 })],
