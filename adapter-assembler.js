@@ -2,7 +2,7 @@
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.17.0';
+  const APP_VERSION = '3.17.1';
   // switching between radius/height and overhead: the overhead view tips in about the height it looks down from
   // (set false to go back to both views tipping about the middle of the pane)
   const TIP_FROM_CUT = true;
@@ -3508,12 +3508,17 @@
       return isFinite(z0) ? (z0 + z1) / 2 : 0;
     }
     // the other view, lined up with this one
-    const otherView = (v, toTop) => v && { cy: v.cy, cz: toTop ? v.cz - FZ() * partZMid() : v.cz + FZ() * partZMid(), s: v.s, fit: v.fit };
+    // radius/height → above: the middle of the view stays where it was along the section (radius), and the view from
+    // above is centred on the section line, where the middle of the radius/height view meets it.
+    // above → radius/height: back at the height the radius/height view had (or the part's middle height, if none yet).
+    let sideCz = null;
+    const otherView = (v, toTop) => v && { cy: v.cy, cz: toTop ? 0 : sideCz != null ? sideCz : v.cz + FZ() * partZMid(), s: v.s, fit: v.fit };
     function setSecMode(m) {
       if (topMode() === (m === 'top')) return;
       const toTop = m === 'top';
       zoomAnim = null;
       const before = view;
+      if (toTop && view) sideCz = view.cz;
       view = otherView(view, toTop);
       state.secMode = toTop ? 'top' : 'section'; saveSettings();
       drag = null; hoverNode = null; hoverEdge = null; cursorW = null; hoverTopH = null;
@@ -6507,7 +6512,7 @@
       busyTag.textContent = state.busy ? 'Updating…' : '';
     }
     function destroy() { ro.disconnect(); roSide.disconnect(); window.removeEventListener('keydown', onKey, true); window.removeEventListener('keyup', onKeyUp, true); root.remove(); }
-    const flipped = () => { if (view) view.cz = -view.cz; flipBox.checked = !!state.flip; drawSection(); };
+    const flipped = () => { if (view) view.cz = -view.cz; if (sideCz != null) sideCz = -sideCz; flipBox.checked = !!state.flip; drawSection(); };
     return { root, render, destroy, showSplash, flipped };
   }
 
