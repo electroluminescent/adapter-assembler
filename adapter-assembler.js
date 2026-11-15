@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.22.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.22.2. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.22.1';
+  const APP_VERSION = '3.22.2';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -3408,8 +3408,8 @@
     // ---- monomorphic from above: the finished part itself, so a subtraction only takes away what it really removes ----
     // The outline is Manifold's projection of the solid cut to the height band (exact, with the holes that go right
     // through); the lines inside are the part's sharp edges in the band (where one part stands over another, steps,
-    // bores), where nothing of the part covers them from above. Worked out off the drawing (it can take a moment) and
-    // kept per model and band.
+    // bores), where nothing of the part covers them from where it is looked at (above; the other side with the y axis
+    // inverted). Worked out off the drawing (it can take a moment) and kept per model, band and side.
     let topMonoSolid = null, topMonoCache = null, topMonoWant = null, topMonoTimer = 0;
     async function mainManifold() {
       if (W.__aaManifold) return W.__aaManifold;
@@ -3593,11 +3593,11 @@
     function topMono(band) {
       const t = meshTris;
       if (!t || !t.length) { topMonoCache = null; return null; }
-      const lo = band ? band.lo : -Infinity, hi = band ? band.hi : Infinity;
-      const same = (k) => k && k.t === t && k.lo === lo && k.hi === hi;
+      const lo = band ? band.lo : -Infinity, hi = band ? band.hi : Infinity, fl = !!state.flip;
+      const same = (k) => k && k.t === t && k.lo === lo && k.hi === hi && k.fl === fl;
       if (same(topMonoCache)) return topMonoCache.res;
       if (!same(topMonoWant)) {
-        topMonoWant = { t, lo, hi };
+        topMonoWant = { t, lo, hi, fl };
         clearTimeout(topMonoTimer);
         // while something is being dragged the model changes many times a second: wait for a pause
         topMonoTimer = setTimeout(topMonoRun, drag && drag.moved ? 250 : 0);
@@ -3607,7 +3607,7 @@
     async function topMonoRun() {
       const job = topMonoWant;
       if (!job) return;
-      const { t, lo, hi } = job;
+      const { t, lo, hi, fl } = job;
       let res = null;
       try {
         const mf = await mainManifold();
@@ -3636,9 +3636,9 @@
           const tiny = (S.ix.span * 2e-3) ** 2, real = (L) => L.length > 2 && area(L) > tiny;
           const path = (L) => 'M' + L.map(p => f(p[0]) + ' ' + f(p[1])).join('L') + 'Z';
           const dd = polys.map(xy).filter(real).map(path).join('');
-          // the sharp edges, cut to the band; only what can be seen from above. (With the y axis inverted the drawing is
-          // the same one, mirrored: the same objects show either way.)
-          const seg3 = [], s = S.seg, dir = 1, lid = hi;
+          // the sharp edges, cut to the band; only what can be seen from where the part is looked at: from above, or,
+          // with the y axis inverted, from what is then its top (the scene's underside), down from that end of the band
+          const seg3 = [], s = S.seg, dir = fl ? -1 : 1, lid = fl ? lo : hi;
           for (let k = 0; k < s.length; k += 6) {
             let ax = s[k], ay = s[k + 1], az = s[k + 2], bx = s[k + 3], by = s[k + 4], bz = s[k + 5];
             if (Math.max(az, bz) < lo - 1e-9 || Math.min(az, bz) > hi + 1e-9) continue;
@@ -3648,15 +3648,15 @@
             seg3.push(ax, ay, az, bx, by, bz);
           }
           let ln = visiblePath(S.ix, seg3, lid, dir, f, lo, hi);
-          // where the top of the band cuts through material: the cut's own edges (on top, so seen)
-          // (taken just inside the band, so that something starting exactly at its top is not outlined)
-          if (isFinite(lid)) { const sl = S.m.slice(lid - S.ix.eps); ln += sl.toPolygons().map(xy).filter(real).map(path).join(''); sl.delete(); }
+          // where the band's end on the viewer's side cuts through material: the cut's own edges (on top, so seen)
+          // (taken just inside the band, so that something starting exactly at that end is not outlined)
+          if (isFinite(lid)) { const sl = S.m.slice(lid - dir * S.ix.eps); ln += sl.toPolygons().map(xy).filter(real).map(path).join(''); sl.delete(); }
           res = { dd, ln };
         }
       } catch (e) { res = null; }
       if (job !== topMonoWant) return;
       topMonoWant = null;
-      topMonoCache = { t, lo, hi, res };
+      topMonoCache = { t, lo, hi, fl, res };
       if (topMode() && monoOn()) drawSection();
     }
 
