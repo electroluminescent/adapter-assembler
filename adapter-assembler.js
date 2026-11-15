@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.11.4. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.11.5. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.11.4';
+  const APP_VERSION = '3.11.5';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -4879,7 +4879,12 @@
           if (v === 'internal') { const r = cogRoot(t) + 2.5 / MM; t.rob = Math.max(t.rob, r); t.rot = Math.max(t.rot, r); }
           else { const r = Math.min(3 / MM, cogRoot(t) / 2); t.rib = Math.min(t.rib, r); t.rit = Math.min(t.rit, r); }
         }), 'max-width:180px')], GBR,
-        ['Teeth', numInput(() => q.teeth, v => setP(t => { t.teeth = Math.max(3, Math.min(400, Math.round(v))); }), { step: '1', min: 3, max: 400, digits: 0 })],
+        ['Teeth', numInput(() => q.teeth, v => setP(t => {
+          // the cog keeps its size: more teeth are smaller ones (the tips stay on the same circle; the module follows)
+          const tip = cogTip(t), n = Math.max(3, Math.min(400, Math.round(v))), per = n / 2 + (cogIn(t) ? -t.addendum : t.addendum);
+          t.teeth = n;
+          if (per > 0.05 && tip > 0) t.module = Math.max(0.01 / MM, tip / per);
+        }), { step: '1', min: 3, max: 400, digits: 0, title: 'The cog keeps its size; the teeth get smaller or bigger to fit' })],
         ['Module' + U, numInput(() => mm(q.module), v => setP(t => { t.module = Math.max(0.01 / MM, v / UNIT_SCALE); }), { step: UNIT_SCALE === 1 ? '0.005' : '0.1', min: 0.01, title: 'Pitch diameter ÷ teeth' })],
         ['Pressure angle (' + ANG_LABEL.trim() + ')', numInput(() => q.pressure * ANG_SCALE, v => setP(t => { t.pressure = Math.max(5, Math.min(40, v / ANG_SCALE)); }), { step: ANG_SCALE === 1 ? '0.5' : '0.01', digits: 4 })],
         ['Rotation (' + ANG_LABEL.trim() + ')', numInput(() => (q.rotation || 0) * ANG_SCALE, v => setP(t => { t.rotation = v / ANG_SCALE; }), { step: ANG_SCALE === 1 ? '1' : '0.01', digits: 4 })],
