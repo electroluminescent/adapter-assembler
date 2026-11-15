@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.11.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.11.2. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.11.1';
+  const APP_VERSION = '3.11.2';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -832,11 +832,13 @@
   // An internal cog (ring gear, teeth pointing inward): the spaces between its teeth have the shape of an outside
   // cog's teeth, so it is built as that shape (addendum and dedendum swapped, backlash widening the spaces),
   // turned half a tooth so its teeth sit where an outside cog's would.
-  function cogShape(q, perFlank) {
+  //   prec: circular precision (edges round a full circle): it sets the steps along the root and tip circles and
+  //   the roundings, and how many points each tooth side gets.
+  function cogShape(q, prec) {
     if (q.kind === 'internal') {
       const n = Math.max(3, Math.round(q.teeth) || 3), m = Math.max(1e-4, q.module);
       const s = cogShape({ ...q, kind: 'external', addendum: q.dedendum, dedendum: q.addendum, backlash: -(q.backlash || 0), rotation: (q.rotation || 0) + 180 / n,
-        tipRound: q.rootRound, rootRound: q.tipRound }, perFlank);
+        tipRound: q.rootRound, rootRound: q.tipRound }, prec);
       return { ...s, ra: s.rf, rf: s.ra, tip: m * (n / 2 - Math.max(0, q.addendum)), internal: true, corners: { tip: s.corners.root, root: s.corners.tip } };
     }
     const N = Math.max(3, Math.round(q.teeth) || 3), m = Math.max(1e-4, q.module), al = Math.max(1, Math.min(45, q.pressure || 20)) * Math.PI / 180;
@@ -851,10 +853,11 @@
     // below the base circle the side runs down to the root, widening a little into it (a simple fillet)
     const fil = rf < rb ? Math.max(0, 0.25 * (half - psiB)) : 0;
     const psi = (r) => r >= r0 ? psiInv(r) : psiB + fil * (r0 - r) / Math.max(1e-12, r0 - rf);
-    const K = Math.max(2, perFlank | 0), side = [];
+    const P = Math.max(8, Math.min(300, Math.round(prec) || 100)), step = 2 * Math.PI / P;
+    const K = Math.max(2, Math.min(40, Math.round(P / 10))), side = [];
     if (rf < rb) for (let i = 0; i < 2; i++) side.push(rf + (r0 - rf) * i / 2);
     for (let i = 0; i <= K; i++) side.push(r0 + (ra - r0) * (1 - Math.cos(Math.PI / 2 * i / K)));   // denser near the base
-    const arc = (a0, a1) => Math.max(1, Math.ceil((a1 - a0) / (Math.PI / 90)));
+    const arc = (a0, a1) => Math.max(1, Math.ceil((a1 - a0) / step));
     let tooth = [];
     const psiR = psi(rf), psiA = Math.max(0, psi(ra)), mark = {};
     const push = (a, r) => { if (!tooth.length || a - tooth[tooth.length - 1][0] > 1e-9) tooth.push([a, r]); };
@@ -918,7 +921,7 @@
         let da = Math.atan2(B[1] - O[1], B[0] - O[0]) - a0;
         while (da > Math.PI) da -= 2 * Math.PI;
         while (da < -Math.PI) da += 2 * Math.PI;
-        const m = Math.max(4, Math.ceil(Math.abs(da) / (Math.PI / 32))), out = [];
+        const m = Math.max(2, Math.ceil(Math.abs(da) / step)), out = [];
         for (let i = 0; i <= m; i++) out.push([O[0] + r * Math.cos(a0 + da * i / m), O[1] + r * Math.sin(a0 + da * i / m)]);
         return out;
       };
@@ -998,7 +1001,7 @@
     }
     const items = expandProfile(node.pts, []);
     if (node.type === 'cog') {
-      const sh = cogShape(node.params, settings.precision >= 96 ? 10 : 6), ys = items.map(it => it.y), fix = sh.internal ? Math.max(...ys) : Math.min(...ys);
+      const sh = cogShape(node.params, node.precision > 2 ? node.precision : settings.precision), ys = items.map(it => it.y), fix = sh.internal ? Math.max(...ys) : Math.min(...ys);
       return revolve(items, { angles: sh.ang, warp: (r, j) => cogWarp(r, sh.rad[j], fix, sh.tip) });
     }
     if (node.type === 'ngon') {
@@ -1706,15 +1709,17 @@
   }
   // a cog's outline from above, cached per set of tooth parameters
   const cogCache = new Map();
-  function cogShapeOf(q) {
-    const k = [q.kind, q.teeth, q.module, q.pressure, q.addendum, q.dedendum, q.backlash, q.rotation, q.tipRound, q.rootRound].join('|');
+  // (prec: the object's own circular precision, or the project's)
+  function cogShapeOf(q, prec) {
+    prec = prec > 2 ? prec : state.precision;
+    const k = [prec, q.kind, q.teeth, q.module, q.pressure, q.addendum, q.dedendum, q.backlash, q.rotation, q.tipRound, q.rootRound].join('|');
     let s = cogCache.get(k);
-    if (!s) { if (cogCache.size > 64) cogCache.clear(); s = cogShape(q, 8); cogCache.set(k, s); }
+    if (!s) { if (cogCache.size > 64) cogCache.clear(); s = cogShape(q, prec); cogCache.set(k, s); }
     return s;
   }
   function sectionOutline(n, theta) {
     if (n.type === 'cog') {
-      const sh = cogShapeOf(n.params), o = outlineOf(n.pts, []), fix = cogFix(n.params, o), R = cogRadiusAt(sh, theta);
+      const sh = cogShapeOf(n.params, n.precision), o = outlineOf(n.pts, []), fix = cogFix(n.params, o), R = cogRadiusAt(sh, theta);
       return o.map(p => ({ y: cogWarp(p.y, R, fix, sh.tip), z: p.z }));
     }
     if (n.type === 'ngon') { const s = ngonScaleAt(n.params, theta); return outlineOf(n.pts, []).map(p => ({ y: p.y * s, z: p.z })); }
@@ -3193,7 +3198,7 @@
       const ring = (r, k = 120) => { const a = []; for (let i = 0; i < k; i++) { const t = 2 * Math.PI * i / k; a.push([r * Math.cos(t), r * Math.sin(t)]); } return a; };
       const S = { outer: null, inner: null, marks: [], outline: o, r0, r1 };
       if (n.type === 'cog') {
-        const sh = cogShapeOf(n.params), teeth = (rr, fix) => Array.from(sh.ang, (a, j) => { const r = cogWarp(rr, sh.rad[j], fix, sh.tip); return [r * Math.cos(a), r * Math.sin(a)]; });
+        const sh = cogShapeOf(n.params, n.precision), teeth = (rr, fix) => Array.from(sh.ang, (a, j) => { const r = cogWarp(rr, sh.rad[j], fix, sh.tip); return [r * Math.cos(a), r * Math.sin(a)]; });
         S.marks.push(ring(sh.rp));
         if (sh.internal) { S.outer = ring(r1); S.inner = teeth(r0, r1); return S; }
         S.outer = teeth(r1, r0);
@@ -3391,7 +3396,7 @@
         if (cog) {
           for (const ch of cogHandles(n)) for (const phi of dirs) { const [x, y] = at(ch.r, phi); out.push({ key: it.id + '|c|' + ch.what + '|' + phi, id: it.id, kind: 'cog', what: ch.what, phi, P, x, y, col: ch.col, shape: 'diamond', tip: name + ': ' + ch.tip }); }
           // rounding of the first tooth's corners: drag across the corner
-          const shF = cogShapeOf(q);
+          const shF = cogShapeOf(q, n.precision);
           for (const [what, key, lab] of [['tip', 'tipRound', 'tip rounding'], ['root', 'rootRound', 'root rounding']]) {
             const c = shF.corners && shF.corners[what];
             if (!c) continue;
@@ -3399,7 +3404,7 @@
             out.push({ key: it.id + '|f|' + what, id: it.id, kind: 'fillet', what, pkeyName: key, c, P, x, y, col: '#f08c00', shape: 'dot', bevel: true,
               tip: name + ': ' + lab + ' ' + num(mm(r), 3) + ' ' + UNIT_LABEL + ' — drag into the corner to round it' });
           }
-          const sh = cogShapeOf(q), loc = (q.rotation || 0) * Math.PI / 180, R = Math.max(sh.ra, sh.rf) + pad, [x, y] = P.w(R * Math.cos(loc), R * Math.sin(loc));
+          const sh = cogShapeOf(q, n.precision), loc = (q.rotation || 0) * Math.PI / 180, R = Math.max(sh.ra, sh.rf) + pad, [x, y] = P.w(R * Math.cos(loc), R * Math.sin(loc));
           out.push({ key: it.id + '|rot', id: it.id, kind: 'rot', P, x, y, col, shape: 'ring', tip: name + ': turn the teeth (rotation ' + num((q.rotation || 0) * ANG_SCALE, 3) + ANG_LABEL + ')' });
         }
       }
@@ -3433,7 +3438,7 @@
         const i = +h.pkey.split('|')[2], np = n.pts.length, at = (j) => { const p = n.pts[(j + np) % np]; return P.w(p.z, h.m * p.y); };
         line([at(i - 1), at(i), at(i + 1)], false);
       } else if (h.kind === 'rot' || h.kind === 'fillet') {
-        const sh = cogShapeOf(n.params), o = outlineOf(n.pts, []), fix = cogFix(n.params, o), rr = cogIn(n.params) ? Math.min(...o.map(p => p.y)) : Math.max(...o.map(p => p.y));
+        const sh = cogShapeOf(n.params, n.precision), o = outlineOf(n.pts, []), fix = cogFix(n.params, o), rr = cogIn(n.params) ? Math.min(...o.map(p => p.y)) : Math.max(...o.map(p => p.y));
         line(Array.from(sh.ang, (a, j) => { const r = cogWarp(rr, sh.rad[j], fix, sh.tip); return P.w(r * Math.cos(a), r * Math.sin(a)); }), true);
       } else if (h.kind === 'clone') {
         for (const id of leavesUnder(sc, [h.id])) { const lp = lastPolys[1][id]; if (lp) out.push(sv('path', { d: lp.d, fill: col + '14', 'fill-rule': 'evenodd', stroke: col, 'stroke-width': 4, 'stroke-opacity': 0.4 })); }
@@ -3569,7 +3574,7 @@
           'stroke-dasharray': role === 'negative' ? '6 3' : 'none', 'stroke-linejoin': 'round' }));
         if (n.type === 'cog') {
           // the range the section moves through as the view turns: root (min) and tip (max)
-          const sh = cogShapeOf(n.params), fix = cogFix(n.params, local), lo = Math.min(sh.rf, sh.ra), hi = Math.max(sh.rf, sh.ra);
+          const sh = cogShapeOf(n.params, n.precision), fix = cogFix(n.params, local), lo = Math.min(sh.rf, sh.ra), hi = Math.max(sh.rf, sh.ra);
           for (const [R, st, dash] of [[lo, '#0c8599', 'none'], [hi, '#c2255c', '6 4'], [sh.rp, '#868e96', '2 3']])
             g.append(sv('path', { d: pathOf(local.map(p => xf.fwd({ y: cogWarp(p.y, R, fix, sh.tip), z: p.z }))), fill: 'none', stroke: st, 'stroke-width': 1.2, 'stroke-dasharray': dash, 'pointer-events': 'none' }));
         }
@@ -4818,7 +4823,7 @@
         ['Bevel radius' + U, len('bevel', { min: 0 })],
         ['Bevel edges', numInput(() => q.bevelSegs, v => setP(t => { t.bevelSegs = Math.max(1, Math.min(64, Math.round(v))); }), { step: '1', min: 1, max: 64, digits: 0 })],
         ['Bevel shape', selectInput(q.bevelOut ? 'convex' : 'concave', [['convex', 'convex (rounded)'], ['concave', 'concave (cove)']], v => setP(t => { t.bevelOut = v === 'convex'; }))])),
-        ng || cg ? null : sect('Detail', pgrid(2, precisionField())));
+        ng ? null : sect('Detail', pgrid(2, precisionField())));
       return box;
     }
 
