@@ -2,7 +2,7 @@
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.17.2';
+  const APP_VERSION = '3.18.0';
   // switching between radius/height and overhead: radius/height tips about the height the overhead view looks down
   // from, overhead about its own x axis
   // (set false to go back to both views tipping about the middle of the pane)
@@ -3084,6 +3084,8 @@
         for (const d of T.dirs) if (!dirs.some(x => sameDir(x, d))) dirs.push(d);
         for (const d of dirs) lines.push({ p: T, d });
       }
+      // the heights the view from above shows (the band's lines)
+      { const bz = bandZs(); if (bz) for (const z of bz) lines.push({ p: { y: 0, z }, d: [1, 0] }); }
       // the grid: the nearest vertical and horizontal grid lines (heights measured from the lowest point)
       {
         const st = gridStep(), base = info.base || 0;
@@ -3563,11 +3565,21 @@
       return isFinite(z0) ? (z0 + z1) / 2 : 0;
     }
     // the other view, lined up with this one
-    // radius/height → above: the middle of the view stays where it was along the section (radius), and the view from
-    // above is centred on the section line, where the middle of the radius/height view meets it.
+    // radius/height → above: the radius stays where it was, and the section line (the x axis from above) lands where the
+    // height the view from above looks down from (the top of its height band) was on the screen.
     // above → radius/height: back at the height the radius/height view had (or the part's middle height, if none yet).
     let sideCz = null;
-    const otherView = (v, toTop) => v && { cy: v.cy, cz: toTop ? 0 : sideCz != null ? sideCz : v.cz + FZ() * partZMid(), s: v.s, fit: v.fit };
+    // the height the view from above looks down from: the top of its band (flipped: what is on top)
+    function lookFromZ() {
+      const r = sceneZRange(), band = topBand(), up = state.flip ? 0 : 1;
+      return band ? (up ? band.hi : band.lo) : r ? r[up] : partZMid();
+    }
+    // the band's two heights (all of it when it is not narrowed), or null
+    function bandZs() {
+      const b = topBand(); if (b) return [b.lo, b.hi];
+      const r = sceneZRange(); return r ? [r[0], r[1]] : null;
+    }
+    const otherView = (v, toTop) => v && { cy: v.cy, cz: toTop ? v.cz - FZ() * lookFromZ() : sideCz != null ? sideCz : v.cz + FZ() * partZMid(), s: v.s, fit: v.fit };
     function setSecMode(m) {
       if (topMode() === (m === 'top')) return;
       const toTop = m === 'top';
@@ -3592,8 +3604,7 @@
         // (false: both views turn about the middle of the pane, as before.)
         let pSide = pv, pTop = pv;
         if (TIP_FROM_CUT) {
-          const sideV = toTop ? before : view, topV = toTop ? view : before, r = sceneZRange(), band = topBand(), up = state.flip ? 0 : 1;
-          const zTop = band ? (up ? band.hi : band.lo) : r ? r[up] : null, H = size().h;
+          const sideV = toTop ? before : view, topV = toTop ? view : before, zTop = lookFromZ(), H = size().h;
           if (sideV && zTop != null) pSide = '50% ' + (H / 2 - (FZ() * zTop - sideV.cz) * sideV.s).toFixed(1) + 'px';
           if (topV) pTop = '50% ' + (H / 2 + topV.cz * topV.s).toFixed(1) + 'px';
         }
@@ -4135,15 +4146,22 @@
       drawWrap();
       grid(g, sceneBase);
       // the heights the view from above will show (set with the slider at the right): guides only, nothing is cut
-      const bandS = topBand();
-      if (bandS) {
-        const { w: wS } = size();
-        for (const z of [bandS.lo, bandS.hi]) {
-          const yS = toScreen(0, z)[1];
-          g.append(sv('line', { x1: AX_L, y1: yS, x2: wS, y2: yS, stroke: '#12b886', 'stroke-width': 1, 'stroke-dasharray': '8 4', opacity: 0.8, 'pointer-events': 'none' }));
+      // (drag a line to move it; Ctrl snaps it to points; dragged points snap to the lines with Ctrl)
+      const bandS = topBand(), bz = bandZs();
+      if (bz) {
+        const { w: wS } = size(), hot = drag && drag.type === 'bandline';
+        if (bandS) {
+          const [y0S, y1S] = [toScreen(0, bz[0])[1], toScreen(0, bz[1])[1]].sort((a, b) => a - b);
+          g.append(sv('rect', { x: AX_L, y: y0S, width: Math.max(0, wS - AX_L), height: y1S - y0S, fill: '#12b886', opacity: 0.04, 'pointer-events': 'none' }));
         }
-        const [y0S, y1S] = [toScreen(0, bandS.lo)[1], toScreen(0, bandS.hi)[1]].sort((a, b) => a - b);
-        g.append(sv('rect', { x: AX_L, y: y0S, width: Math.max(0, wS - AX_L), height: y1S - y0S, fill: '#12b886', opacity: 0.04, 'pointer-events': 'none' }));
+        bz.forEach((z, i) => {
+          const yS = toScreen(0, z)[1], which = i ? 'hi' : 'lo', on = hot && drag.which === which;
+          g.append(sv('line', { x1: AX_L, y1: yS, x2: wS, y2: yS, stroke: '#12b886', 'stroke-width': on ? 2 : 1, 'stroke-dasharray': '8 4', opacity: bandS || on ? 0.85 : 0.35, 'pointer-events': 'none' }));
+          const grab = sv('line', { x1: AX_L, y1: yS, x2: wS, y2: yS, stroke: 'transparent', 'stroke-width': 9, style: 'cursor:ns-resize' });
+          grab.__bandLine = which;
+          grab.append(sv('title', null, (which === 'hi' ? 'Top' : 'Bottom') + ' of the heights the view from above shows: drag to move (Ctrl snaps to points; double-click to clear)'));
+          g.append(grab);
+        });
       }
       // selected objects are drawn last (on top), so their points and edges can be picked over others
       const order = frontOrder(), ext = { y0: Infinity, y1: -Infinity, z0: Infinity, z1: -Infinity };
@@ -4815,6 +4833,16 @@
         drag = { type: 'topclick', hit, add };
         return;
       }
+      if (e.target.__bandLine && e.button === 0) {
+        const w = e.target.__bandLine, now = performance.now();
+        if (lastBandDown.w === w && now - lastBandDown.t < 400) {       // double-click: the whole height that way
+          lastBandDown = { w: null, t: 0 };
+          const c = state.topCut || { lo: 0, hi: 1 }; setTopCut(w === 'lo' ? 0 : c.lo, w === 'hi' ? 1 : c.hi); saveSettings(); return;
+        }
+        lastBandDown = { w, t: now };
+        svg.setPointerCapture(e.pointerId);
+        drag = { type: 'bandline', which: w }; return;
+      }
       const [sx, sy] = local(e), raw = toWorld(sx, sy), side = e.target.__side || (raw[0] < 0 ? -1 : 1);
       MS = dragSide = side;
       const wy = side * raw[0], wz = raw[1];
@@ -4935,6 +4963,20 @@
         return;
       }
       if (drag.type === 'pan') { view.cy = drag.cy - (sx - drag.sx) / view.s; view.cz = drag.cz + (sy - drag.sy) / view.s; drawSection(); return; }
+      if (drag.type === 'bandline') {
+        const r = sceneZRange(); if (!r) return;
+        let z = wz;
+        if (e.ctrlKey || e.metaKey) {      // onto the height of a point
+          let best = null;
+          for (const id of leafOrder(state.scene)) for (const hd of handlesOf(id)) { const dd = Math.abs(hd.z - z); if (dd < snapThr() && (!best || dd < best.d)) best = { z: hd.z, d: dd }; }
+          if (best) z = best.z;
+        }
+        const t = (z - r[0]) / (r[1] - r[0]), c = state.topCut || { lo: 0, hi: 1 };
+        tbDrag = { which: drag.which };
+        if (drag.which === 'hi') setTopCut(c.lo, t); else setTopCut(t, c.hi);
+        tbDrag = null;
+        return;
+      }
       if (drag.type === 'box') { drag.cx = sx; drag.cy = sy; drag.moved = drag.moved || Math.hypot(sx - drag.sx, sy - drag.sy) > 3; drawSection(); return; }
       if (drag.type === 'bevel') {
         if (!drag.moved) { pushSnap(drag.snap); drag.moved = true; }
@@ -4997,6 +5039,7 @@
       if (!drag) return;
       const d = drag; drag = null;
       if (d.type === 'pan') return;
+      if (d.type === 'bandline') { saveSettings(); drawSection(); return; }
       if (d.type === 'angle' && d.moved) { svg.style.cursor = ''; drawSection(); return; }
       if (d.type === 'toph') { if (d.moved) recalc(); else renderAll(); return; }   // (points stay selected, for the right-click menu)
       if (d.type === 'topclick' || d.type === 'angle') {      // (a click on the section line selects what is under it)
@@ -5036,6 +5079,7 @@
       if (d.type === 'nodes' && !d.moved && d.add) state.selNodes.delete(d.hit);
       if (d.moved) recalc(); else renderAll();
     };
+    let lastBandDown = { w: null, t: 0 };
     svg.addEventListener('pointerup', endDrag);
     svg.addEventListener('pointercancel', endDrag);
     svg.addEventListener('pointerleave', () => { cursorW = null; if (hoverTopH) { hoverTopH = null; drawHover(); } if ((hoverEdge || hoverNode) && !drag) { hoverEdge = null; hoverNode = null; drawHover(); } drawCursor(); });
@@ -5066,7 +5110,7 @@
       };
       requestAnimationFrame(step);
     }
-    svg.addEventListener('dblclick', (e) => { if (!e.target.__key) { fit(); drawSection(); } });
+    svg.addEventListener('dblclick', (e) => { if (!e.target.__key && !e.target.__bandLine && performance.now() - lastBandDown.t > 600) { fit(); drawSection(); } });
 
     // ---- context menus ----
     function hideMenu() { menu.style.display = 'none'; if (previewMarks.length) { previewMarks = []; drawSection(); } }
