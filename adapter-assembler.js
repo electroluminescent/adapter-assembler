@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.21.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.22.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.21.1';
+  const APP_VERSION = '3.22.0';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -45,6 +45,7 @@
     mono: false,           // cross-section: everything not selected as one grey shape
     autoSimplify: true,
     heightFrom: 'bottom',  // heights shown from the lowest point up ('bottom') or from the top down ('top'), as the part is shown
+    linkSlicers: false,    // the 2D height band is the 3D height slicer, and the 2D cross-section is cut where the blue slicer is
     linkViews: true,       // radius/height and overhead line up with each other when switching (off: each keeps its own view)
     settingsRev: 0,        // which one-time changes to saved settings have been made
     treeFolded: [],        // objects list: groups / booleans / cloners shown folded   // ... and automatically at 50 % zoom or less
@@ -72,7 +73,7 @@
 
 
   // Settings remembered in this browser.
-  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'quality', 'collapsed', 'secMode', 'mono', 'autoSimplify', 'heightFrom', 'linkViews', 'settingsRev', 'treeFolded', 'cutsLo', 'cutHandles', 'topCut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts', 'cutLo'];
+  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'quality', 'collapsed', 'secMode', 'mono', 'autoSimplify', 'heightFrom', 'linkViews', 'linkSlicers', 'settingsRev', 'treeFolded', 'cutsLo', 'cutHandles', 'topCut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts', 'cutLo'];
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     for (const k of SAVED_SETTINGS) if (k in saved && typeof saved[k] === typeof state[k]) state[k] = saved[k];
@@ -2491,6 +2492,7 @@
         selectRow('Quality', state.quality, [['high', 'high'], ['low', 'low (no animations, less detail)']], v => setUnit('quality', v))),
       checkRow('Invert y axis', () => state.flip, v => set('flip', v)),
       el('div', null, selectRow('Heights', state.heightFrom, [['bottom', 'bottom up (0 at the lowest point)'], ['top', 'top down (0 at the top)']], v => { state.heightFrom = v; saveSettings(); renderAll(); })),
+      checkRow('Linked slicers (the 2D height band and the 3D height slicer are one; the 2D cross-section is cut where the blue slicer is)', () => !!state.linkSlicers, v => setLinkSlicers(v)),
       checkRow('Linked cross-section views (radius/height and overhead line up when switching; height band set in both)', () => state.linkViews !== false, v => { state.linkViews = v; saveSettings(); renderAll(); }),
       checkRow('Auto-simplify (cross-section drawn monomorphic at 50% zoom or less)', () => !!state.autoSimplify, v => { state.autoSimplify = v; saveSettings(); renderAll(); }),
       el('div', null,
@@ -2531,6 +2533,12 @@
   // object id, start over.
   let sceneSwaps = 0;
   function sceneReplaced() { sceneSwaps++; if ((state.treeFolded || []).length) { state.treeFolded = []; saveSettings(); } }
+  function setLinkSlicers(v) {
+    if (!!state.linkSlicers === !!v) return;
+    state.linkSlicers = !!v; saveSettings();
+    if (editor && editor.slicersLinked) editor.slicersLinked();
+    renderAll();
+  }
   // turning the part over: the views turn with it, keeping the same part of it in the middle
   function setFlip(v) {
     if (!!state.flip === !!v) return;
@@ -2614,7 +2622,9 @@
     const setTopCut = (lo, hi) => {
       lo = Math.max(0, Math.min(1, lo)); hi = Math.max(0, Math.min(1, hi));
       if (hi < lo + 0.005) { if (tbDrag && tbDrag.which === 'lo') lo = hi - 0.005; else hi = lo + 0.005; }
-      state.topCut = { lo: Math.max(0, lo), hi: Math.min(1, hi) }; drawSection();
+      state.topCut = { lo: Math.max(0, lo), hi: Math.min(1, hi) };
+      if (state.linkSlicers) { cutsFromBand(); draw3d(); }
+      drawSection();
     };
     const tbF = (t) => (state.flip ? 1 - t : t);     // height in the scene's range ↔ place up the slider
     // Ctrl: a height of the band goes to the nearest point's height, when one is within reach
@@ -2673,9 +2683,12 @@
     const flipBox = el('input', { type: 'checkbox' }); flipBox.checked = !!state.flip;
     const orthoBox = el('input', { type: 'checkbox' }); orthoBox.checked = !!state.ortho;
     const cutHBox = el('input', { type: 'checkbox' }); cutHBox.checked = !!state.cutHandles;
+    const linkSBox = el('input', { type: 'checkbox' }); linkSBox.checked = !!state.linkSlicers;
+    linkSBox.addEventListener('change', () => setLinkSlicers(linkSBox.checked));
     const toggles3d = el('div', { style: 'position:absolute;left:8px;top:6px;font-size:11px;color:#ddd;display:flex;gap:10px;flex-wrap:wrap;right:90px' },
       el('label', { title: 'Cut planes: relative to the view or fixed to the part' }, 'cuts ', cutModeSel), cutReset,
       el('label', { style: 'cursor:pointer', title: 'Slicing handles on the model: two on each axis, the same cuts as the sliders' }, cutHBox, ' slicers on model'),
+      el('label', { style: 'cursor:pointer', title: 'The height (green) slicer is the 2D height band, and the 2D cross-section is cut where the blue slicer is instead of through the axis' }, linkSBox, ' linked slicers'),
       el('label', { style: 'cursor:pointer' }, wireBox, ' wireframe'),
       el('label', { style: 'cursor:pointer', title: 'Ambient occlusion: darkens creases and corners' }, ssaoBox, ' SSAO'),
       el('label', { style: 'cursor:pointer', title: 'Orthographic view (no perspective): parallel lines stay parallel' }, orthoBox, ' orthographic'),
@@ -2953,6 +2966,11 @@
     const SZ = { w: 800, h: 600 };
     const measure = () => { SZ.w = left.clientWidth || 800; SZ.h = left.clientHeight || 600; };
     const size = () => SZ;
+    // The 3D view looks square at the cross-section's plane: its turn for a section angle, and back. The model is
+    // turned over about its own x axis when the y axis is inverted, which mirrors its angles, so the turn mirrors too
+    // (the same section then faces the viewer either way).
+    function yawOf(deg) { return (state.flip ? -deg - 90 : deg - 90) * Math.PI / 180; }
+    function degOf(yw) { const a = yw * 180 / Math.PI; return state.flip ? -a - 90 : a + 90; }
     function fit() {
       if (topMode()) { fitTop(); return; }
       let y0 = Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
@@ -3225,7 +3243,7 @@
     }
     function gridIn(g, base, top) {
       const { w, h } = size();
-      const [ya, zA] = toWorld(0, h), [yb, zB] = toWorld(w, 0), za = Math.min(zA, zB), zb = Math.max(zA, zB);
+      const [ya, zA] = toWorld(0, h), [yb, zB] = toWorld(w, 0), za = Math.min(zA, zB), zb = Math.max(zA, zB), offS = !top && sliceOff();
       const pxu = view.s / UNIT_SCALE; let i = GRID_STEPS.findIndex(s => s * pxu >= 55); if (i < 0) i = GRID_STEPS.length - 1;
       const main = GRID_STEPS[i] / UNIT_SCALE, fine = i > 0 ? GRID_STEPS[i - 1] / UNIT_SCALE : main, finePx = i > 0 ? fine * view.s : 0;
       const clamp01 = (x) => Math.max(0, Math.min(1, x));
@@ -3273,7 +3291,7 @@
           g.append(sv('line', { x1: x, y1: h - AX_B, x2: x, y2: h - AX_B + (st === main ? 4 : 3), stroke: '#adb5bd', 'stroke-opacity': aL }));
           if (aT > 0.01) {        // (from above too: the section line is level, so this is still the radius along it)
             lab(x, h - 4, num(mm(Math.abs(y)), 3) + ' ' + UNIT_LABEL, { anchor: 'middle', op: aT });                 // radius (positive on both sides)
-            lab(x, h - 17, 'Ø' + num(mm(2 * Math.abs(y)), 3) + ' ' + UNIT_LABEL, { anchor: 'middle', fill: '#adb5bd', op: aT });  // diameter
+            if (!offS) lab(x, h - 17, 'Ø' + num(mm(2 * Math.abs(y)), 3) + ' ' + UNIT_LABEL, { anchor: 'middle', fill: '#adb5bd', op: aT });  // diameter (not at a slice off the axis)
           }
         }
         for (let zr = Math.ceil((za - base) / st) * st; zr <= zb - base; zr += st) {
@@ -3284,7 +3302,7 @@
           if (aT > 0.01) lab(AX_L - 6, y + 3, num((top ? Math.abs(zr) : HS() * zr) * UNIT_SCALE, 3) + ' ' + UNIT_LABEL, { anchor: 'end', op: aT });
         }
       }
-      const t1 = sv('text', { x: AX_L + 4, y: h - AX_B - 4, 'font-size': 10, fill: '#adb5bd' }); t1.textContent = 'x: radius / Ø →'; g.append(t1);
+      const t1 = sv('text', { x: AX_L + 4, y: h - AX_B - 4, 'font-size': 10, fill: '#adb5bd' }); t1.textContent = offS ? 'x: along the slice →' : 'x: radius / Ø →'; g.append(t1);
       const t2 = sv('text', { x: 4, y: 12, 'font-size': 10, fill: '#adb5bd' }); t2.textContent = top ? 'distance' : state.heightFrom === 'top' ? 'y: depth from the top ↓' : 'y: height ↑'; g.append(t2);
     }
     // Ticks on both axes for the mouse position, or for the point being dragged.
@@ -3348,19 +3366,20 @@
 
     // The finished part (after every union, subtraction and intersection) cut by the section's plane: closed loops of
     // (signed radius, height) in scene units, the left half at negative radius. From the 3D model, so it is exact;
-    // null until there is one. Cached per model and angle.
+    // null until there is one. Cached per model, angle and distance. (off: the plane's distance from the axis along
+    // its normal, for the linked slicers; the first number of a loop's points is then the place along the plane.)
     let meshSecCache = null;
-    function meshSection(theta) {
+    function meshSection(theta, off = 0) {
       const t = meshTris;
       if (!t || !t.length) return null;
-      if (meshSecCache && meshSecCache.t === t && meshSecCache.theta === theta) return meshSecCache.loops;
+      if (meshSecCache && meshSecCache.t === t && meshSecCache.theta === theta && meshSecCache.off === off) return meshSecCache.loops;
       const c = Math.cos(theta), s = Math.sin(theta), fy = meshFlip ? -1 : 1, segs = [], sh = meshShift || [0, 0, 0];
       // a mesh point (mm, centred, stood on Z = 0, turned over when flipped) → back where the scene has it → across the plane, along it, height
       const P = (o) => { const x = t[o] / MM + sh[0], y = (t[o + 1] / MM + sh[1]) * fy, z = (t[o + 2] / MM + sh[2]) * fy; return [(-x * s + y * c), (x * c + y * s), z]; };
       for (let o = 0; o + 17 < t.length; o += 18) {
         const A = P(o), B = P(o + 6), C = P(o + 12), pts = [];
         for (const [p, q] of [[A, B], [B, C], [C, A]]) {
-          if ((p[0] < 0) !== (q[0] < 0)) { const k = p[0] / (p[0] - q[0]); pts.push([p[1] + (q[1] - p[1]) * k, p[2] + (q[2] - p[2]) * k]); }
+          if ((p[0] < off) !== (q[0] < off)) { const k = (p[0] - off) / (p[0] - q[0]); pts.push([p[1] + (q[1] - p[1]) * k, p[2] + (q[2] - p[2]) * k]); }
         }
         if (pts.length === 2) segs.push(pts);
       }
@@ -3379,7 +3398,7 @@
         }
         if (loop.length > 2) loops.push(loop);
       }
-      meshSecCache = { t, theta, loops };
+      meshSecCache = { t, theta, off, loops };
       return loops;
     }
 
@@ -3492,8 +3511,25 @@
       }
       return (past & 1) === 1;
     }
+    // Is any of the part over this place within the heights lo…hi (not counting what only touches them)?
+    function inBand(ix, x, y, lo, hi) {
+      x += ix.DX; y += ix.DY;
+      const { F, start, items } = ix, c = ix.cy(y) * ix.G + ix.cx(x), a = lo + ix.eps, b = hi - ix.eps;
+      let above = 0;
+      for (let k = start[c], e = start[c + 1]; k < e; k++) {
+        const o = items[k] * 9, px = x - F[o], py = y - F[o + 1], u = F[o + 3] * px + F[o + 4] * py;
+        if (u < 0) continue;
+        const v = F[o + 5] * px + F[o + 6] * py;
+        if (v < 0 || u + v > 1) continue;
+        const zf = F[o + 2] + F[o + 7] * u + F[o + 8] * v;
+        if (zf > a && zf < b) return true;          // a surface inside the band: material next to it
+        if (zf > a) above++;
+      }
+      return (above & 1) === 1;                      // inside the part all the way through the band
+    }
     // the pieces of these segments ([ax, ay, az, bx, by, bz] …) that can be seen, as a path (x y pairs in scene units)
-    function visiblePath(ix, segs, lid, dir, f) {
+    function visiblePath(ix, segs, lid, dir, f, lo, hi) {
+      const banded = isFinite(lo) || isFinite(hi);
       let out = '';
       for (let k = 0; k < segs.length; k += 6) {
         const ax = segs[k], ay = segs[k + 1], az = segs[k + 2], bx = segs[k + 3], by = segs[k + 4], bz = segs[k + 5];
@@ -3503,7 +3539,9 @@
         let from = -1;
         for (let i = 0; i <= n; i++) {
           const mx = ax + (bx - ax) * (i + 0.5) / n, my = ay + (by - ay) * (i + 0.5) / n, mz = az + (bz - az) * (i + 0.5) / n;
-          const vis = i < n && !(covered(ix, mx + ox, my + oy, mz, lid, dir) && covered(ix, mx - ox, my - oy, mz, lid, dir));
+          // (with a band of heights: not the outline of something the band holds none of, lying just at its edge)
+          const vis = i < n && !(covered(ix, mx + ox, my + oy, mz, lid, dir) && covered(ix, mx - ox, my - oy, mz, lid, dir)) &&
+            (!banded || inBand(ix, mx + ox, my + oy, lo, hi) || inBand(ix, mx - ox, my - oy, lo, hi));
           if (vis && from < 0) from = i;
           if (!vis && from >= 0) { out += 'M' + f(ax + (bx - ax) * from / n) + ' ' + f(ay + (by - ay) * from / n) + 'L' + f(ax + (bx - ax) * i / n) + ' ' + f(ay + (by - ay) * i / n); from = -1; }
         }
@@ -3603,9 +3641,10 @@
             if (az > hi && bz < hi || az < hi && bz > hi) { const [x, y] = cut(hi); if (az > hi) { ax = x; ay = y; az = hi; } else { bx = x; by = y; bz = hi; } }
             seg3.push(ax, ay, az, bx, by, bz);
           }
-          let ln = visiblePath(S.ix, seg3, lid, dir, f);
+          let ln = visiblePath(S.ix, seg3, lid, dir, f, lo, hi);
           // where the top of the band cuts through material: the cut's own edges (on top, so seen)
-          if (isFinite(lid)) { const sl = S.m.slice(lid); ln += sl.toPolygons().map(xy).filter(real).map(path).join(''); sl.delete(); }
+          // (taken just inside the band, so that something starting exactly at its top is not outlined)
+          if (isFinite(lid)) { const sl = S.m.slice(lid - S.ix.eps); ln += sl.toPolygons().map(xy).filter(real).map(path).join(''); sl.delete(); }
           res = { dd, ln };
         }
       } catch (e) { res = null; }
@@ -3872,6 +3911,16 @@
       knob.__secLine = true;
       const tip = sv('title'); tip.textContent = 'Section angle: drag to turn'; knob.append(tip); hit.append(tip.cloneNode(true));
       g.append(knob);
+      if (state.linkSlicers) {
+        // linked slicers: the radius/height view is cut along this line (where the blue slicer is); its handle slides it
+        const offT = sliceOff(), nx = -Math.sin(th), ny = Math.cos(th), cs = Math.cos(th), sn = Math.sin(th);
+        const at = (a) => toScreen(nx * offT + cs * a, ny * offT + sn * a), [lx0, ly0] = at(-far), [lx1, ly1] = at(far), [kx, ky] = at(-rh);
+        if (offT) g.append(sv('line', { x1: lx0, y1: ly0, x2: lx1, y2: ly1, stroke: '#1c7ed6', 'stroke-width': 1.5, 'pointer-events': 'none' }));
+        const sk = sv('rect', { x: (kx - 6).toFixed(1), y: (ky - 6).toFixed(1), width: 12, height: 12, rx: 2, fill: '#4dabf7', stroke: '#fff', 'stroke-width': 1.5, style: 'cursor:ns-resize' });
+        sk.__sliceKnob = true;
+        const st = sv('title'); st.textContent = 'Where the radius/height view is cut (the blue slicer): drag across to move it; it snaps to the axis (Alt: freely)'; sk.append(st);
+        g.append(sk);
+      }
       label(g, hx + 10, hy - 8, ['section ' + num(state.viewAngle * ANG_SCALE, ANG_SCALE === 1 ? 1 : 4) + ANG_LABEL]);
       // handles: drag them to edit from above
       for (const hd of topHandles()) {
@@ -4242,6 +4291,27 @@
           g.append(grab);
         });
       }
+      // Linked slicers with the blue one off the axis: the plane no longer holds the objects' outlines (those are
+      // their shapes through the axis), so what is drawn is the finished part's own section there, from the 3D model:
+      // threads, cogs, n-sided rings and subtractions are all as they really are at that place. To look at; the
+      // objects are edited at the axis.
+      const off = sliceOff();
+      if (off) {
+        const loops = meshSection(state.viewAngle * Math.PI / 180, off);
+        if (loops && loops.length) {
+          const dd = loops.map(L => 'M' + L.map(p => toScreen(p[0], p[1]).map(v => v.toFixed(1)).join(' ')).join('L') + 'Z').join('');
+          g.append(sv('path', { d: dd, fill: 'none', stroke: '#868e96', 'stroke-width': 2.4, 'stroke-linejoin': 'round', 'pointer-events': 'none' }));
+          g.append(sv('path', { d: dd, fill: '#dee2e6', 'fill-rule': 'evenodd', stroke: '#868e96', 'stroke-width': 1.2, 'stroke-linejoin': 'round', 'pointer-events': 'none' }));
+        }
+        const note = sv('text', { x: AX_L + 8, y: 64, 'font-size': 11, fill: '#1c7ed6', 'pointer-events': 'none' });
+        note.textContent = 'slice ' + num(mm(Math.abs(off)), 3) + ' ' + UNIT_LABEL + ' off the axis (blue slicer)' + (loops ? loops.length ? '' : ' — nothing of the part here' : ' — waiting for the 3D model');
+        g.append(note);
+        for (const [k, tb] of threadBoxes) { tb.box.remove(); threadBoxes.delete(k); }
+        drawCursor();
+        zoomTag.textContent = (view.fit || fitScale) > 0 ? Math.round(view.s / (view.fit || fitScale) * 100) + '%' : '';
+        renderSelBox();
+        MS = MS0; return;
+      }
       // selected objects are drawn last (on top), so their points and edges can be picked over others
       const order = frontOrder(), ext = { y0: Infinity, y1: -Infinity, z0: Infinity, z1: -Infinity };
       lastPolys = { 1: {}, '-1': {} };
@@ -4532,7 +4602,7 @@
     }
     let wrapKey = '', wrapTimer = 0;
     function drawWrap(settled) {
-      if (topMode()) {
+      if (topMode() || sliceOff()) {
         // nothing behind the view from above
         clearTimeout(wrapTimer);
         if (wrapKey !== 'top') { const c = wrapCanvas.getContext('2d'); c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, wrapCanvas.width, wrapCanvas.height); wrapCanvas.style.transform = ''; wrapKey = 'top'; }
@@ -4902,6 +4972,7 @@
         }
         svg.setPointerCapture(e.pointerId);
         if (e.button === 1 || e.button === 2) { drag = { type: 'pan', sx, sy, cy: view.cy, cz: view.cz }; return; }
+        if (e.target.__sliceKnob) { drag = { type: 'sliceline' }; return; }
         if (e.target.__topH) {
           const h = e.target.__topH, n = state.scene.nodes[h.id];
           drag = { type: 'toph', h, from: [X, Y], snap: clone(state.scene), moved: false, snapRot: n && n.params ? n.params.rotation || 0 : 0 };
@@ -4927,6 +4998,10 @@
         lastBandDown = { w, t: now };
         svg.setPointerCapture(e.pointerId);
         drag = { type: 'bandline', which: w }; return;
+      }
+      if (sliceOff()) {       // a slice off the axis is to look at: any drag moves the view
+        const [px0, py0] = local(e);
+        svg.setPointerCapture(e.pointerId); drag = { type: 'pan', sx: px0, sy: py0, cy: view.cy, cz: view.cz }; return;
       }
       const [sx, sy] = local(e), raw = toWorld(sx, sy), side = e.target.__side || (raw[0] < 0 ? -1 : 1);
       MS = dragSide = side;
@@ -5016,7 +5091,17 @@
           return;
         }
         if (drag.type === 'pan') { view.cy = drag.cy - (sx - drag.sx) / view.s; view.cz = drag.cz + (sy - drag.sy) / view.s; drawSection(); return; }
-        if (drag.type === 'toph') {
+        if (drag.type === 'sliceline') {
+          // the pointer's distance from the axis across the section line → the blue slicer's place
+          const f = cutFrame(); if (!f) return;
+          const thS = state.viewAngle * Math.PI / 180;
+          let dN = -Math.sin(thS) * X + Math.cos(thS) * Y;
+          if (Math.abs(dN) * view.s < 7 && !e.altKey) dN = 0;
+          const v = Math.max(LO_END.z + 0.002, Math.min(0.998, (state.flip ? 1 : -1) * dN * MM / f.ext.z));
+          setCut('z', Math.min(loOf('z'), v - 0.002), v, 'hi');
+          return;
+        }
+ {
           if (!drag.moved && Math.hypot(X - drag.from[0], Y - drag.from[1]) * view.s < 3) return;
           if (!drag.moved) { pushSnap(drag.snap); drag.moved = true; }
           dragTopHandle(X, Y, e.ctrlKey || e.metaKey, e.shiftKey);
@@ -5040,7 +5125,9 @@
       MS = side;
       const wy = side * raw[0], wz = raw[1];
       cursorW = { y: wy, z: wz, side };
-      coord.textContent = 'x: radius ' + fmt(wy, 3) + ' / Ø ' + fmt(2 * wy, 3) + ' · y: height ' + num(hDisp(wz, sceneBase), 3) + ' ' + UNIT_LABEL;
+      const offP = sliceOff();
+      coord.textContent = (offP ? 'x: ' + fmt(wy, 3) + ' along the slice · radius ' + fmt(Math.hypot(wy, offP), 3) : 'x: radius ' + fmt(wy, 3) + ' / Ø ' + fmt(2 * wy, 3)) + ' · y: height ' + num(hDisp(wz, sceneBase), 3) + ' ' + UNIT_LABEL;
+      if (!drag && offP) { drawCursor(); if (hoverEdge || hoverNode) { hoverEdge = null; hoverNode = null; svg.style.cursor = ''; } return; }
       if (!drag) {
         drawCursor();
         const he = e.target.__key ? null : edgeAt(sx, sy), hk = e.target.__key || he, hn = hk ? parseKey(hk).node : null;
@@ -5119,7 +5206,7 @@
       if (!drag) return;
       const d = drag; drag = null;
       if (d.type === 'pan') return;
-      if (d.type === 'bandline') { saveSettings(); drawSection(); return; }
+      if (d.type === 'bandline' || d.type === 'sliceline') { saveSettings(); drawSection(); return; }
       if (d.type === 'angle' && d.moved) { svg.style.cursor = ''; drawSection(); return; }
       if (d.type === 'toph') { if (d.moved) recalc(); else renderAll(); return; }   // (points stay selected, for the right-click menu)
       if (d.type === 'topclick' || d.type === 'angle') {      // (a click on the section line selects what is under it)
@@ -5708,7 +5795,7 @@
     // the normals and depth, blurred, (4) the shaded part with the occlusion applied, (5) the wireframe.
     const gl = canvas.getContext('webgl', { antialias: true, stencil: true });
     let gridProg = null, gridBuf = null, prog = null, gProg = null, aoProg = null, blurProg = null, copyProg = null, texProg = null, quadBuf = null, fb = null, bbox = null;
-    let triBuf = null, lineBuf = null, capBuf = null, triCount = 0, lineCount = 0, center = [0, 0, 0], radius = 1, yaw = (state.viewAngle - 90) * Math.PI / 180, pitchA = 0.5, dist = 3, shown = null, pan = [0, 0, 0];
+    let triBuf = null, lineBuf = null, capBuf = null, triCount = 0, lineCount = 0, center = [0, 0, 0], radius = 1, yaw = yawOf(state.viewAngle), pitchA = 0.5, dist = 3, shown = null, pan = [0, 0, 0];
     if (gl) {
       const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.warn('[adapter-assembler] shader', gl.getShaderInfoLog(s)); return s; };
       const program = (vs, fs) => { const p = gl.createProgram(); gl.attachShader(p, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(p); return p; };
@@ -5876,16 +5963,41 @@
     const CUT_AXES = [['x', [1, 0.42, 0.42], [1, 0.72, 0.72]], ['y', [0.42, 0.85, 0.45], [0.7, 0.92, 0.72]], ['z', [0.45, 0.6, 1], [0.7, 0.78, 1]]];
     function cutFrame() {
       if (!bbox) return null;
-      const { mn, mx } = bbox, O = [(mn[0] + mx[0]) / 2, (mn[1] + mx[1]) / 2, mn[2]];
+      // the origin is the part's axis at its base (the same origin as the 2D views; the middle of a part that is the
+      // same all round)
+      const { mn, mx } = bbox, ax = meshShift ? -meshShift[0] * MM : (mn[0] + mx[0]) / 2, ay = meshShift ? -meshShift[1] * MM : (mn[1] + mx[1]) / 2, O = [ax, ay, mn[2]];
       const rel = state.cutMode !== 'absolute';
       const X = rel ? [-Math.sin(yaw), Math.cos(yaw), 0] : [1, 0, 0], Z = rel ? [Math.cos(yaw), Math.sin(yaw), 0] : [0, 1, 0], Y = [0, 0, 1];
-      const half = Math.max(mx[0] - mn[0], mx[1] - mn[1]) / 2 * 1.15, H = (mx[2] - mn[2]) * 1.12;
+      const half = Math.max(mx[0] - ax, ax - mn[0], mx[1] - ay, ay - mn[1]) * 1.15, H = (mx[2] - mn[2]) * CUT_H;
       return { O, dirs: { x: X, y: Y, z: Z }, ext: { x: half, y: H, z: half }, lo: { x: -1, y: -0.05, z: -1 } };
     }
     // the lower slice on axis k (its low end = none); the old height-only setting is read into it once
     if (state.cutLo > 0 && (!state.cutsLo || !(state.cutsLo.y > -0.05))) state.cutsLo = { ...(state.cutsLo || {}), y: state.cutLo / 1.12 };
     state.cutLo = 0;
-    const LO_END = { x: -1, y: -0.05, z: -1 };
+    const LO_END = { x: -1, y: -0.05, z: -1 }, CUT_H = 1.12;     // (the height slicer reaches CUT_H × the part's height)
+    // ---- linked slicers ----
+    // The 3D height (green) slicer and the 2D height band are the same heights, each in its own measure: the 3D one
+    // up from the shown base in units of its reach, the band as fractions of the scene's height.
+    function bandFrom3d() {
+      const gLo = loOf('y') <= LO_END.y + 0.001 ? 0 : Math.max(0, Math.min(1, loOf('y') * CUT_H)), gHi = hiOf('y') >= 0.999 ? 1 : Math.max(0, Math.min(1, hiOf('y') * CUT_H));
+      let lo = state.flip ? 1 - gHi : gLo, hi = state.flip ? 1 - gLo : gHi;
+      if (hi < lo + 0.005) { if (lo + 0.005 <= 1) hi = lo + 0.005; else lo = hi - 0.005; }
+      state.topCut = { lo, hi };
+    }
+    function cutsFromBand() {
+      const c = state.topCut || { lo: 0, hi: 1 }, gLo = state.flip ? 1 - c.hi : c.lo, gHi = state.flip ? 1 - c.lo : c.hi;
+      state.cutsLo = { ...(state.cutsLo || {}), y: gLo <= 0.001 ? LO_END.y : gLo / CUT_H };
+      state.cuts = { ...state.cuts, y: gHi >= 0.999 ? 1 : gHi / CUT_H };
+    }
+    // The cross-section is cut where the blue slicer is: its distance from the axis along the section's normal, in
+    // scene units (0: through the axis, as when the slicers are not linked or the blue one cuts nothing).
+    function sliceOff() {
+      if (!state.linkSlicers) return 0;
+      const f = cutFrame(), v = hiOf('z');
+      if (!f || v >= 0.999) return 0;
+      const dd = (state.flip ? 1 : -1) * v * f.ext.z / MM;
+      return Math.abs(dd) < 1e-9 ? 0 : dd;
+    }
     const loOf = (k) => { const v = (state.cutsLo || {})[k]; return v == null || !isFinite(v) ? LO_END[k] : Math.max(LO_END[k], Math.min(1, v)); };
     const hiOf = (k) => { const v = (state.cuts || {})[k]; return v == null || !isFinite(v) ? 1 : v; };
     function cutPlanes() {
@@ -5914,6 +6026,7 @@
       state.cutsLo = { ...(state.cutsLo || {}), [k]: lo <= L + 0.001 ? L : lo };
       state.cuts = { ...state.cuts, [k]: hi >= 0.999 ? 1 : hi };
       draw3d();
+      if (state.linkSlicers && (k === 'y' || k === 'z')) { if (k === 'y') bandFrom3d(); drawSection(); }
     }
     const SLIDE_COL = { x: '#ff6b6b', y: '#51cf66', z: '#4dabf7' };
     const sliders = {};
@@ -6286,7 +6399,8 @@
         const d = i * S.aMajor, t = d * Math.PI / 180, rr = S.Ra - lw(11) - hgt * 0.6;
         const p = [cx + Math.cos(t) * rr, cy + Math.sin(t) * rr, gz];
         if (!onScreen(p, 20)) continue;
-        text(ANG_SCALE === 1 ? num(d) + '°' : num(+(d * ANG_SCALE).toFixed(3)), [p[0] - upA[0] * hgt * 0.5, p[1] - upA[1] * hgt * 0.5, p[2] - upA[2] * hgt * 0.5], right, upA, Math.abs(d % 90) < 1e-9 ? [0.97, 0.98, 1, 0.95] : COL);
+        const dv = state.flip ? (360 - d) % 360 : d;
+        text(ANG_SCALE === 1 ? num(dv) + '°' : num(+(dv * ANG_SCALE).toFixed(3)), [p[0] - upA[0] * hgt * 0.5, p[1] - upA[1] * hgt * 0.5, p[2] - upA[2] * hgt * 0.5], right, upA, Math.abs(d % 90) < 1e-9 ? [0.97, 0.98, 1, 0.95] : COL);
       }
       if (!v.length) return;
       if (!axisLblBuf) axisLblBuf = gl.createBuffer();
@@ -6582,7 +6696,7 @@
         const dead = canvas.clientWidth * 0.05, tx = e.clientX - orbit.x0;
         const ny = orbit.yaw0 - Math.sign(tx) * Math.max(0, Math.abs(tx) - dead) * 0.008;
         pitchA = Math.max(-1.5, Math.min(1.5, pitchA + dy * 0.008));
-        if (ny !== yaw) { setViewAngle(ny * 180 / Math.PI + 90, true); orbit.x = e.clientX; orbit.y = e.clientY; return; }
+        if (ny !== yaw) { setViewAngle(degOf(ny), true); orbit.x = e.clientX; orbit.y = e.clientY; return; }
       }
       orbit.x = e.clientX; orbit.y = e.clientY; draw3d();
     });
@@ -6595,7 +6709,7 @@
     });
     cutHBox.addEventListener('change', () => { state.cutHandles = cutHBox.checked; saveSettings(); draw3d(); });
     cutModeSel.addEventListener('change', () => { state.cutMode = cutModeSel.value; saveSettings(); draw3d(); });
-    cutReset.addEventListener('click', () => { state.cuts = { x: 1, y: 1, z: 0 }; state.cutsLo = { ...LO_END }; saveSettings(); draw3d(); });
+    cutReset.addEventListener('click', () => { state.cuts = { x: 1, y: 1, z: 0 }; state.cutsLo = { ...LO_END }; if (state.linkSlicers) { bandFrom3d(); drawSection(); } saveSettings(); draw3d(); });
     canvas.addEventListener('auxclick', (e) => { if (e.button === 1) e.preventDefault(); });
     canvas.addEventListener('wheel', (e) => {
       e.preventDefault();
@@ -6646,9 +6760,9 @@
     function setViewAngle(deg, keepYaw) {
       deg = Math.round(deg * 2) / 2;                 // half-degree steps
       state.viewAngle = ((deg % 360) + 360) % 360;
-      const want = (state.viewAngle - 90) * Math.PI / 180, before = yaw;
+      const want = yawOf(state.viewAngle), before = yaw;
       // keep yaw continuous (no jump of 2π while orbiting)
-      yaw = keepYaw ? (deg - 90) * Math.PI / 180 : want + Math.round((yaw - want) / (2 * Math.PI)) * 2 * Math.PI;
+      yaw = keepYaw ? yawOf(deg) : want + Math.round((yaw - want) / (2 * Math.PI)) * 2 * Math.PI;
       // turning is always about the part's axis: a panned view turns with it, so the axis stays put on screen
       const da = yaw - before, c = Math.cos(da), s = Math.sin(da);
       if (da) pan = [pan[0] * c - pan[1] * s, pan[0] * s + pan[1] * c, pan[2]];
@@ -6705,8 +6819,16 @@
     }
     let seenHeights = state.heightFrom;
     function destroy() { ro.disconnect(); roSide.disconnect(); window.removeEventListener('keydown', onKey, true); window.removeEventListener('keyup', onKeyUp, true); root.remove(); }
-    const flipped = () => { if (view) view.cz = -view.cz; for (const o of Object.values(ownViews)) if (o) o.cz = -o.cz; flipBox.checked = !!state.flip; drawSection(); };
-    return { root, render, destroy, showSplash, flipped };
+    const flipped = () => {
+      if (view) view.cz = -view.cz;
+      for (const o of Object.values(ownViews)) if (o) o.cz = -o.cz;
+      flipBox.checked = !!state.flip;
+      yaw = yawOf(state.viewAngle);                       // the same section stays toward the viewer
+      if (state.linkSlicers) cutsFromBand();              // the band keeps its heights; the 3D slicer counts from the other end
+      drawSection(); draw3d();
+    };
+    const slicersLinked = () => { linkSBox.checked = !!state.linkSlicers; if (state.linkSlicers) bandFrom3d(); drawSection(); draw3d(); };
+    return { root, render, destroy, showSplash, flipped, slicersLinked };
   }
 
   // ---- Boot: the editor fills the page; the last scene comes back, otherwise the start screen ----
