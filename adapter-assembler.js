@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.12.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.12.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.12.0';
+  const APP_VERSION = '3.12.1';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -473,9 +473,9 @@
   //     in inches. Points may carry a bevel: { trim: d } (a straight
   //     chamfer) or { r, segs, out } (round bevel of radius r, segs edges,
   //     out = bulging outward / rounded, otherwise a cove), or { r, segs,
-  //     shape: 'outA' | 'outB' } (a bead past the corner: a circle of radius r
-  //     touching the edge toward the previous point (A) or the next one (B) at
-  //     the corner, bulging out past the other edge and meeting it again).
+  //     shape: 'outA' | 'outB' } (a flare outside the corner: the edge toward
+  //     the next point (outA) or the previous one (outB) carried on straight
+  //     past the corner, and a cove of radius r joining it to the other edge).
   // ---------------------------------------------------------------------------
   // Tangent distance a bevel wants at corner P (how far it eats into each edge).
   function bevelReach(A, P, B, bv) {
@@ -486,7 +486,7 @@
     if (!(bv.r > 0)) return 0;
     const ang = Math.acos(Math.max(-1, Math.min(1, (ax * bx + az * bz) / (la * lb))));
     if (ang < 1e-3 || Math.PI - ang < 1e-3) return 0;
-    if (bv.shape === 'outA' || bv.shape === 'outB') return 2 * bv.r * Math.sin(ang);      // how far along the other edge it lands
+    if (bv.shape === 'outA' || bv.shape === 'outB') return bv.r / Math.tan((Math.PI - ang) / 2);   // how far along the edge its cove touches
     return bv.r / Math.tan(ang / 2);
   }
   function cornerPoints(A, P, B, bv, tFix) {
@@ -503,23 +503,24 @@
     const ang = Math.acos(Math.max(-1, Math.min(1, u1[0] * u2[0] + u1[1] * u2[1])));
     if (ang < 1e-3 || Math.PI - ang < 1e-3) return [{ y: P.y, z: P.z }];
     if (bv.shape === 'outA' || bv.shape === 'outB') {
-      // a bead: the circle touches edge ua at the corner (carrying it on past the corner), bulges out past the other
-      // edge ub, and comes back to meet it
-      const flip = bv.shape === 'outB', ua = flip ? u2 : u1, ub = flip ? u1 : u2, lB = flip ? la : lb;
-      let n = [-ua[1], ua[0]];
-      if (n[0] * ub[0] + n[1] * ub[1] < 0) n = [-n[0], -n[1]];
-      const sinA = n[0] * ub[0] + n[1] * ub[1];
-      if (sinA < 1e-3) return [{ y: P.y, z: P.z }];
-      const s = Math.min(tFix != null ? tFix : 2 * bv.r * sinA, lB * 0.9), r = s / (2 * sinA);
-      const C = [P.y + n[0] * r, P.z + n[1] * r], T = [P.y + ub[0] * s, P.z + ub[1] * s];
-      const a1 = Math.atan2(P.z - C[1], P.y - C[0]), a2 = Math.atan2(T[1] - C[1], T[0] - C[0]);
-      // round the way that carries edge ua on past the corner
-      const ccw = (P.y - C[0]) * -ua[1] - (P.z - C[1]) * -ua[0] > 0;
-      let da = a2 - a1;
-      if (ccw) { while (da <= 0) da += 2 * Math.PI; } else { while (da >= 0) da -= 2 * Math.PI; }
-      const segs = Math.max(4, Math.min(128, 2 * (bv.segs | 0 || 4)));
+      // a flare: one edge carried on straight past the corner, and a cove joining it to the other edge outside the part
+      // (outward A: edge B carried on, the cove touching edge A; outward B: the other way round)
+      const flip = bv.shape === 'outB', ua = flip ? u2 : u1, ub = flip ? u1 : u2, lA = flip ? lb : la;
+      const ext = [-ub[0], -ub[1]];                         // edge B, carried on past the corner
+      const open = Math.PI - ang, h2 = open / 2;            // the angle outside, between edge A and that extension
+      if (h2 < 1e-3) return [{ y: P.y, z: P.z }];
+      const t = Math.min(tFix != null ? tFix : bv.r / Math.tan(h2), lA * 0.9), r = t * Math.tan(h2);
+      const T1 = [P.y + ua[0] * t, P.z + ua[1] * t], T2 = [P.y + ext[0] * t, P.z + ext[1] * t];
+      const bx = ua[0] + ext[0], bz = ua[1] + ext[1], bl = Math.hypot(bx, bz), dd = r / Math.sin(h2);
+      const C = [P.y + bx / bl * dd, P.z + bz / bl * dd];
+      const a1 = Math.atan2(T1[1] - C[1], T1[0] - C[0]);
+      let da = Math.atan2(T2[1] - C[1], T2[0] - C[0]) - a1;
+      while (da > Math.PI) da -= 2 * Math.PI;
+      while (da < -Math.PI) da += 2 * Math.PI;
+      const segs = Math.max(1, Math.min(64, bv.segs | 0 || 1));
       let out = [];
       for (let i = 0; i <= segs; i++) { const a = a1 + da * i / segs; out.push({ y: C[0] + r * Math.cos(a), z: C[1] + r * Math.sin(a) }); }
+      out.push({ y: P.y, z: P.z });                         // back along the carried-on edge to the corner
       if (flip) out = out.reverse();
       for (const p of out) if (p.y < 0) p.y = 0;
       return out;
@@ -1562,7 +1563,7 @@
   function regenNode(n) { if (n.type === 'thread') regenThread(n); else { n.pts = tagPts(profileOf(n.type, n.params)); n.custom = false; } }
   const bevelKey = (b) => b && (b.r > 0 || b.trim > 0) ? [b.r || 0, b.trim || 0, b.segs || 0, !!b.out, b.shape || ''].join('|') : '';
   // a bevel's shape for the menus, and back
-  const BEVEL_SHAPES = [['convex', 'convex (rounded)'], ['concave', 'concave (cove)'], ['outA', 'outward A (bead, along the first edge)'], ['outB', 'outward B (bead, along the second edge)']];
+  const BEVEL_SHAPES = [['convex', 'convex (rounded)'], ['concave', 'concave (cove)'], ['outA', 'outward A (flare)'], ['outB', 'outward B (flare)']];
   const bevelShapeOf = (b) => b && b.shape ? b.shape : b && b.out === false ? 'concave' : 'convex';
   const bevelFromShape = (v) => v === 'outA' || v === 'outB' ? { out: true, shape: v } : { out: v === 'convex' };
   const RUN_POS = ['rFirst', 'rOther', 'zFirst', 'zLast'], RUN_KEYS = ['pitch', 'pitchDrawn', 'hand', 'flatA', 'flatB', 'kind'];
