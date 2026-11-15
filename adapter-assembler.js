@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.14.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.14.2. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.14.1';
+  const APP_VERSION = '3.14.2';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -2534,6 +2534,7 @@
     const bar = el('div', { style: 'padding:3px 8px;border-bottom:1px solid #ddd;display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-right:36px' },
       el('b', { style: 'font-size:14px' }, 'Adapter Assembler'),
       el('button', { type: 'button', style: BTN2, onclick: () => showSplash(), title: 'Blank project, open a project file, or build an adapter between two threads' }, 'New / open…'),
+      el('button', { type: 'button', style: BTN2, onclick: () => { if (state.scene && state.scene.root.length) saveScene(); }, title: 'Save everything in the scene to Saved models' }, 'Save scene'),
       el('span', { style: 'margin-left:auto;color:#868e96;font-size:11px', title: 'Adapter Assembler version' }, 'v' + APP_VERSION));
 
     // left: cross-section
