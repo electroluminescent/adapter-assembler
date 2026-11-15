@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.11.5. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.12.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.11.5';
+  const APP_VERSION = '3.12.0';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -472,7 +472,10 @@
   //     A "profile" is a closed polygon in the (radius y, axial z) half-plane,
   //     in inches. Points may carry a bevel: { trim: d } (a straight
   //     chamfer) or { r, segs, out } (round bevel of radius r, segs edges,
-  //     out = bulging outward / rounded, otherwise a cove).
+  //     out = bulging outward / rounded, otherwise a cove), or { r, segs,
+  //     shape: 'outA' | 'outB' } (a bead past the corner: a circle of radius r
+  //     touching the edge toward the previous point (A) or the next one (B) at
+  //     the corner, bulging out past the other edge and meeting it again).
   // ---------------------------------------------------------------------------
   // Tangent distance a bevel wants at corner P (how far it eats into each edge).
   function bevelReach(A, P, B, bv) {
@@ -483,6 +486,7 @@
     if (!(bv.r > 0)) return 0;
     const ang = Math.acos(Math.max(-1, Math.min(1, (ax * bx + az * bz) / (la * lb))));
     if (ang < 1e-3 || Math.PI - ang < 1e-3) return 0;
+    if (bv.shape === 'outA' || bv.shape === 'outB') return 2 * bv.r * Math.sin(ang);      // how far along the other edge it lands
     return bv.r / Math.tan(ang / 2);
   }
   function cornerPoints(A, P, B, bv, tFix) {
@@ -498,6 +502,28 @@
     if (!(bv.r > 0)) return [{ y: P.y, z: P.z }];
     const ang = Math.acos(Math.max(-1, Math.min(1, u1[0] * u2[0] + u1[1] * u2[1])));
     if (ang < 1e-3 || Math.PI - ang < 1e-3) return [{ y: P.y, z: P.z }];
+    if (bv.shape === 'outA' || bv.shape === 'outB') {
+      // a bead: the circle touches edge ua at the corner (carrying it on past the corner), bulges out past the other
+      // edge ub, and comes back to meet it
+      const flip = bv.shape === 'outB', ua = flip ? u2 : u1, ub = flip ? u1 : u2, lB = flip ? la : lb;
+      let n = [-ua[1], ua[0]];
+      if (n[0] * ub[0] + n[1] * ub[1] < 0) n = [-n[0], -n[1]];
+      const sinA = n[0] * ub[0] + n[1] * ub[1];
+      if (sinA < 1e-3) return [{ y: P.y, z: P.z }];
+      const s = Math.min(tFix != null ? tFix : 2 * bv.r * sinA, lB * 0.9), r = s / (2 * sinA);
+      const C = [P.y + n[0] * r, P.z + n[1] * r], T = [P.y + ub[0] * s, P.z + ub[1] * s];
+      const a1 = Math.atan2(P.z - C[1], P.y - C[0]), a2 = Math.atan2(T[1] - C[1], T[0] - C[0]);
+      // round the way that carries edge ua on past the corner
+      const ccw = (P.y - C[0]) * -ua[1] - (P.z - C[1]) * -ua[0] > 0;
+      let da = a2 - a1;
+      if (ccw) { while (da <= 0) da += 2 * Math.PI; } else { while (da >= 0) da -= 2 * Math.PI; }
+      const segs = Math.max(4, Math.min(128, 2 * (bv.segs | 0 || 4)));
+      let out = [];
+      for (let i = 0; i <= segs; i++) { const a = a1 + da * i / segs; out.push({ y: C[0] + r * Math.cos(a), z: C[1] + r * Math.sin(a) }); }
+      if (flip) out = out.reverse();
+      for (const p of out) if (p.y < 0) p.y = 0;
+      return out;
+    }
     const half = ang / 2;
     const t = tFix != null ? tFix : Math.min(bv.r / Math.tan(half), la * 0.45, lb * 0.45), r = t * Math.tan(half);
     const T1 = [P.y + u1[0] * t, P.z + u1[1] * t], T2 = [P.y + u2[0] * t, P.z + u2[1] * t];
@@ -689,7 +715,7 @@
   function paramProfile(p) {
     const z0 = p.z, z1 = p.z + p.h;
     const rib = p.rib, rit = p.linkIn ? p.rib : p.rit, rob = p.rob, rot = p.linkOut ? p.rob : p.rot;
-    const bv = p.bevel > 0 ? { r: p.bevel, segs: p.bevelSegs, out: p.bevelOut } : null;
+    const bv = p.bevel > 0 ? { r: p.bevel, segs: p.bevelSegs, out: p.bevelOut, ...(p.bevelShape ? { shape: p.bevelShape } : {}) } : null;
     return [{ y: rib, z: z0 }, { y: rob, z: z0 }, { y: rot, z: z1 }, { y: rit, z: z1 }]
       .map(q => ({ y: Math.max(0, q.y), z: q.z, bevel: bv && q.y > 1e-9 ? { ...bv } : null }));
   }
@@ -873,7 +899,10 @@
     // rounded corners (vertical bevels): at the teeth's tips and in their roots, worked on the outline seen from above
     const C = tooth.map(([a, r]) => [r * Math.cos(a), r * Math.sin(a)]);
     const corner = (c) => {
-      const V = C[c], P = C[c - 1], Q = C[c + 1], l1 = Math.hypot(V[0] - P[0], V[1] - P[1]) || 1, l2 = Math.hypot(Q[0] - V[0], Q[1] - V[1]) || 1;
+      // (a corner at an end of the outline, as when the teeth have no sides: the neighbours wrap round the tooth)
+      const nC = C.length, V = C[c], P = C[(c - 1 + nC) % nC], Q = C[(c + 1) % nC];
+      if (nC < 3 || !V || !P || !Q) return { V: V || [0, 0], d1: [1, 0], d2: [1, 0], phi: 0, u: [-1, 0], k: 1 };
+      const l1 = Math.hypot(V[0] - P[0], V[1] - P[1]) || 1, l2 = Math.hypot(Q[0] - V[0], Q[1] - V[1]) || 1;
       const d1 = [(V[0] - P[0]) / l1, (V[1] - P[1]) / l1], d2 = [(Q[0] - V[0]) / l2, (Q[1] - V[1]) / l2];
       const phi = Math.acos(Math.max(-1, Math.min(1, d1[0] * d2[0] + d1[1] * d2[1]))), bx = d2[0] - d1[0], by = d2[1] - d1[1], bl = Math.hypot(bx, by) || 1;
       // u: from the corner toward the rounding's middle; k: how far that is, per unit of radius
@@ -881,7 +910,8 @@
     };
     const info = { tip: corner(mark.tipL), root: corner(mark.rootL) };
     const tr = Math.max(0, q.tipRound || 0), rr0 = Math.max(0, q.rootRound || 0);
-    if (tr > 0 || rr0 > 0) {
+    const sharp = tooth.slice();
+    if ((tr > 0 || rr0 > 0) && mark.tipL - mark.rootL >= 1) try {
       // Round the leading side of the tooth, then mirror it, so both sides come out the same. Each rounding is a true
       // fillet: a circle touching the side of the tooth and the root (or tip) circle. When it is too big for half the
       // gap (or half the tip) it becomes the full round: centred on the gap's (or the tooth's) middle.
@@ -969,7 +999,8 @@
       const polar = lead.map((p) => [ang(p), nrm(p)]);
       for (const [a, r] of polar) push(a, r);
       for (let i = polar.length - 1; i >= 1; i--) if (polar[i][0] < -1e-12) push(-polar[i][0], polar[i][1]);   // not the middle twice, nor the gap's middle
-    }
+      if (tooth.length < 2) tooth = sharp;
+    } catch (_) { tooth = sharp; }       // an outline too odd to round stays sharp
     const rot = (q.rotation || 0) * Math.PI / 180, ang = new Float64Array(N * tooth.length), rad = new Float64Array(N * tooth.length);
     for (let k = 0, o = 0; k < N; k++) for (const [a, r] of tooth) { ang[o] = rot + 2 * half * k + a; rad[o] = r; o++; }
     const cr = Math.cos(rot), sr = Math.sin(rot), turn = (v) => [v[0] * cr - v[1] * sr, v[0] * sr + v[1] * cr];
@@ -1529,7 +1560,11 @@
   }
   function regenThread(n) { const t = threadProfile(n.params); n.pts = tagPts(t.pts); n.runs = t.runs.map(r => ({ ...r, label: n.name || 'Thread' })); n.custom = false; }
   function regenNode(n) { if (n.type === 'thread') regenThread(n); else { n.pts = tagPts(profileOf(n.type, n.params)); n.custom = false; } }
-  const bevelKey = (b) => b && (b.r > 0 || b.trim > 0) ? [b.r || 0, b.trim || 0, b.segs || 0, !!b.out].join('|') : '';
+  const bevelKey = (b) => b && (b.r > 0 || b.trim > 0) ? [b.r || 0, b.trim || 0, b.segs || 0, !!b.out, b.shape || ''].join('|') : '';
+  // a bevel's shape for the menus, and back
+  const BEVEL_SHAPES = [['convex', 'convex (rounded)'], ['concave', 'concave (cove)'], ['outA', 'outward A (bead, along the first edge)'], ['outB', 'outward B (bead, along the second edge)']];
+  const bevelShapeOf = (b) => b && b.shape ? b.shape : b && b.out === false ? 'concave' : 'convex';
+  const bevelFromShape = (v) => v === 'outA' || v === 'outB' ? { out: true, shape: v } : { out: v === 'convex' };
   const RUN_POS = ['rFirst', 'rOther', 'zFirst', 'zLast'], RUN_KEYS = ['pitch', 'pitchDrawn', 'hand', 'flatA', 'flatB', 'kind'];
   // Move the outline by exactly what the parameter change moves in the generated outline.
   function transferParams(n, oldQ, newQ) {
@@ -1606,7 +1641,7 @@
     if (P.some(p => p.y <= 1e-9 && bevelKey(p.bevel))) return null;
     const kinds = [...new Set(P.filter(p => p.y > 1e-9).map(p => bevelKey(p.bevel)))];
     if (kinds.length > 1) return null;
-    if (kinds[0]) { const b = P.find(p => p.y > 1e-9).bevel; if (b.trim) return null; f.bevel = b.r; f.bevelSegs = b.segs || f.bevelSegs; f.bevelOut = !!b.out; }
+    if (kinds[0]) { const b = P.find(p => p.y > 1e-9).bevel; if (b.trim) return null; f.bevel = b.r; f.bevelSegs = b.segs || f.bevelSegs; f.bevelOut = !!b.out; f.bevelShape = b.shape || null; }
     else f.bevel = 0;
     const g = profileOf(n.type, f);
     return g.every((p, i) => near(p.y, P[i].y) && near(p.z, P[i].z)) ? f : null;
@@ -4325,9 +4360,15 @@
         const half = Math.acos(Math.max(-1, Math.min(1, u1[0] * u2[0] + u1[1] * u2[1]))) / 2;
         // distance from the corner to the middle of the bevel, per unit of bevel size
         const sh = Math.sin(half), ch = Math.cos(half);
-        const k = bv.trim ? ch : (bv.segs | 0) <= 1 ? ch * ch / sh : bv.out ? 1 / sh - 1 : Math.cos(2 * half) / sh + 1;
+        let k = bv.trim ? ch : (bv.segs | 0) <= 1 ? ch * ch / sh : bv.out ? 1 / sh - 1 : Math.cos(2 * half) / sh + 1, bis = [(u1[0] + u2[0]) / bl, (u1[1] + u2[1]) / bl];
+        if (bv.shape === 'outA' || bv.shape === 'outB') {
+          // a bead reaches out past the corner: drag it outward; k from a small sample of the same shape
+          bis = [-bis[0], -bis[1]];
+          const rt = Math.min(la, lb) * 0.1, arc = cornerPoints(A, P, B, { r: rt, segs: 16, shape: bv.shape }, null);
+          k = Math.max(...arc.map(p => (p.y - P.y) * bis[0] + (p.z - P.z) * bis[1])) / rt;
+        }
         if (bl > 1e-9 && k > 1e-9) {
-          drag = { type: 'bevel', node: id, i, P: { y: P.y, z: P.z }, bis: [(u1[0] + u2[0]) / bl, (u1[1] + u2[1]) / bl], k, snap: clone(state.scene), moved: false };
+          drag = { type: 'bevel', node: id, i, P: { y: P.y, z: P.z }, bis, k, snap: clone(state.scene), moved: false };
           state.sel = new Set([id + '|p|' + i]); state.selNodes = new Set([id]);
           drawSection(); return;
         }
@@ -4592,7 +4633,7 @@
       const keys = [...state.sel], pts = pointKeys(keys).filter(k => parseKey(k).kind === 'p');
       const edges = keys.filter(k => parseKey(k).kind === 'e'), runs = keys.filter(k => parseKey(k).kind === 'r');
       const firstBevel = pts.map(k => { const h = parseKey(k); return state.scene.nodes[h.node].pts[h.i].bevel; }).find(b => b && b.r > 0);
-      const bv = { r: firstBevel ? firstBevel.r : 0, segs: firstBevel ? firstBevel.segs : 4, out: firstBevel ? firstBevel.out : true };
+      const bv = { r: firstBevel ? firstBevel.r : 0, segs: firstBevel ? firstBevel.segs : 4, out: firstBevel ? firstBevel.out : true, shape: firstBevel ? firstBevel.shape : null };
       menu.textContent = '';
       const what = [pts.length ? pts.length + ' point' + (pts.length === 1 ? '' : 's') : null, edges.length ? edges.length + ' edge' + (edges.length === 1 ? '' : 's') : null, runs.length ? runs.length + ' thread point' + (runs.length === 1 ? '' : 's') : null].filter(Boolean).join(', ');
       menu.append(el('div', { style: 'font-weight:700;margin-bottom:4px' }, what + ' selected'));
@@ -4615,7 +4656,7 @@
         // bevel: radius 0 = none; very small bevels merge away when the outline is optimized
         const rIn = el('input', { 'data-unit': 'len', type: 'number', step: '0.05', min: '0', value: num(mm(bv.r), 3), style: 'width:60px' });
         const sIn = el('input', { type: 'number', step: '1', min: '1', max: '64', value: String(bv.segs), style: 'width:46px' });
-        const oIn = selectInput(bv.out ? 'convex' : 'concave', [['convex', 'convex (rounded)'], ['concave', 'concave (cove)']], () => {});
+        const oIn = selectInput(bevelShapeOf(bv), BEVEL_SHAPES, () => {});
         menu.append(
           el('div', { style: 'margin:2px 0' }, 'Bevel radius (' + UNIT_LABEL + ', 0 = none) ', rIn),
           el('div', { style: 'margin:2px 0' }, 'edges ', sIn, ' shape ', oIn));
@@ -4624,7 +4665,7 @@
         const applyBevel = (live) => {
           const r = Math.max(0, parseFloat(rIn.value) || 0) / UNIT_SCALE, s = Math.max(1, Math.min(64, parseInt(sIn.value, 10) || 1));
           if (!bevelUndo) { pushUndo(); bevelUndo = true; }
-          setBevel(pts, r > 0 ? { r, segs: s, out: oIn.value === 'convex', pri: Date.now() } : null); markEdited();
+          setBevel(pts, r > 0 ? { r, segs: s, ...bevelFromShape(oIn.value), pri: Date.now() } : null); markEdited();
           state.liveInput = live; try { recalc(); } finally { state.liveInput = false; }
         };
         rIn.addEventListener('input', () => applyBevel(true)); sIn.addEventListener('input', () => applyBevel(true));
@@ -4915,7 +4956,7 @@
         sect('Bevel', pgrid(2,
         ['Bevel radius' + U, len('bevel', { min: 0 })],
         ['Bevel edges', numInput(() => q.bevelSegs, v => setP(t => { t.bevelSegs = Math.max(1, Math.min(64, Math.round(v))); }), { step: '1', min: 1, max: 64, digits: 0 })],
-        ['Bevel shape', selectInput(q.bevelOut ? 'convex' : 'concave', [['convex', 'convex (rounded)'], ['concave', 'concave (cove)']], v => setP(t => { t.bevelOut = v === 'convex'; }))])),
+        ['Bevel shape', selectInput(q.bevelShape || (q.bevelOut ? 'convex' : 'concave'), BEVEL_SHAPES, v => setP(t => { const b = bevelFromShape(v); t.bevelOut = b.out; t.bevelShape = b.shape || null; }), 'max-width:200px')])),
         ng ? null : sect('Detail', pgrid(2, precisionField())));
       return box;
     }
