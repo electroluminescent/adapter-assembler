@@ -25,14 +25,14 @@ A browser tool for designing threaded adapters, rings and gears as solids of rev
 - **Radius/height view**: both sides of the axis at an adjustable section angle, with the inside of the part shaded behind the section.
 - **Overhead view**: the part from above on a radial grid, with handles for points, radii, thread radii, n-sided corners, cog teeth (size, width, rotation, fillets) and cloner copies.
 - **Linked views**: switching between the two keeps the radius and zoom, and puts the overhead view's section line where its height band's top sat in the radius/height view. The views can also be unlinked, each keeping its own position and zoom.
-- **Height band**: the overhead view shows only a chosen range of heights. The range is set by a slider in either view or by dragging its lines in the radius/height view.
-- **Monomorphic drawing**: everything not selected is drawn as one grey shape taken from the finished solid, so unions, subtractions and intersections appear as they are built. From above it shows the solid's outline within the height band and only the edges visible from that side. It can switch on by itself at 50% zoom or less.
+- **Height band**: the overhead view shows only a chosen range of heights. The range is set by a slider in either view or by dragging its lines in the radius/height view, and its ends snap to point heights.
+- **Monomorphic drawing**: everything not selected is drawn as one grey shape taken from the finished solid, so unions, subtractions and intersections appear as they are built. From above it shows the solid's outline within the height band and only the edges visible from above. It can switch on by itself at 50% zoom or less.
 - **Snapping** to points, edge midpoints, edge directions, the grid, circles and the height band's lines, including objects drawn monomorphic.
 - **Selection transforms**: translate, scale and rotate about the selection's centre or the axis, plus arrow-key nudging, box selection, duplication and deletion.
 - **Number fields** accept units (mm, cm, m, µm, in, ft, degrees, turns and others) and equations such as `73.5in/2 + 5mm`, with `+ − × ÷ ^`, `pi`, `sqrt`, `abs`, `sin`, `cos`, `tan`, fractions and mixed numbers.
 - **Rulers and readouts**: radius and diameter along the bottom, heights up the side, the part's extents in bold, the pointer's coordinates, and the length and angle of selected edges.
 - **Heights** measured from the lowest point up or from the top down.
-- **Flip upside down** turns the 2D views, the 3D view and the exported file over together; handles, snapping, transforms and height zero follow the part as shown.
+- **Invert y axis** turns the part over in the 2D views, the 3D view and the exported file together; handles, snapping, transforms and height zero follow the part as shown.
 - **Objects list**: a tree with connector lines and foldable groups, drag-and-drop regrouping and copying, boolean A/B slots and in-place renaming.
 - **Undo and redo** for every edit.
 
@@ -40,7 +40,7 @@ A browser tool for designing threaded adapters, rings and gears as solids of rev
 
 - **Live preview** in perspective or orthographic projection, with ambient occlusion, an optional wireframe and highlighted problem edges.
 - **Ground grid** with distance rings, an angle scale and rulers.
-- **Slicing** on all three axes from both ends: six cut planes set by sliders or by handles on the model, turning with the view or fixed to the part. Cut faces are capped solid in their axis's colour, and the lines and points where cuts meet are outlined.
+- **Slicing** on all three axes from both ends: six cut planes set by sliders or by handles on the model, turning with the view or fixed to the part, each axis independent of the others, with handles snapping to the origin. Cut faces are capped solid in their axis's colour, and the lines and points where cuts meet are outlined.
 - **Orbit, pan and zoom**; turning the 3D view turns the cross-section's angle with it.
 
 ### Output and storage

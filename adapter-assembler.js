@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.21.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.21.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.21.0';
+  const APP_VERSION = '3.21.1';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -2489,7 +2489,7 @@
         selectRow('Lengths', state.lenUnit, [['mm', 'metric (mm)'], ['in', 'imperial (in)']], v => setUnit('lenUnit', v)),
         selectRow('Angles', state.angUnit, [['deg', 'degrees (°)'], ['rad', 'radians']], v => setUnit('angUnit', v)),
         selectRow('Quality', state.quality, [['high', 'high'], ['low', 'low (no animations, less detail)']], v => setUnit('quality', v))),
-      checkRow('Flip upside down', () => state.flip, v => set('flip', v)),
+      checkRow('Invert y axis', () => state.flip, v => set('flip', v)),
       el('div', null, selectRow('Heights', state.heightFrom, [['bottom', 'bottom up (0 at the lowest point)'], ['top', 'top down (0 at the top)']], v => { state.heightFrom = v; saveSettings(); renderAll(); })),
       checkRow('Linked cross-section views (radius/height and overhead line up when switching; height band set in both)', () => state.linkViews !== false, v => { state.linkViews = v; saveSettings(); renderAll(); }),
       checkRow('Auto-simplify (cross-section drawn monomorphic at 50% zoom or less)', () => !!state.autoSimplify, v => { state.autoSimplify = v; saveSettings(); renderAll(); }),
@@ -2617,6 +2617,18 @@
       state.topCut = { lo: Math.max(0, lo), hi: Math.min(1, hi) }; drawSection();
     };
     const tbF = (t) => (state.flip ? 1 - t : t);     // height in the scene's range ↔ place up the slider
+    // Ctrl: a height of the band goes to the nearest point's height, when one is within reach
+    function snapBandZ(z, reach) {
+      let best = null;
+      for (const id of leafOrder(state.scene)) for (const hd of handlesOf(id)) { const dd = Math.abs(hd.z - z); if (dd < reach && (!best || dd < best.d)) best = { z: hd.z, d: dd }; }
+      return best ? best.z : z;
+    }
+    const tbSnap = (e, t) => {
+      const r = sceneZRange();
+      if (!(e.ctrlKey || e.metaKey) || !r) return t;
+      const px = Math.max(1, topBox.getBoundingClientRect().height);
+      return (snapBandZ(r[0] + (r[1] - r[0]) * t, 8 / px * (r[1] - r[0])) - r[0]) / (r[1] - r[0]);
+    };
     const tbAt = (e) => { const r = topBox.getBoundingClientRect(); return tbF(Math.max(0, Math.min(1, 1 - (e.clientY - r.top) / Math.max(1, r.height)))); };
     for (const [k, which] of [[tbHi, 'hi'], [tbLo, 'lo'], [tbRange, 'both']]) {
       k.addEventListener('pointerdown', (e) => {
@@ -2627,7 +2639,7 @@
       });
       k.addEventListener('pointermove', (e) => {
         if (!tbDrag) return;
-        const t = tbAt(e), g0 = tbDrag;
+        const g0 = tbDrag, t = g0.which === 'both' ? tbAt(e) : tbSnap(e, tbAt(e));
         if (g0.which === 'hi') setTopCut(g0.lo, t); else if (g0.which === 'lo') setTopCut(t, g0.hi);
         else { const dt = Math.max(-g0.lo, Math.min(1 - g0.hi, t - g0.t0)); setTopCut(g0.lo + dt, g0.hi + dt); }
       });
@@ -2667,7 +2679,7 @@
       el('label', { style: 'cursor:pointer' }, wireBox, ' wireframe'),
       el('label', { style: 'cursor:pointer', title: 'Ambient occlusion: darkens creases and corners' }, ssaoBox, ' SSAO'),
       el('label', { style: 'cursor:pointer', title: 'Orthographic view (no perspective): parallel lines stay parallel' }, orthoBox, ' orthographic'),
-      el('label', { style: 'cursor:pointer', title: 'Turn the part upside down (also in the exported file)' }, flipBox, ' flip upside down'));
+      el('label', { style: 'cursor:pointer', title: 'Invert the y axis: the part is turned over, in every view and in the exported file' }, flipBox, ' invert y axis'));
     const hint3d = el('div', { style: 'position:absolute;left:8px;bottom:5px;font-size:10px;color:#9aa;pointer-events:none' }, 'drag: turn the part');
     const view3d = el('div', { style: 'flex:1;position:relative;min-height:0;min-width:0' }, canvas, busyTag, toggles3d, hint3d);
     // minimizing panes: a pane shrinks to a bar; click the bar to bring it back
@@ -3374,8 +3386,8 @@
     // ---- monomorphic from above: the finished part itself, so a subtraction only takes away what it really removes ----
     // The outline is Manifold's projection of the solid cut to the height band (exact, with the holes that go right
     // through); the lines inside are the part's sharp edges in the band (where one part stands over another, steps,
-    // bores), where nothing of the part covers them from where it is looked at. Worked out off the drawing (it can take
-    // a moment) and kept per model and band.
+    // bores), where nothing of the part covers them from above. Worked out off the drawing (it can take a moment) and
+    // kept per model and band.
     let topMonoSolid = null, topMonoCache = null, topMonoWant = null, topMonoTimer = 0;
     async function mainManifold() {
       if (W.__aaManifold) return W.__aaManifold;
@@ -3462,7 +3474,7 @@
       // (nudged off any shared edge, so a ray from the place crosses each surface once)
       return { F, start, items, G, cx, cy, eps: diag * 2e-5, step: Math.hypot(x1 - x0, y1 - y0) / 700, DX: diag * 1.37e-7, DY: diag * 0.73e-7, span: Math.max(Math.abs(x0), Math.abs(x1), Math.abs(y0), Math.abs(y1)) };
     }
-    // Is the place covered, looking at it along dir (1: from above, -1: from below, for a part shown upside down)?
+    // Is the place covered, looking at it along dir (1: from above, -1: from below)?
     // Past the lid (the end of the height band on the viewer's side) the inside of the part covers it: the cut is a lid.
     function covered(ix, x, y, z, lid, dir) {
       x += ix.DX; y += ix.DY;
@@ -3540,11 +3552,11 @@
     function topMono(band) {
       const t = meshTris;
       if (!t || !t.length) { topMonoCache = null; return null; }
-      const lo = band ? band.lo : -Infinity, hi = band ? band.hi : Infinity, fl = !!state.flip;
-      const same = (k) => k && k.t === t && k.lo === lo && k.hi === hi && k.fl === fl;
+      const lo = band ? band.lo : -Infinity, hi = band ? band.hi : Infinity;
+      const same = (k) => k && k.t === t && k.lo === lo && k.hi === hi;
       if (same(topMonoCache)) return topMonoCache.res;
       if (!same(topMonoWant)) {
-        topMonoWant = { t, lo, hi, fl };
+        topMonoWant = { t, lo, hi };
         clearTimeout(topMonoTimer);
         // while something is being dragged the model changes many times a second: wait for a pause
         topMonoTimer = setTimeout(topMonoRun, drag && drag.moved ? 250 : 0);
@@ -3554,7 +3566,7 @@
     async function topMonoRun() {
       const job = topMonoWant;
       if (!job) return;
-      const { t, lo, hi, fl } = job;
+      const { t, lo, hi } = job;
       let res = null;
       try {
         const mf = await mainManifold();
@@ -3580,9 +3592,9 @@
           const tiny = (S.ix.span * 2e-3) ** 2, real = (L) => L.length > 2 && area(L) > tiny;
           const path = (L) => 'M' + L.map(p => f(p[0]) + ' ' + f(p[1])).join('L') + 'Z';
           const dd = polys.map(xy).filter(real).map(path).join('');
-          // the sharp edges, cut to the band; only what can be seen from where the part is looked at (above; from
-          // below when it is shown upside down)
-          const seg3 = [], s = S.seg, dir = fl ? -1 : 1, lid = fl ? lo : hi;
+          // the sharp edges, cut to the band; only what can be seen from above. (With the y axis inverted the drawing is
+          // the same one, mirrored: the same objects show either way.)
+          const seg3 = [], s = S.seg, dir = 1, lid = hi;
           for (let k = 0; k < s.length; k += 6) {
             let ax = s[k], ay = s[k + 1], az = s[k + 2], bx = s[k + 3], by = s[k + 4], bz = s[k + 5];
             if (Math.max(az, bz) < lo - 1e-9 || Math.min(az, bz) > hi + 1e-9) continue;
@@ -3592,14 +3604,14 @@
             seg3.push(ax, ay, az, bx, by, bz);
           }
           let ln = visiblePath(S.ix, seg3, lid, dir, f);
-          // where the band's end on the viewer's side cuts through material: the cut's own edges (on top, so seen)
+          // where the top of the band cuts through material: the cut's own edges (on top, so seen)
           if (isFinite(lid)) { const sl = S.m.slice(lid); ln += sl.toPolygons().map(xy).filter(real).map(path).join(''); sl.delete(); }
           res = { dd, ln };
         }
       } catch (e) { res = null; }
       if (job !== topMonoWant) return;
       topMonoWant = null;
-      topMonoCache = { t, lo, hi, fl, res };
+      topMonoCache = { t, lo, hi, res };
       if (topMode() && monoOn()) drawSection();
     }
 
@@ -5038,12 +5050,7 @@
       if (drag.type === 'pan') { view.cy = drag.cy - (sx - drag.sx) / view.s; view.cz = drag.cz + (sy - drag.sy) / view.s; drawSection(); return; }
       if (drag.type === 'bandline') {
         const r = sceneZRange(); if (!r) return;
-        let z = wz;
-        if (e.ctrlKey || e.metaKey) {      // onto the height of a point
-          let best = null;
-          for (const id of leafOrder(state.scene)) for (const hd of handlesOf(id)) { const dd = Math.abs(hd.z - z); if (dd < snapThr() && (!best || dd < best.d)) best = { z: hd.z, d: dd }; }
-          if (best) z = best.z;
-        }
+        const z = e.ctrlKey || e.metaKey ? snapBandZ(wz, snapThr()) : wz;      // onto the height of a point
         const t = (z - r[0]) / (r[1] - r[0]), c = state.topCut || { lo: 0, hi: 1 };
         tbDrag = { which: drag.which };
         if (drag.which === 'hi') setTopCut(c.lo, t); else setTopCut(t, c.hi);
@@ -5940,19 +5947,19 @@
         loL.textContent = loOf(k) > L + 0.001 ? txt(loOf(k)) : '';
         box.style.display = bbox ? '' : 'none';
       };
-      // using a slider other than Z's takes away the default half cut toward you
-      const start = () => { if (k !== 'z' && (state.cuts || {}).z === 0) state.cuts = { ...state.cuts, z: 1 }; };
+      // a handle near the origin's tick goes onto it (Alt: freely), as the handles on the model do
+      const snapT = (e, t) => { if (e.altKey) return t; const r = box.getBoundingClientRect(), t0 = tOf(0); return Math.abs(t - t0) * (horiz ? r.width : r.height) < 7 ? t0 : t; };
       for (const [el0, which] of [[hiK, 'hi'], [loK, 'lo'], [range, 'both']]) {
         el0.addEventListener('pointerdown', (e) => {
           if (e.button !== 0) return;
-          e.preventDefault(); e.stopPropagation(); el0.setPointerCapture(e.pointerId); start();
+          e.preventDefault(); e.stopPropagation(); el0.setPointerCapture(e.pointerId);
           sliceDrag = { k, which, t0: at(e), lo: tOf(loOf(k)), hi: tOf(hiOf(k)) };
         });
         el0.addEventListener('pointermove', (e) => {
           if (!sliceDrag || sliceDrag.k !== k) return;
           const t = Math.max(0, Math.min(1, at(e))), g = sliceDrag;
-          if (g.which === 'hi') setCut(k, vOf(g.lo), vOf(t), 'hi');
-          else if (g.which === 'lo') setCut(k, vOf(t), vOf(g.hi), 'lo');
+          if (g.which === 'hi') setCut(k, vOf(g.lo), vOf(snapT(e, t)), 'hi');
+          else if (g.which === 'lo') setCut(k, vOf(snapT(e, t)), vOf(g.hi), 'lo');
           else { const dt = Math.max(-g.lo, Math.min(1 - g.hi, t - g.t0)); setCut(k, vOf(g.lo + dt), vOf(g.hi + dt), 'both'); }
         });
         const end = () => { if (sliceDrag) { sliceDrag = null; saveSettings(); draw3d(); } };
@@ -5966,9 +5973,9 @@
       // a click on the track moves the nearer handle there
       box.addEventListener('pointerdown', (e) => {
         if (e.button !== 0 || (e.target !== box && e.target !== track)) return;
-        e.preventDefault(); e.stopPropagation(); start();
+        e.preventDefault(); e.stopPropagation();
         const t = at(e), lo = tOf(loOf(k)), hi = tOf(hiOf(k));
-        if (Math.abs(t - lo) < Math.abs(t - hi)) setCut(k, vOf(t), hiOf(k), 'lo'); else setCut(k, loOf(k), vOf(t), 'hi');
+        if (Math.abs(t - lo) < Math.abs(t - hi)) setCut(k, vOf(snapT(e, t)), hiOf(k), 'lo'); else setCut(k, loOf(k), vOf(snapT(e, t)), 'hi');
         saveSettings();
       });
       sliders[k] = { box, sync };
@@ -6201,7 +6208,7 @@
     function drawAxisLabels() {
       const f = cutFrame();
       if (!f || !camBasis || !lastM) return;
-      const S = compassSpec(), px = Math.max(1e-9, S.px), cs = camBasis.x, up0 = camBasis.y;
+      const S = compassSpec(), px = Math.max(1e-9, S.px), up0 = camBasis.y;
       // the distances run along the grid spoke (a line through the centre) that is most nearly level on screen
       // among those that cross the view, so they stay readable and in sight
       const W0 = canvas.clientWidth, H0 = canvas.clientHeight, gz0 = bbox.mn[2], step = Math.max(S.aMajor, 10), reach0 = Math.min(S.Rv, S.half * 6 + Math.hypot(S.cx - (S.G ? S.G[0] : S.cx), S.cy - (S.G ? S.G[1] : S.cy)));
@@ -6220,10 +6227,9 @@
         if (!best || score > best.score) best = { score, d: dx < 0 ? d.map(c => -c) : d };
       }
       const rt = best ? best.d : f.dirs.x;
-      void cs;
-      // text 'up': the camera's up, square to the reading direction
+      // every number faces the screen: read along the camera's right, upright along its up
       const square = (r) => { const k = up0[0] * r[0] + up0[1] * r[1] + up0[2] * r[2]; const q = [up0[0] - r[0] * k, up0[1] - r[1] * k, up0[2] - r[2] * k], l = Math.hypot(...q) || 1; return q.map(c => c / l); };
-      const up = square(rt);
+      const right = camBasis.x, upA = square(right);
       const gz = bbox.mn[2], { cx, cy } = S, O = [cx, cy, gz];
       const lw = (p) => p / px, hgt = lw(9), sw = lw(1.1), W = canvas.clientWidth, H = canvas.clientHeight;
       const v = [], COL = [0.88, 0.9, 0.93, 0.95], DIM = [0.8, 0.83, 0.86, 0.55];
@@ -6234,10 +6240,11 @@
         s = s.map(c => c / L * w / 2);
         for (const p of [[a, -1], [a, 1], [b, 1], [a, -1], [b, 1], [b, -1]]) v.push(p[0][0] + s[0] * p[1], p[0][1] + s[1] * p[1], p[0][2] + s[2] * p[1], ...col);
       };
+      const adv = (ch) => (ch === '.' ? 0.12 : ch === '1' ? 0.42 : ch === '-' ? 0.45 : ch === '°' ? 0.25 : 0.55) + 0.18;
+      const widthOf = (txt) => [...txt].reduce((s, ch) => s + adv(ch), -0.18) * hgt;
       const text = (txt, base, rgt, upv, col) => {
         const at = (x, y) => [base[0] + rgt[0] * x + upv[0] * y, base[1] + rgt[1] * x + upv[1] * y, base[2] + rgt[2] * x + upv[2] * y];
-        const adv = (ch) => (ch === '.' ? 0.12 : ch === '1' ? 0.42 : ch === '-' ? 0.45 : ch === '°' ? 0.25 : 0.55) + 0.18;
-        let pen = -([...txt].reduce((s, ch) => s + adv(ch), -0.18) * hgt) / 2;
+        let pen = -widthOf(txt) / 2;
         for (const ch of txt) {
           const g = ch === '-' ? [[[0.05, 0.5], [0.4, 0.5]]] : FONT[ch] || [];
           for (const line of g) for (let i = 0; i + 1 < line.length; i++) quad(at(pen + line[i][0] * hgt, line[i][1] * hgt), at(pen + line[i + 1][0] * hgt, line[i + 1][1] * hgt), sw, col);
@@ -6259,11 +6266,19 @@
         if (mj && gap * 10 < 28) continue;
         const L = lw(mj ? 4 : 2);
         quad([p[0] - gnd[0] * L, p[1] - gnd[1] * L, gz], [p[0] + gnd[0] * L, p[1] + gnd[1] * L, gz], lw(mj ? 1.2 : 0.8), mj ? COL : DIM);
-        if (mj) text(num(+(Math.abs(s) * UNIT_SCALE / MM).toFixed(6)), [p[0] + up[0] * lw(5), p[1] + up[1] * lw(5), p[2] + up[2] * lw(5)], rt, up, COL);
+        if (mj) {
+          // beside its tick: square to the axis as it runs on the screen, on the upper side (to the right of an axis
+          // running straight up), clear of the tick whichever way the axis lies
+          const txt = num(+(Math.abs(s) * UNIT_SCALE / MM).toFixed(6)), ax = (sq[0] - sp[0]) / gap, ay = -(sq[1] - sp[1]) / gap;
+          let nx = -ay, ny = ax;
+          if (ny < -1e-6 || (Math.abs(ny) <= 1e-6 && nx < 0)) { nx = -nx; ny = -ny; }
+          const off = lw(7) + Math.abs(nx) * widthOf(txt) / 2 + Math.abs(ny) * hgt / 2, ox = nx * off, oy = ny * off - hgt / 2;
+          text(txt, [p[0] + right[0] * ox + upA[0] * oy, p[1] + right[1] * ox + upA[1] * oy, p[2] + right[2] * ox + upA[2] * oy], right, upA, COL);
+        }
       }
       // angles round the rim, each upright and read left to right on screen
       // round the rim: only the angles near the part of it in view
-      const right = camBasis.x, upA = square(right), n = Math.round(360 / S.aMajor);
+      const n = Math.round(360 / S.aMajor);
       const aG = S.G ? Math.atan2(S.G[1] - cy, S.G[0] - cx) : 0, span = Math.min(Math.PI, S.half * 3 / Math.max(S.Ra, 1e-9));
       const i0 = span >= Math.PI ? 0 : Math.floor((aG - span) * 180 / Math.PI / S.aMajor), i1 = span >= Math.PI ? n - 1 : Math.ceil((aG + span) * 180 / Math.PI / S.aMajor);
       for (let ii = i0; ii <= Math.min(i1, i0 + 720); ii++) {
@@ -6543,8 +6558,8 @@
           const MINPX = 140, len = Math.hypot(cutDrag.v[0], cutDrag.v[1]), pxPerUnit = len / 0.1;
           const ux = len > 0.3 ? cutDrag.v[0] / len : 0, uy = len > 0.3 ? cutDrag.v[1] / len : -1, scale = Math.max(pxPerUnit, MINPX);
           const raw = Math.max(f.lo[k], Math.min(1, cutDrag.v0 + ((e.clientX - cutDrag.x0) * ux + (e.clientY - cutDrag.y0) * uy) / scale));
-          // within 10 px of the origin (the middle of the base) it snaps there (not on an axis seen end-on, where that is everywhere)
-          const v = Math.abs(raw) * pxPerUnit < 10 && pxPerUnit >= MINPX && !e.altKey ? 0 : raw;
+          // within 10 px of travel from the origin (the middle of the base) it snaps there (Alt: freely)
+          const v = Math.abs(raw) * scale < 10 && !e.altKey ? 0 : raw;
           // (the same cuts as the sliders: the lower one stays below the upper)
           if (key.length > 1) setCut(k, v, hiOf(k), 'lo'); else setCut(k, loOf(k), v, 'hi');
           cutDrag.snapped = v === 0 && raw !== 0;
