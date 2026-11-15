@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.8.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.9.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.8.0';
+  const APP_VERSION = '3.9.0';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -2050,6 +2050,85 @@
     return el('label', { style: 'display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;margin:3px 0', title: title || null }, box, document.createTextNode(text));
   }
   // A number field. value may be a function: the field then refreshes while another field is being edited.
+  // ---- Numbers typed with units: "1in", "25.4 mm", "2.5cm", "1 1/4\"", "1ft 3in", "90deg", "0.5 turn", and sums or
+  //      products ("10 + 2mm", "3*1.5"). They are converted to the unit the field shows. Fields: 'len', 'ang' or none. ----
+  const LEN_UNITS = [['millimeters|millimetres|millimeter|millimetre|mm', 1 / 25.4], ['centimeters|centimetres|centimeter|centimetre|cm', 10 / 25.4],
+    ['micrometers|micrometres|microns|micron|µm|um', 0.001 / 25.4], ['meters|metres|meter|metre|m', 1000 / 25.4], ['inches|inch|in|"|”|″', 1],
+    ['feet|foot|ft|\'|’|′', 12], ['yards|yard|yd', 36], ['thou|mils|mil', 0.001]];
+  const ANG_UNITS = [['degrees|degree|deg|°', 1], ['radians|radian|rad', 180 / Math.PI], ['revolutions|revolution|turns|turn|revs|rev', 360],
+    ['gradians|gradian|grads|grad|gons|gon', 0.9], ['arcminutes|arcminute|arcmin|\'|’|′', 1 / 60], ['arcseconds|arcsecond|arcsec|"|”|″', 1 / 3600]];
+  function parseQty(text, kind) {
+    const s = String(text == null ? '' : text).trim().toLowerCase().replace(/,/g, '.').replace(/[−–]/g, '-').replace(/[×·]/g, '*').replace(/÷/g, '/');
+    if (!s) return NaN;
+    if (/^[-+]?(\d+\.?\d*|\.\d+)$/.test(s)) return parseFloat(s);
+    // each unit's factor to the field's shown unit
+    const units = (kind === 'len' ? LEN_UNITS.map(([a, f]) => [a, f * UNIT_SCALE]) : kind === 'ang' ? ANG_UNITS.map(([a, f]) => [a, f * ANG_SCALE]) : [])
+      .flatMap(([a, f]) => a.split('|').map(w => [w, f])).sort((x, y) => y[0].length - x[0].length);
+    const tk = [];
+    for (let i = 0; i < s.length;) {
+      const c = s[i];
+      if (/\s/.test(c)) { i++; continue; }
+      const nm = /^(\d+\.?\d*|\.\d+)/.exec(s.slice(i));
+      if (nm) { tk.push({ n: parseFloat(nm[1]) }); i += nm[1].length; continue; }
+      if ('+-*/()'.includes(c)) { tk.push({ op: c }); i++; continue; }
+      const un = units.find(([w]) => s.startsWith(w, i) && !(/[a-zµ]/.test(w[w.length - 1]) && /[a-zµ]/.test(s[i + w.length] || '')));
+      if (un) { tk.push({ u: un[1] }); i += un[0].length; continue; }
+      return NaN;
+    }
+    let p = 0;
+    const peek = () => tk[p], isN = (t) => t && t.n != null, isOp = (t, o) => t && t.op === o;
+    function primary() {
+      let v, t = peek();
+      if (isOp(t, '(')) { p++; v = expr(); if (!isOp(peek(), ')')) throw 0; p++; }
+      else if (isN(t)) {
+        p++; v = t.n;
+        // a mixed number (1 1/4) or a fraction (3/8) stays together, so a unit after it applies to all of it
+        if (isN(peek()) && isOp(tk[p + 1], '/') && isN(tk[p + 2])) { v += peek().n / tk[p + 2].n; p += 3; }
+        else if (isOp(peek(), '/') && isN(tk[p + 1]) && tk[p + 2] && tk[p + 2].u != null) { v /= tk[p + 1].n; p += 2; }
+      } else throw 0;
+      if (peek() && peek().u != null) { v *= peek().u; p++; primary.unit = true; }
+      return v;
+    }
+    function factor() { if (isOp(peek(), '-')) { p++; return -factor(); } if (isOp(peek(), '+')) { p++; return factor(); } return primary(); }
+    function term() {
+      let v = factor();
+      while (isOp(peek(), '*') || isOp(peek(), '/')) { const o = tk[p++].op, w = factor(); v = o === '*' ? v * w : v / w; }
+      return v;
+    }
+    function expr() {
+      primary.unit = false;
+      let v = term();
+      for (;;) {
+        if (isOp(peek(), '+') || isOp(peek(), '-')) { const o = tk[p++].op; primary.unit = false; const w = term(); v = o === '+' ? v + w : v - w; }
+        else if (primary.unit && (isN(peek()) || isOp(peek(), '('))) { primary.unit = false; v += term(); }    // 1ft 3in, 5' 3"
+        else return v;
+      }
+    }
+    try { const v = expr(); return p === tk.length && isFinite(v) ? v : NaN; } catch (_) { return NaN; }
+  }
+  // A number field takes typed units: on the first key that is not part of a plain number it becomes a text field
+  // (its live updates wait), and when it is committed the text is worked out and it becomes a number field again.
+  const plainKey = (k) => /^[0-9.\-]$/.test(k);
+  function unitKey(e, inp) {
+    if (inp.tagName !== 'INPUT' || inp.type !== 'number' || e.ctrlKey || e.metaKey || e.altKey || e.key.length !== 1 || plainKey(e.key)) return;
+    const v = inp.value;
+    inp.type = 'text'; inp.__unitText = true; inp.value = v;
+    try { inp.setSelectionRange(v.length, v.length); } catch (_) { /* ignore */ }
+  }
+  function unitCommit(inp) {
+    if (!inp.__unitText) return;
+    const v = parseQty(inp.value, inp.dataset.unit);
+    inp.__unitText = false; inp.type = 'number';
+    inp.value = isFinite(v) ? String(+v.toFixed(6)) : '';
+  }
+  if (typeof document !== 'undefined' && !W.__aaUnitFields) {
+    W.__aaUnitFields = true;
+    // typed text with units: no live update until it is committed
+    document.addEventListener('input', (e) => { const t = e.target; if (t && t.__unitText && !/^[-+]?(\d+\.?\d*|\.\d+)$/.test(t.value.trim())) e.stopImmediatePropagation(); }, true);
+    document.addEventListener('change', (e) => unitCommit(e.target), true);
+    document.addEventListener('blur', (e) => { const t = e.target; if (t && t.__unitText) { unitCommit(t); t.dispatchEvent(new Event('change', { bubbles: true })); } }, true);
+    document.addEventListener('keydown', (e) => { const t = e.target; if (t && t.__unitText && e.key === 'Enter') { unitCommit(t); t.dispatchEvent(new Event('change', { bubbles: true })); } }, true);
+  }
   function numInput(value, set, o = {}) {
     const get = typeof value === 'function' ? value : () => value, dg = o.digits != null ? o.digits : 4;
     const show = () => { const v = get(); return v == null || v === '' || !isFinite(v) ? '' : num(v, dg); };
@@ -2058,6 +2137,8 @@
     if (o.max != null) inp.max = String(o.max);
     inp.disabled = !!o.disabled;
     if (typeof value === 'function') inp.__get = show;
+    const src = String(value) + String(set);
+    inp.dataset.unit = o.unit || (/ANG_SCALE/.test(src) ? 'ang' : /UNIT_SCALE|\bmm\(|hDisp/.test(src) ? 'len' : '');
     // live: every keystroke updates the model (one undo step per field edit)
     inp.addEventListener('focus', () => { inp.__fresh = true; });
     const apply = (live) => {
@@ -2479,9 +2560,9 @@
       const std = el('select', { style: 'font-size:12px;max-width:260px' }, el('option', { value: '' }, 'custom'),
         ...THREAD_GROUPS.map(([gr, list]) => el('optgroup', { label: gr }, ...list.map(([k, label]) => el('option', { value: k }, label)))));
       const k = MM / UNIT_SCALE, show = (mmv) => String(+(mmv / k).toFixed(UNIT_SCALE === MM ? 4 : 5));   // mm per shown unit
-      const dIn = el('input', { type: 'number', step: UNIT_SCALE === MM ? '0.1' : '0.005', min: '0', value: show(init.d), style: 'width:80px' });
-      const pIn = el('input', { type: 'number', step: UNIT_SCALE === MM ? '0.05' : '0.001', min: '0', value: show(init.pitch), style: 'width:80px' });
-      const lIn = el('input', { type: 'number', step: '0.5', min: '0', placeholder: 'auto', style: 'width:80px' });
+      const dIn = el('input', { 'data-unit': 'len', type: 'number', step: UNIT_SCALE === MM ? '0.1' : '0.005', min: '0', value: show(init.d), style: 'width:80px' });
+      const pIn = el('input', { 'data-unit': 'len', type: 'number', step: UNIT_SCALE === MM ? '0.05' : '0.001', min: '0', value: show(init.pitch), style: 'width:80px' });
+      const lIn = el('input', { 'data-unit': 'len', type: 'number', step: '0.5', min: '0', placeholder: 'auto', style: 'width:80px' });
       const pr0 = THREAD_PRESETS.find(p => Math.abs(p[2] - init.d) < 1e-6 && Math.abs(p[3] - init.pitch) < 1e-6); std.value = pr0 ? pr0[0] : '';
       std.addEventListener('change', () => { const p = THREAD_PRESETS.find(x => x[0] === std.value); if (p) { dIn.value = show(p[2]); pIn.value = show(p[3]); } });
       const custom = () => { std.value = THREAD_PRESETS.find(p => Math.abs(p[2] - +dIn.value * k) < 1e-3 && Math.abs(p[3] - +pIn.value * k) < 1e-4) ? THREAD_PRESETS.find(p => Math.abs(p[2] - +dIn.value * k) < 1e-3 && Math.abs(p[3] - +pIn.value * k) < 1e-4)[0] : ''; };
@@ -2498,11 +2579,11 @@
       // adapter assembler
       const A = threadPicker('Thread A (bottom)', { male: true, d: 48, pitch: 0.75 }), B = threadPicker('Thread B (top)', { male: false, d: 42, pitch: 0.75 });
       const km = MM / UNIT_SCALE, sh = (mmv) => String(+(mmv / km).toFixed(UNIT_SCALE === MM ? 3 : 4)), im = UNIT_SCALE === MM;
-      const lenIn = el('input', { type: 'number', step: im ? '0.5' : '0.02', min: '0', value: sh(20), style: 'width:80px' });
-      const wallIn = el('input', { type: 'number', step: im ? '0.1' : '0.005', min: '0', value: sh(2.5), style: 'width:80px' });
-      const clrIn = el('input', { type: 'number', step: im ? '0.05' : '0.002', value: '0', style: 'width:80px' });
+      const lenIn = el('input', { 'data-unit': 'len', type: 'number', step: im ? '0.5' : '0.02', min: '0', value: sh(20), style: 'width:80px' });
+      const wallIn = el('input', { 'data-unit': 'len', type: 'number', step: im ? '0.1' : '0.005', min: '0', value: sh(2.5), style: 'width:80px' });
+      const clrIn = el('input', { 'data-unit': 'len', type: 'number', step: im ? '0.05' : '0.002', value: '0', style: 'width:80px' });
       const steepBox = el('input', { type: 'checkbox' }); steepBox.checked = true;
-      const angIn = el('input', { type: 'number', step: ANG_SCALE === 1 ? '5' : '0.05', min: String(+(20 * ANG_SCALE).toFixed(3)), max: String(+(85 * ANG_SCALE).toFixed(3)), value: String(+(60 * ANG_SCALE).toFixed(4)), style: 'width:60px' });
+      const angIn = el('input', { 'data-unit': 'ang', type: 'number', step: ANG_SCALE === 1 ? '5' : '0.05', min: String(+(20 * ANG_SCALE).toFixed(3)), max: String(+(85 * ANG_SCALE).toFixed(3)), value: String(+(60 * ANG_SCALE).toFixed(4)), style: 'width:60px' });
       const out = el('div', { style: 'color:#9a6700;margin-top:6px' });
       const build = () => {
         const a = A.get(), b = B.get(), H = +lenIn.value * km;
@@ -2547,7 +2628,12 @@
     const onKey = (e) => {
       if (!root.isConnected) return;
       const ae = document.activeElement || {}, typing = /SELECT|TEXTAREA/.test(ae.tagName || '') || (ae.tagName === 'INPUT' && !/^(checkbox|radio|button|submit|range|color)$/.test(ae.type));
-      if (typing) { if (ae.__onKey) ae.__onKey(e); e.stopPropagation(); return; }
+      if (typing) {
+        unitKey(e, ae);
+        if (ae.__unitText && e.key === 'Enter') { unitCommit(ae); ae.dispatchEvent(new Event('change', { bubbles: true })); }
+        if (ae.__onKey) ae.__onKey(e);
+        e.stopPropagation(); return;
+      }
       if (e.key === 'Escape') {
         if (splash.style.display !== 'none' && state.scene) { hideSplash(); e.stopPropagation(); e.preventDefault(); return; }
         if (menu.style.display !== 'none') { hideMenu(); e.stopPropagation(); e.preventDefault(); return; }
@@ -3540,7 +3626,7 @@
       const fields = [['pitch', 'pitch', UNIT_LABEL], ['turns', 'turns', ''], ['depth', 'thread depth (x)', UNIT_LABEL], ['angle', 'V angle', ANG_LABEL.trim()],
         ['dmin', 'minor Ø', UNIT_LABEL], ['dmax', 'major Ø', UNIT_LABEL], ['len', 'length (y)', UNIT_LABEL], ['from', 'starts at y', UNIT_LABEL], ['to', 'ends at y', UNIT_LABEL]];
       for (const [f, lab, unit] of fields) {
-        const inp = el('input', { type: 'number', step: f === 'turns' ? '0.25' : f === 'angle' ? '0.5' : '0.01', style: INP });
+        const inp = el('input', { 'data-unit': f === 'angle' ? 'ang' : f === 'turns' ? '' : 'len', type: 'number', step: f === 'turns' ? '0.25' : f === 'angle' ? '0.5' : '0.01', style: INP });
         inp.addEventListener('focus', () => { inp.__fresh = true; });
         const apply = (live) => {
           const v = parseFloat(inp.value), o = runOf(nodeId, ri);
@@ -3703,7 +3789,7 @@
       if (collapsed) return;
       if (pk.length === 1 && parseKey(pk[0]).kind === 'p') {
         const h = parseKey(pk[0]), p = xfOf(state.scene, h.node).fwd(state.scene.nodes[h.node].pts[h.i]);
-        const live = (val, set) => { const i = el('input', { type: 'number', step: '0.01', value: num(val, 4), style: 'width:64px;font-size:11px;box-sizing:border-box' });
+        const live = (val, set) => { const i = el('input', { 'data-unit': 'len', type: 'number', step: '0.01', value: num(val, 4), style: 'width:64px;font-size:11px;box-sizing:border-box' });
           i.addEventListener('focus', () => { i.__fresh = true; });
           const go = (liveInput) => { const v = parseFloat(i.value); if (!isFinite(v)) return; if (i.__fresh !== false) pushUndo(); i.__fresh = false; set(v); markEdited(); state.liveInput = liveInput; try { recalc(); } finally { state.liveInput = false; } };
           i.addEventListener('input', () => go(true)); i.addEventListener('change', () => { go(false); i.__fresh = false; }); return i; };
@@ -3712,7 +3798,7 @@
         add('', ['y', live(hDisp(p.z, base), v => moveKeysView(state.scene, pk, 0, v / UNIT_SCALE + base - cur().z)), null, null, UNIT_LABEL], null);
       }
       const inp = (key, o = {}) => {
-        const i = el('input', { type: 'number', step: o.step || '0.1', value: num(tf[key], 4), style: 'width:64px;font-size:11px;box-sizing:border-box', title: o.title || null });
+        const i = el('input', { 'data-unit': key === 'dx' || key === 'dy' ? 'len' : key === 'angle' ? 'ang' : '', type: 'number', step: o.step || '0.1', value: num(tf[key], 4), style: 'width:64px;font-size:11px;box-sizing:border-box', title: o.title || null });
         i.addEventListener('change', () => { const v = parseFloat(i.value); if (isFinite(v)) tf[key] = v; else i.value = num(tf[key], 4); });
         return i;
       };
@@ -4040,7 +4126,7 @@
       if (pts.length) {
         if (edges.length) menu.append(hr());
         // bevel: radius 0 = none; very small bevels merge away when the outline is optimized
-        const rIn = el('input', { type: 'number', step: '0.05', min: '0', value: num(mm(bv.r), 3), style: 'width:60px' });
+        const rIn = el('input', { 'data-unit': 'len', type: 'number', step: '0.05', min: '0', value: num(mm(bv.r), 3), style: 'width:60px' });
         const sIn = el('input', { type: 'number', step: '1', min: '1', max: '64', value: String(bv.segs), style: 'width:46px' });
         const oIn = selectInput(bv.out ? 'convex' : 'concave', [['convex', 'convex (rounded)'], ['concave', 'concave (cove)']], () => {});
         menu.append(
