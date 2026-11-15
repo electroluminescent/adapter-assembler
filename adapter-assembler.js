@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.9.2. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.10.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.9.2';
+  const APP_VERSION = '3.10.0';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -835,8 +835,9 @@
   function cogShape(q, perFlank) {
     if (q.kind === 'internal') {
       const n = Math.max(3, Math.round(q.teeth) || 3), m = Math.max(1e-4, q.module);
-      const s = cogShape({ ...q, kind: 'external', addendum: q.dedendum, dedendum: q.addendum, backlash: -(q.backlash || 0), rotation: (q.rotation || 0) + 180 / n }, perFlank);
-      return { ...s, ra: s.rf, rf: s.ra, tip: m * (n / 2 - Math.max(0, q.addendum)), internal: true };
+      const s = cogShape({ ...q, kind: 'external', addendum: q.dedendum, dedendum: q.addendum, backlash: -(q.backlash || 0), rotation: (q.rotation || 0) + 180 / n,
+        tipRound: q.rootRound, rootRound: q.tipRound }, perFlank);
+      return { ...s, ra: s.rf, rf: s.ra, tip: m * (n / 2 - Math.max(0, q.addendum)), internal: true, corners: { tip: s.corners.root, root: s.corners.tip } };
     }
     const N = Math.max(3, Math.round(q.teeth) || 3), m = Math.max(1e-4, q.module), al = Math.max(1, Math.min(45, q.pressure || 20)) * Math.PI / 180;
     const rp = m * N / 2, rb = rp * Math.cos(al), ra0 = rp + Math.max(0, q.addendum) * m, rf = Math.max(m * 0.05, rp - Math.max(0, q.dedendum) * m);
@@ -854,16 +855,68 @@
     if (rf < rb) for (let i = 0; i < 2; i++) side.push(rf + (r0 - rf) * i / 2);
     for (let i = 0; i <= K; i++) side.push(r0 + (ra - r0) * (1 - Math.cos(Math.PI / 2 * i / K)));   // denser near the base
     const arc = (a0, a1) => Math.max(1, Math.ceil((a1 - a0) / (Math.PI / 90)));
-    const tooth = [], psiR = psi(rf), psiA = Math.max(0, psi(ra));
+    let tooth = [];
+    const psiR = psi(rf), psiA = Math.max(0, psi(ra)), mark = {};
     const push = (a, r) => { if (!tooth.length || a - tooth[tooth.length - 1][0] > 1e-9) tooth.push([a, r]); };
     { const n = arc(-half, -psiR); for (let i = 0; i <= n; i++) push(-half + (half - psiR) * i / n, rf); }
+    mark.rootL = tooth.length - 1;
     for (const r of side) push(-psi(r), r);
+    mark.tipL = tooth.length - 1;
     { const n = arc(-psiA, psiA); for (let i = 0; i <= n; i++) push(-psiA + 2 * psiA * i / n, ra); }
+    mark.tipR = tooth.length - 1;
     for (let i = side.length - 1; i >= 0; i--) push(psi(side[i]), side[i]);
+    mark.rootR = tooth.length - 1;
     { const n = arc(psiR, half); for (let i = 0; i < n; i++) push(psiR + (half - psiR) * i / n, rf); }
+    // rounded corners (vertical bevels): at the teeth's tips and in their roots, worked on the outline seen from above
+    let C = tooth.map(([a, r]) => [r * Math.cos(a), r * Math.sin(a)]);
+    const len = (i, j) => { let L = 0; for (let k = Math.min(i, j); k < Math.max(i, j); k++) L += Math.hypot(C[k + 1][0] - C[k][0], C[k + 1][1] - C[k][1]); return L; };
+    const corner = (c) => {
+      const V = C[c], P = C[c - 1], Q = C[c + 1], l1 = Math.hypot(V[0] - P[0], V[1] - P[1]) || 1, l2 = Math.hypot(Q[0] - V[0], Q[1] - V[1]) || 1;
+      const d1 = [(V[0] - P[0]) / l1, (V[1] - P[1]) / l1], d2 = [(Q[0] - V[0]) / l2, (Q[1] - V[1]) / l2];
+      const phi = Math.acos(Math.max(-1, Math.min(1, d1[0] * d2[0] + d1[1] * d2[1]))), bx = d2[0] - d1[0], by = d2[1] - d1[1], bl = Math.hypot(bx, by) || 1;
+      // u: from the corner toward the rounding's middle; k: how far that is, per unit of radius
+      return { V, d1, d2, phi, u: [bx / bl, by / bl], k: 1 / Math.max(1e-6, Math.cos(phi / 2)) - 1 };
+    };
+    const lim = { rootL: [len(0, mark.rootL), len(mark.rootL, mark.tipL) / 2], tipL: [len(mark.rootL, mark.tipL) / 2, len(mark.tipL, mark.tipR) / 2],
+      tipR: [len(mark.tipL, mark.tipR) / 2, len(mark.tipR, mark.rootR) / 2], rootR: [len(mark.tipR, mark.rootR) / 2, len(mark.rootR, C.length - 1)] };
+    const info = { tip: corner(mark.tipL), root: corner(mark.rootL) };
+    const fillet = (c, r, lb, lf) => {
+      if (!(r > 0) || c <= 0 || c >= C.length - 1) return;
+      const k = corner(c);
+      if (k.phi < 1e-3) return;
+      const t = Math.min(r * Math.tan(k.phi / 2), 0.98 * lb, 0.98 * lf), rr = t / Math.tan(k.phi / 2);
+      const along = (dir) => {        // the point t along the outline from the corner, and the vertex just past it
+        let left = t, i = c;
+        for (;;) {
+          const j = i + dir;
+          if (j < 0 || j >= C.length) return { p: C[i], i };
+          const L = Math.hypot(C[j][0] - C[i][0], C[j][1] - C[i][1]);
+          if (L >= left) { const f = left / (L || 1); return { p: [C[i][0] + (C[j][0] - C[i][0]) * f, C[i][1] + (C[j][1] - C[i][1]) * f], i: j }; }
+          left -= L; i = j;
+        }
+      };
+      const A = along(-1), B = along(1), s = Math.sign(k.d1[0] * k.d2[1] - k.d1[1] * k.d2[0]) || 1;
+      const O = [A.p[0] - k.d1[1] * rr * s, A.p[1] + k.d1[0] * rr * s];
+      const a0 = Math.atan2(A.p[1] - O[1], A.p[0] - O[0]);
+      let da = Math.atan2(B.p[1] - O[1], B.p[0] - O[0]) - a0;
+      while (da > Math.PI) da -= 2 * Math.PI;
+      while (da < -Math.PI) da += 2 * Math.PI;
+      const m = Math.max(3, Math.ceil(Math.abs(da) / (Math.PI / 24))), arcPts = [];
+      for (let i = 0; i <= m; i++) arcPts.push([O[0] + rr * Math.cos(a0 + da * i / m), O[1] + rr * Math.sin(a0 + da * i / m)]);
+      C = C.slice(0, A.i + 1).concat(arcPts, C.slice(B.i));
+    };
+    const tr = Math.max(0, q.tipRound || 0), rr0 = Math.max(0, q.rootRound || 0);
+    fillet(mark.rootR, rr0, ...lim.rootR);
+    if (mark.tipR !== mark.tipL) fillet(mark.tipR, tr, ...lim.tipR);
+    fillet(mark.tipL, tr, ...lim.tipL);
+    fillet(mark.rootL, rr0, ...lim.rootL);
+    if (tr > 0 || rr0 > 0) { tooth = []; for (const [x, y] of C) push(Math.atan2(y, x), Math.hypot(x, y)); }
     const rot = (q.rotation || 0) * Math.PI / 180, ang = new Float64Array(N * tooth.length), rad = new Float64Array(N * tooth.length);
     for (let k = 0, o = 0; k < N; k++) for (const [a, r] of tooth) { ang[o] = rot + 2 * half * k + a; rad[o] = r; o++; }
-    return { ang, rad, N, rp, rb, ra, rf, tip: ra0 };
+    const cr = Math.cos(rot), sr = Math.sin(rot), turn = (v) => [v[0] * cr - v[1] * sr, v[0] * sr + v[1] * cr];
+    const corners = {};
+    for (const w of ['tip', 'root']) corners[w] = { V: turn(info[w].V), u: turn(info[w].u), k: info[w].k };
+    return { ang, rad, N, rp, rb, ra, rf, tip: ra0, corners };
   }
   // The cog's radius at an angle (between its outline points).
   function cogRadiusAt(sh, theta) {
@@ -1598,7 +1651,7 @@
   // a cog's outline from above, cached per set of tooth parameters
   const cogCache = new Map();
   function cogShapeOf(q) {
-    const k = [q.kind, q.teeth, q.module, q.pressure, q.addendum, q.dedendum, q.backlash, q.rotation].join('|');
+    const k = [q.kind, q.teeth, q.module, q.pressure, q.addendum, q.dedendum, q.backlash, q.rotation, q.tipRound, q.rootRound].join('|');
     let s = cogCache.get(k);
     if (!s) { if (cogCache.size > 64) cogCache.clear(); s = cogShape(q, 8); cogCache.set(k, s); }
     return s;
@@ -3230,6 +3283,15 @@
         }
         if (cog) {
           for (const ch of cogHandles(n)) for (const phi of dirs) { const [x, y] = at(ch.r, phi); out.push({ key: it.id + '|c|' + ch.what + '|' + phi, id: it.id, kind: 'cog', what: ch.what, phi, P, x, y, col: ch.col, shape: 'diamond', tip: name + ': ' + ch.tip }); }
+          // rounding of the first tooth's corners: drag across the corner
+          const shF = cogShapeOf(q);
+          for (const [what, key, lab] of [['tip', 'tipRound', 'tip rounding'], ['root', 'rootRound', 'root rounding']]) {
+            const c = shF.corners && shF.corners[what];
+            if (!c) continue;
+            const r = q[key] || 0, d = Math.max(r * c.k, 7 / view.s), [x, y] = P.w(c.V[0] + c.u[0] * d, c.V[1] + c.u[1] * d);
+            out.push({ key: it.id + '|f|' + what, id: it.id, kind: 'fillet', what, pkeyName: key, c, P, x, y, col: '#f08c00', shape: 'dot', bevel: true,
+              tip: name + ': ' + lab + ' ' + num(mm(r), 3) + ' ' + UNIT_LABEL + ' — drag into the corner to round it' });
+          }
           const sh = cogShapeOf(q), loc = (q.rotation || 0) * Math.PI / 180, R = Math.max(sh.ra, sh.rf) + pad, [x, y] = P.w(R * Math.cos(loc), R * Math.sin(loc));
           out.push({ key: it.id + '|rot', id: it.id, kind: 'rot', P, x, y, col, shape: 'ring', tip: name + ': turn the teeth (rotation ' + num((q.rotation || 0) * ANG_SCALE, 3) + ANG_LABEL + ')' });
         }
@@ -3263,7 +3325,7 @@
       } else if (h.kind === 'pt') {
         const i = +h.pkey.split('|')[2], np = n.pts.length, at = (j) => { const p = n.pts[(j + np) % np]; return P.w(p.z, h.m * p.y); };
         line([at(i - 1), at(i), at(i + 1)], false);
-      } else if (h.kind === 'rot') {
+      } else if (h.kind === 'rot' || h.kind === 'fillet') {
         const sh = cogShapeOf(n.params), o = outlineOf(n.pts, []), fix = cogFix(n.params, o), rr = cogIn(n.params) ? Math.min(...o.map(p => p.y)) : Math.max(...o.map(p => p.y));
         line(Array.from(sh.ang, (a, j) => { const r = cogWarp(rr, sh.rad[j], fix, sh.tip); return P.w(r * Math.cos(a), r * Math.sin(a)); }), true);
       } else if (h.kind === 'clone') {
@@ -3308,6 +3370,14 @@
       } else if (h.kind === 'cog') {
         drag.id = h.id; drag.what = h.what;
         dragCog(Math.max(0, along(h.phi)), snap);
+      } else if (h.kind === 'fillet') {
+        // how far into the corner, along its bisector, sets the rounding's radius
+        const q = n.params, d = (rel[0] - h.c.V[0]) * h.c.u[0] + (rel[1] - h.c.V[1]) * h.c.u[1];
+        let r = Math.max(0, d / h.c.k);
+        if (d * view.s < 6) r = 0;
+        if (snap) r = rs(r);
+        q[h.pkeyName] = r;
+        drag.label = (h.what === 'tip' ? 'tip' : 'root') + ' rounding ' + num(mm(r), 3) + ' ' + UNIT_LABEL;
       } else if (h.kind === 'rot') {
         const q = n.params, a = Math.atan2(rel[1], rel[0]) * 180 / Math.PI, f = P.inv(drag.from[0] - P.C[0], drag.from[1] - P.C[1]), a0 = Math.atan2(f[1], f[0]) * 180 / Math.PI;
         let rot = drag.snapRot + (a - a0);
@@ -4606,6 +4676,8 @@
         ['Rotation (' + ANG_LABEL.trim() + ')', numInput(() => (q.rotation || 0) * ANG_SCALE, v => setP(t => { t.rotation = v / ANG_SCALE; }), { step: ANG_SCALE === 1 ? '1' : '0.01', digits: 4 })],
         ['Addendum (× module)', numInput(() => q.addendum, v => setP(t => { t.addendum = Math.max(0, Math.min(3, v)); }), { step: '0.05', min: 0, max: 3, digits: 3, title: 'Tooth height above the pitch circle' })],
         ['Dedendum (× module)', numInput(() => q.dedendum, v => setP(t => { t.dedendum = Math.max(0, cogIn(t) ? Math.min(3, v) : Math.min(q.teeth / 2 - 0.05, v)); }), { step: '0.05', min: 0, max: 3, digits: 3, title: 'Tooth depth below the pitch circle' })],
+        ['Tip rounding' + U, numInput(() => mm(q.tipRound || 0), v => setP(t => { t.tipRound = Math.max(0, v / UNIT_SCALE); }), { step: UNIT_SCALE === 1 ? '0.005' : '0.05', min: 0, title: 'Rounds the teeth\'s top corners (seen from above)' })],
+        ['Root rounding' + U, numInput(() => mm(q.rootRound || 0), v => setP(t => { t.rootRound = Math.max(0, v / UNIT_SCALE); }), { step: UNIT_SCALE === 1 ? '0.005' : '0.05', min: 0, title: 'Rounds the corners between the teeth (seen from above)' })],
         ['Backlash' + U, numInput(() => mm(q.backlash || 0), v => setP(t => { t.backlash = Math.max(0, v / UNIT_SCALE); }), { step: UNIT_SCALE === 1 ? '0.001' : '0.02', min: 0, title: 'Taken off each tooth\'s width at the pitch circle, for a looser mesh' })],
         { wide: dyn(() => 'Pitch Ø ' + num(mm(q.module * q.teeth), 3) + ', tip Ø ' + num(mm(2 * cogTip(q)), 3) + ', root Ø ' + num(mm(2 * cogRoot(q)), 3) + ' ' + UNIT_LABEL +
           (UNIT_SCALE === 1 ? ' · diametral pitch ' + num(1 / q.module, 3) : '') + ' · circular pitch ' + num(mm(Math.PI * q.module), 3) + ' ' + UNIT_LABEL, 'color:#666;font-size:11px') })) : null,
