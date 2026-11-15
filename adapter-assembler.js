@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.13.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.13.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.13.0';
+  const APP_VERSION = '3.13.1';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -2224,7 +2224,9 @@
       if (/\s/.test(c)) { i++; continue; }
       const nm = /^(\d+\.?\d*|\.\d+)/.exec(s.slice(i));
       if (nm) { tk.push({ n: parseFloat(nm[1]) }); i += nm[1].length; continue; }
-      if ('+-*/()'.includes(c)) { tk.push({ op: c }); i++; continue; }
+      if ('+-*/()^'.includes(c)) { tk.push({ op: c }); i++; continue; }
+      const fn = /^(sqrt|abs|sin|cos|tan|pi|π)(?![a-z])/.exec(s.slice(i));
+      if (fn) { tk.push(fn[1] === 'pi' || fn[1] === 'π' ? { n: Math.PI } : { fn: fn[1] }); i += fn[1].length; continue; }
       const un = units.find(([w]) => s.startsWith(w, i) && !(/[a-zµ]/.test(w[w.length - 1]) && /[a-zµ]/.test(s[i + w.length] || '')));
       if (un) { tk.push({ u: un[1] }); i += un[0].length; continue; }
       return NaN;
@@ -2233,7 +2235,12 @@
     const peek = () => tk[p], isN = (t) => t && t.n != null, isOp = (t, o) => t && t.op === o;
     function primary() {
       let v, t = peek();
-      if (isOp(t, '(')) { p++; v = expr(); if (!isOp(peek(), ')')) throw 0; p++; }
+      if (t && t.fn) {
+        // sqrt(…), abs(…), sin/cos/tan(… in degrees)
+        p++; if (!isOp(peek(), '(')) throw 0; p++;
+        const a = expr(); if (!isOp(peek(), ')')) throw 0; p++;
+        v = t.fn === 'sqrt' ? Math.sqrt(a) : t.fn === 'abs' ? Math.abs(a) : Math[t.fn](a * Math.PI / 180);
+      } else if (isOp(t, '(')) { p++; v = expr(); if (!isOp(peek(), ')')) throw 0; p++; }
       else if (isN(t)) {
         p++; v = t.n;
         // a mixed number (1 1/4) or a fraction (3/8) stays together, so a unit after it applies to all of it
@@ -2243,7 +2250,8 @@
       if (peek() && peek().u != null) { v *= peek().u; p++; primary.unit = true; }
       return v;
     }
-    function factor() { if (isOp(peek(), '-')) { p++; return -factor(); } if (isOp(peek(), '+')) { p++; return factor(); } return primary(); }
+    function power() { const v = primary(); if (isOp(peek(), '^')) { p++; return Math.pow(v, factor()); } return v; }
+    function factor() { if (isOp(peek(), '-')) { p++; return -factor(); } if (isOp(peek(), '+')) { p++; return factor(); } return power(); }
     function term() {
       let v = factor();
       while (isOp(peek(), '*') || isOp(peek(), '/')) { const o = tk[p++].op, w = factor(); v = o === '*' ? v * w : v / w; }
@@ -2254,7 +2262,7 @@
       let v = term();
       for (;;) {
         if (isOp(peek(), '+') || isOp(peek(), '-')) { const o = tk[p++].op; primary.unit = false; const w = term(); v = o === '+' ? v + w : v - w; }
-        else if (primary.unit && (isN(peek()) || isOp(peek(), '('))) { primary.unit = false; v += term(); }    // 1ft 3in, 5' 3"
+        else if (primary.unit && (isN(peek()) || isOp(peek(), '(') || (peek() && peek().fn))) { primary.unit = false; v += term(); }    // 1ft 3in, 5' 3"
         else return v;
       }
     }
@@ -2266,8 +2274,10 @@
   function unitKey(e, inp) {
     if (inp.tagName !== 'INPUT' || inp.type !== 'number' || e.ctrlKey || e.metaKey || e.altKey || e.key.length !== 1 || plainKey(e.key)) return;
     const v = inp.value;
-    inp.type = 'text'; inp.__unitText = true; inp.value = v;
-    try { inp.setSelectionRange(v.length, v.length); } catch (_) { /* ignore */ }
+    e.preventDefault();
+    // (a number field can't say what is selected in it: __all says the whole of it is, as after Tab or Ctrl+A)
+    inp.type = 'text'; inp.__unitText = true; inp.value = (inp.__all ? '' : v) + e.key; inp.__all = false;
+    try { inp.setSelectionRange(inp.value.length, inp.value.length); } catch (_) { /* ignore */ }
   }
   function unitCommit(inp) {
     if (!inp.__unitText) return;
@@ -2280,6 +2290,10 @@
     // typed text with units: no live update until it is committed
     document.addEventListener('input', (e) => { const t = e.target; if (t && t.__unitText && !/^[-+]?(\d+\.?\d*|\.\d+)$/.test(t.value.trim())) e.stopImmediatePropagation(); }, true);
     document.addEventListener('change', (e) => unitCommit(e.target), true);
+    // whether all of a number field is selected: on reaching it with Tab (everything selected) and after Ctrl+A,
+    // not after a click in it or any other key
+    document.addEventListener('focusin', (e) => { if (e.target && e.target.type === 'number') e.target.__all = true; }, true);
+    document.addEventListener('click', (e) => { if (e.target && e.target.type === 'number') e.target.__all = false; }, true);
     document.addEventListener('blur', (e) => { const t = e.target; if (t && t.__unitText) { unitCommit(t); t.dispatchEvent(new Event('change', { bubbles: true })); } }, true);
     document.addEventListener('keydown', (e) => { const t = e.target; if (t && t.__unitText && e.key === 'Enter') { unitCommit(t); t.dispatchEvent(new Event('change', { bubbles: true })); } }, true);
   }
@@ -2783,6 +2797,8 @@
       if (!root.isConnected) return;
       const ae = document.activeElement || {}, typing = /SELECT|TEXTAREA/.test(ae.tagName || '') || (ae.tagName === 'INPUT' && !/^(checkbox|radio|button|submit|range|color)$/.test(ae.type));
       if (typing) {
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) ae.__all = true;
+        else if (!['Shift', 'Control', 'Alt', 'Meta'].includes(e.key) && !(e.key.length === 1 && !plainKey(e.key) && ae.type === 'number')) ae.__all = false;
         unitKey(e, ae);
         if (ae.__unitText && e.key === 'Enter') { unitCommit(ae); ae.dispatchEvent(new Event('change', { bubbles: true })); }
         if (ae.__onKey) ae.__onKey(e);
