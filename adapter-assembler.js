@@ -1,12 +1,11 @@
+// Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
+// https://github.com/electroluminescent/adapter-assembler
+// Version 3.21.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.20.1';
-  // switching between radius/height and overhead: radius/height tips about the height the overhead view looks down
-  // from, overhead about its own x axis
-  // (set false to go back to both views tipping about the middle of the pane)
-  const TIP_FROM_CUT = true;
+  const APP_VERSION = '3.21.0';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -26,7 +25,6 @@
     precision: 100,        // edges around a full circle
     faces: 'ngons',        // OBJ faces / wireframe: 'ngons' (flat regions as one polygon), 'quads' or 'tris'
     format: 'stl',         // 'stl' | 'obj'
-    cut: true,             // 3D view: cut away half
     wire: false,           // 3D view: wireframe
     ssao: true,            // 3D view: ambient occlusion
     lenUnit: 'mm',         // displayed lengths: 'mm' or 'in'
@@ -74,7 +72,7 @@
 
 
   // Settings remembered in this browser.
-  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'quality', 'collapsed', 'secMode', 'mono', 'autoSimplify', 'heightFrom', 'linkViews', 'settingsRev', 'treeFolded', 'cutsLo', 'cutHandles', 'topCut', 'cut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts', 'cutLo'];
+  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'quality', 'collapsed', 'secMode', 'mono', 'autoSimplify', 'heightFrom', 'linkViews', 'settingsRev', 'treeFolded', 'cutsLo', 'cutHandles', 'topCut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts', 'cutLo'];
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     for (const k of SAVED_SETTINGS) if (k in saved && typeof saved[k] === typeof state[k]) state[k] = saved[k];
@@ -1431,6 +1429,9 @@
   const HS = () => (state.flip ? -1 : 1) * (state.heightFrom === 'top' ? -1 : 1);
   const hDisp = (z, base) => HS() * (z - base) * UNIT_SCALE;
   const hInv = (v, base) => base + HS() * v / UNIT_SCALE;      // a shown height → scene
+  // an object from z up by its height: the end shown at the bottom (its top, when the part is upside down), and back
+  const lowEnd = (z, height) => (state.flip ? z + (height || 0) : z);
+  const fromLowEnd = (z, height) => (state.flip ? z - (height || 0) : z);
   function newId(prefix) { state.scene.seq = (state.scene.seq || 1) + 1; return prefix + state.scene.seq; }
   const PREFIX = { circle: 'c', ngon: 'n', cog: 'w', boolean: 'b', group: 'g', source: 's', thread: 't', cloner: 'k', holes: 'h' };
 
@@ -1970,7 +1971,7 @@
         state.scene = clone(data.scene);
         state.scene.seq = Math.max(state.scene.seq || 1, Object.keys(state.scene.nodes).length + 1);
         if (data.view && isFinite(data.view.angle)) state.viewAngle = data.view.angle;
-        state.sel = new Set(); state.selNodes = new Set(); state.edited = true;
+        state.sel = new Set(); state.selNodes = new Set(); state.edited = true; sceneReplaced();
         state.libMessage = 'Loaded the scene from ' + file.name + ' (Undo returns to the previous scene).';
         markEdited(); recalc(); return;
       }
@@ -1983,7 +1984,7 @@
         // nothing open yet: open the models as the scene
         state.scene = { nodes: {}, root: [], seq: 1 };
         for (const m of ok) { const sub = remapSubtree(m.model, (n) => newId(PREFIX[n.type] || 'x')); Object.assign(state.scene.nodes, sub.nodes); state.scene.root.push(sub.rootId); }
-        state.edited = true; markEdited(); recalc();
+        state.edited = true; sceneReplaced(); markEdited(); recalc();
       }
       state.libMessage = libStore(list) ? 'Added ' + ok.length + ' model' + (ok.length === 1 ? '' : 's') + ' from ' + file.name + ' to My saved models.' : 'Could not save: browser storage is unavailable or full.';
       renderAll();
@@ -2526,6 +2527,10 @@
   }
 
   function renderAll() { if (editor) editor.render(); }
+  // The scene was replaced whole (opened, imported, built): the views fit it afresh, and the list's folds, which go by
+  // object id, start over.
+  let sceneSwaps = 0;
+  function sceneReplaced() { sceneSwaps++; if ((state.treeFolded || []).length) { state.treeFolded = []; saveSettings(); } }
   // turning the part over: the views turn with it, keeping the same part of it in the middle
   function setFlip(v) {
     if (!!state.flip === !!v) return;
@@ -2818,7 +2823,7 @@
     function openScene(sc, msg) {
       if (state.scene) pushUndo();
       state.scene = sc; state.sel = new Set(); state.selNodes = new Set(); state.edited = true; state.libMessage = msg || null;
-      view = null; hideSplash(); markEdited(); recalc();
+      sceneReplaced(); hideSplash(); markEdited(); recalc();
     }
     function threadPicker(title, init) {
       // gender, standard (or custom diameter and pitch), thread length
@@ -2870,7 +2875,7 @@
           card('Blank project',
             el('button', { type: 'button', style: BTN, onclick: () => openScene({ nodes: {}, root: [], seq: 1 }) }, 'Start blank')),
           card('Open a project',
-            el('button', { type: 'button', style: BTN, onclick: () => { W.__aaOnProjectLoaded = () => { view = null; hideSplash(); }; pickJsonFile(); } }, 'Open JSON file…'),
+            el('button', { type: 'button', style: BTN, onclick: () => { W.__aaOnProjectLoaded = hideSplash; pickJsonFile(); } }, 'Open JSON file…'),
             lib.length ? el('div', { style: 'margin-top:10px' }, el('div', { style: 'font-weight:700;margin-bottom:4px' }, 'My saved models'),
               ...lib.map(entry => el('div', { style: 'display:flex;gap:6px;align-items:center;margin:2px 0' },
                 el('button', { type: 'button', style: BTN2, onclick: () => {
@@ -2931,7 +2936,11 @@
 
     // ---- geometry helpers for the view ----
     // the pane's own size (not the drawn one, which shrinks while the view tips over in a transition)
-    const size = () => ({ w: left.clientWidth || 800, h: left.clientHeight || 600 });
+    // Read once per drawing (and when the pane is resized), not per point: asking the page for it after the drawing has
+    // changed makes it lay everything out again, and the view's transforms ask for it thousands of times.
+    const SZ = { w: 800, h: 600 };
+    const measure = () => { SZ.w = left.clientWidth || 800; SZ.h = left.clientHeight || 600; };
+    const size = () => SZ;
     function fit() {
       if (topMode()) { fitTop(); return; }
       let y0 = Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
@@ -3365,9 +3374,9 @@
     // ---- monomorphic from above: the finished part itself, so a subtraction only takes away what it really removes ----
     // The outline is Manifold's projection of the solid cut to the height band (exact, with the holes that go right
     // through); the lines inside are the part's sharp edges in the band (where one part stands over another, steps,
-    // bores), where nothing of the part covers them from above. Worked out off the drawing (it can take a moment) and
-    // cached per model and band.
-    let topMonoSolid = null, topMonoCache = null, topMonoJob = null;
+    // bores), where nothing of the part covers them from where it is looked at. Worked out off the drawing (it can take
+    // a moment) and kept per model and band.
+    let topMonoSolid = null, topMonoCache = null, topMonoWant = null, topMonoTimer = 0;
     async function mainManifold() {
       if (W.__aaManifold) return W.__aaManifold;
       const mod = await import(jobSettings().manifoldUrl), wasm = await mod.default();
@@ -3420,52 +3429,71 @@
       }
       return ghost;
     }
-    // keeps the pieces of these segments ([ax, ay, az, bx, by, bz] …) that can be seen from above (nothing of the part over
-    // them up to the height hi; above hi, inside the part counts as covered: the cut there is a lid). → [[x0, y0, x1, y1] …]
-    function visibleFromAbove(V, T, segs, hi) {
+    // What lies over each place of the part, for telling which edges can be seen: the model's faces (the upright ones
+    // left out) in a grid from above, each with its plane worked out. Built once per model.
+    function coverIndex(V, T) {
       const nt = T.length / 3;
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
       for (let i = 0; i < V.length; i += 3) { x0 = Math.min(x0, V[i]); x1 = Math.max(x1, V[i]); y0 = Math.min(y0, V[i + 1]); y1 = Math.max(y1, V[i + 1]); z0 = Math.min(z0, V[i + 2]); z1 = Math.max(z1, V[i + 2]); }
-      if (!isFinite(x0)) return [];
-      const diag = Math.hypot(x1 - x0, y1 - y0, z1 - z0) || 1, eps = diag * 2e-5, G = Math.max(16, Math.min(256, Math.round(Math.sqrt(nt) * 1.5)));
-      const sx = G / ((x1 - x0) || 1), sy = G / ((y1 - y0) || 1), cells = Array.from({ length: G * G }, () => []);
+      if (!isFinite(x0)) return null;
+      const diag = Math.hypot(x1 - x0, y1 - y0, z1 - z0) || 1, G = Math.max(16, Math.min(256, Math.round(Math.sqrt(nt) * 1.5)));
+      const sx = G / ((x1 - x0) || 1), sy = G / ((y1 - y0) || 1);
       const cx = (x) => Math.max(0, Math.min(G - 1, Math.floor((x - x0) * sx))), cy = (y) => Math.max(0, Math.min(G - 1, Math.floor((y - y0) * sy)));
+      // per face: a corner, the two rows that turn (x, y) into its (u, v), and the heights across it
+      const F = new Float64Array(nt * 9), box = new Int32Array(nt * 4), start = new Uint32Array(G * G + 1);
       for (let f = 0; f < nt; f++) {
-        const a = T[f * 3] * 3, b = T[f * 3 + 1] * 3, c = T[f * 3 + 2] * 3;
-        const ar = (V[b] - V[a]) * (V[c + 1] - V[a + 1]) - (V[c] - V[a]) * (V[b + 1] - V[a + 1]);
-        if (Math.abs(ar) < 1e-14) continue;                         // upright: seen edge-on from above
+        const a = T[f * 3] * 3, b = T[f * 3 + 1] * 3, c = T[f * 3 + 2] * 3, o = f * 9;
+        const d = (V[b] - V[a]) * (V[c + 1] - V[a + 1]) - (V[c] - V[a]) * (V[b + 1] - V[a + 1]);
+        box[f * 4] = -1;
+        if (Math.abs(d) < 1e-14) continue;                          // upright: seen edge-on from above
+        F[o] = V[a]; F[o + 1] = V[a + 1]; F[o + 2] = V[a + 2];
+        F[o + 3] = (V[c + 1] - V[a + 1]) / d; F[o + 4] = -(V[c] - V[a]) / d; F[o + 5] = -(V[b + 1] - V[a + 1]) / d; F[o + 6] = (V[b] - V[a]) / d;
+        F[o + 7] = V[b + 2] - V[a + 2]; F[o + 8] = V[c + 2] - V[a + 2];
         const i0 = cx(Math.min(V[a], V[b], V[c])), i1 = cx(Math.max(V[a], V[b], V[c])), j0 = cy(Math.min(V[a + 1], V[b + 1], V[c + 1])), j1 = cy(Math.max(V[a + 1], V[b + 1], V[c + 1]));
-        for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) cells[j * G + i].push(f);
+        box[f * 4] = i0; box[f * 4 + 1] = i1; box[f * 4 + 2] = j0; box[f * 4 + 3] = j1;
+        for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) start[j * G + i + 1]++;
       }
-      // nudged off any shared edge so a ray up from here crosses each surface once
-      const DX = diag * 1.37e-7, DY = diag * 0.73e-7;
-      const covered = (x, y, z) => {
-        x += DX; y += DY;
-        let overHi = 0;
-        for (const f of cells[cy(y) * G + cx(x)]) {
-          const a = T[f * 3] * 3, b = T[f * 3 + 1] * 3, c = T[f * 3 + 2] * 3;
-          const d = (V[b] - V[a]) * (V[c + 1] - V[a + 1]) - (V[c] - V[a]) * (V[b + 1] - V[a + 1]);
-          const u = ((x - V[a]) * (V[c + 1] - V[a + 1]) - (V[c] - V[a]) * (y - V[a + 1])) / d, v = ((V[b] - V[a]) * (y - V[a + 1]) - (x - V[a]) * (V[b + 1] - V[a + 1])) / d;
-          if (u < 0 || v < 0 || u + v > 1) continue;
-          const zf = V[a + 2] + (V[b + 2] - V[a + 2]) * u + (V[c + 2] - V[a + 2]) * v;
-          if (zf <= z + eps) continue;
-          if (zf <= hi) return true;
-          overHi++;
-        }
-        return (overHi & 1) === 1;
-      };
-      const out = [], step = Math.hypot(x1 - x0, y1 - y0) / 700;
+      for (let i = 0; i < G * G; i++) start[i + 1] += start[i];
+      const items = new Uint32Array(start[G * G]), fill = start.slice(0, G * G);
+      for (let f = 0; f < nt; f++) {
+        if (box[f * 4] < 0) continue;
+        for (let j = box[f * 4 + 2]; j <= box[f * 4 + 3]; j++) for (let i = box[f * 4]; i <= box[f * 4 + 1]; i++) items[fill[j * G + i]++] = f;
+      }
+      // (nudged off any shared edge, so a ray from the place crosses each surface once)
+      return { F, start, items, G, cx, cy, eps: diag * 2e-5, step: Math.hypot(x1 - x0, y1 - y0) / 700, DX: diag * 1.37e-7, DY: diag * 0.73e-7, span: Math.max(Math.abs(x0), Math.abs(x1), Math.abs(y0), Math.abs(y1)) };
+    }
+    // Is the place covered, looking at it along dir (1: from above, -1: from below, for a part shown upside down)?
+    // Past the lid (the end of the height band on the viewer's side) the inside of the part covers it: the cut is a lid.
+    function covered(ix, x, y, z, lid, dir) {
+      x += ix.DX; y += ix.DY;
+      const { F, start, items } = ix, c = ix.cy(y) * ix.G + ix.cx(x);
+      let past = 0;
+      for (let k = start[c], e = start[c + 1]; k < e; k++) {
+        const o = items[k] * 9, px = x - F[o], py = y - F[o + 1], u = F[o + 3] * px + F[o + 4] * py;
+        if (u < 0) continue;
+        const v = F[o + 5] * px + F[o + 6] * py;
+        if (v < 0 || u + v > 1) continue;
+        const zf = F[o + 2] + F[o + 7] * u + F[o + 8] * v;
+        if ((zf - z) * dir <= ix.eps) continue;
+        if ((zf - lid) * dir <= 0) return true;
+        past++;
+      }
+      return (past & 1) === 1;
+    }
+    // the pieces of these segments ([ax, ay, az, bx, by, bz] …) that can be seen, as a path (x y pairs in scene units)
+    function visiblePath(ix, segs, lid, dir, f) {
+      let out = '';
       for (let k = 0; k < segs.length; k += 6) {
         const ax = segs[k], ay = segs[k + 1], az = segs[k + 2], bx = segs[k + 3], by = segs[k + 4], bz = segs[k + 5];
-        const L = Math.hypot(bx - ax, by - ay), n = Math.max(1, Math.min(64, Math.ceil(L / step)));
+        const L = Math.hypot(bx - ax, by - ay), n = Math.max(1, Math.min(64, Math.ceil(L / ix.step)));
         // hidden only when covered just to both sides of it (an edge right under the rim of a wall is still seen)
-        const ox = -(by - ay) / (L || 1) * eps * 5, oy = (bx - ax) / (L || 1) * eps * 5;
+        const ox = -(by - ay) / (L || 1) * ix.eps * 5, oy = (bx - ax) / (L || 1) * ix.eps * 5;
         let from = -1;
         for (let i = 0; i <= n; i++) {
           const mx = ax + (bx - ax) * (i + 0.5) / n, my = ay + (by - ay) * (i + 0.5) / n, mz = az + (bz - az) * (i + 0.5) / n;
-          const vis = i < n && !(covered(mx + ox, my + oy, mz) && covered(mx - ox, my - oy, mz));
+          const vis = i < n && !(covered(ix, mx + ox, my + oy, mz, lid, dir) && covered(ix, mx - ox, my - oy, mz, lid, dir));
           if (vis && from < 0) from = i;
-          if (!vis && from >= 0) { out.push([ax + (bx - ax) * from / n, ay + (by - ay) * from / n, ax + (bx - ax) * i / n, ay + (by - ay) * i / n]); from = -1; }
+          if (!vis && from >= 0) { out += 'M' + f(ax + (bx - ax) * from / n) + ' ' + f(ay + (by - ay) * from / n) + 'L' + f(ax + (bx - ax) * i / n) + ' ' + f(ay + (by - ay) * i / n); from = -1; }
         }
       }
       return out;
@@ -3507,65 +3535,72 @@
       }
       return { V: new Float32Array(V), T, seg };
     }
-    // { loops, lines } for this band, or null while it is being worked out (or when it cannot be)
+    // The drawing for this band of heights, as two paths in scene units ({ dd: outline, ln: lines inside }); the last
+    // one made until the new one is ready, null when there is none (or it cannot be made).
     function topMono(band) {
       const t = meshTris;
-      if (!t || !t.length) return null;
-      const lo = band ? band.lo : -Infinity, hi = band ? band.hi : Infinity;
-      if (topMonoCache && topMonoCache.t === t && topMonoCache.lo === lo && topMonoCache.hi === hi) return topMonoCache.res;
-      if (topMonoJob && topMonoJob.t === t && topMonoJob.lo === lo && topMonoJob.hi === hi) return topMonoCache && topMonoCache.t === t ? topMonoCache.res : null;
-      const job = topMonoJob = { t, lo, hi };
-      setTimeout(async () => {
-        let res = null;
-        try {
-          const mf = await mainManifold();
-          if (job !== topMonoJob) return;
-          if (!topMonoSolid || topMonoSolid.t !== t) {
-            if (topMonoSolid && topMonoSolid.m) topMonoSolid.m.delete();
-            const mesh = topMonoMesh(t);
-            let m = null;
-            try { const mm = new mf.Mesh({ numProp: 3, vertProperties: mesh.V, triVerts: mesh.T }); mm.merge(); m = new mf.Manifold(mm); } catch (_) { m = null; }
-            topMonoSolid = { t, m, seg: mesh.seg, V: mesh.V, T: mesh.T };
+      if (!t || !t.length) { topMonoCache = null; return null; }
+      const lo = band ? band.lo : -Infinity, hi = band ? band.hi : Infinity, fl = !!state.flip;
+      const same = (k) => k && k.t === t && k.lo === lo && k.hi === hi && k.fl === fl;
+      if (same(topMonoCache)) return topMonoCache.res;
+      if (!same(topMonoWant)) {
+        topMonoWant = { t, lo, hi, fl };
+        clearTimeout(topMonoTimer);
+        // while something is being dragged the model changes many times a second: wait for a pause
+        topMonoTimer = setTimeout(topMonoRun, drag && drag.moved ? 250 : 0);
+      }
+      return topMonoCache ? topMonoCache.res : null;
+    }
+    async function topMonoRun() {
+      const job = topMonoWant;
+      if (!job) return;
+      const { t, lo, hi, fl } = job;
+      let res = null;
+      try {
+        const mf = await mainManifold();
+        if (job !== topMonoWant) return;
+        if (!topMonoSolid || topMonoSolid.t !== t) {
+          if (topMonoSolid && topMonoSolid.m) topMonoSolid.m.delete();
+          const mesh = topMonoMesh(t);
+          let m = null;
+          try { const mm = new mf.Mesh({ numProp: 3, vertProperties: mesh.V, triVerts: mesh.T }); mm.merge(); m = new mf.Manifold(mm); } catch (_) { m = null; }
+          topMonoSolid = { t, m, seg: mesh.seg, ix: m ? coverIndex(mesh.V, mesh.T) : null };
+        }
+        const S = topMonoSolid;
+        if (S.m && S.ix) {
+          const tmp = [], f = (v) => v.toFixed(5);
+          let m = S.m;
+          if (isFinite(lo)) { m = m.trimByPlane([0, 0, 1], lo); tmp.push(m); }
+          if (isFinite(hi)) { m = m.trimByPlane([0, 0, -1], -hi); tmp.push(m); }
+          const cs = m.project(), polys = cs.toPolygons();
+          cs.delete(); for (const x of tmp) x.delete();
+          // (no slivers: where faces just touch, Manifold leaves loops with no area)
+          const xy = (P) => P.map(p => Array.isArray(p) ? [p[0], p[1]] : [p.x, p.y]);
+          const area = (L) => { let a = 0; for (let i = 0; i < L.length; i++) { const A = L[i], B = L[(i + 1) % L.length]; a += A[0] * B[1] - B[0] * A[1]; } return Math.abs(a) / 2; };
+          const tiny = (S.ix.span * 2e-3) ** 2, real = (L) => L.length > 2 && area(L) > tiny;
+          const path = (L) => 'M' + L.map(p => f(p[0]) + ' ' + f(p[1])).join('L') + 'Z';
+          const dd = polys.map(xy).filter(real).map(path).join('');
+          // the sharp edges, cut to the band; only what can be seen from where the part is looked at (above; from
+          // below when it is shown upside down)
+          const seg3 = [], s = S.seg, dir = fl ? -1 : 1, lid = fl ? lo : hi;
+          for (let k = 0; k < s.length; k += 6) {
+            let ax = s[k], ay = s[k + 1], az = s[k + 2], bx = s[k + 3], by = s[k + 4], bz = s[k + 5];
+            if (Math.max(az, bz) < lo - 1e-9 || Math.min(az, bz) > hi + 1e-9) continue;
+            const cut = (z) => { const g = (z - az) / (bz - az); return [ax + (bx - ax) * g, ay + (by - ay) * g]; };
+            if (az < lo && bz > lo || az > lo && bz < lo) { const [x, y] = cut(lo); if (az < lo) { ax = x; ay = y; az = lo; } else { bx = x; by = y; bz = lo; } }
+            if (az > hi && bz < hi || az < hi && bz > hi) { const [x, y] = cut(hi); if (az > hi) { ax = x; ay = y; az = hi; } else { bx = x; by = y; bz = hi; } }
+            seg3.push(ax, ay, az, bx, by, bz);
           }
-          const S = topMonoSolid;
-          if (S.m) {
-            const tmp = [];
-            let m = S.m;
-            if (isFinite(lo)) { m = m.trimByPlane([0, 0, 1], lo); tmp.push(m); }
-            if (isFinite(hi)) { m = m.trimByPlane([0, 0, -1], -hi); tmp.push(m); }
-            const cs = m.project(), polys = cs.toPolygons();
-            cs.delete(); for (const x of tmp) x.delete();
-            // (no slivers: where faces just touch, Manifold leaves loops with no area)
-            const xy = (P) => P.map(p => Array.isArray(p) ? [p[0], p[1]] : [p.x, p.y]);
-            const area = (L) => { let a = 0; for (let i = 0; i < L.length; i++) { const A = L[i], B = L[(i + 1) % L.length]; a += A[0] * B[1] - B[0] * A[1]; } return Math.abs(a) / 2; };
-            const vb = S.V; let span = 0; for (let i = 0; i < vb.length; i += 3) span = Math.max(span, Math.abs(vb[i]), Math.abs(vb[i + 1]));
-            const tiny = (span * 2e-3) ** 2;
-            const loops = polys.map(xy).filter(L => L.length > 2 && area(L) > tiny);
-            // the sharp edges, cut to the band; only what can be seen from above
-            const seg3 = [], s = S.seg;
-            for (let k = 0; k < s.length; k += 6) {
-              let ax = s[k], ay = s[k + 1], az = s[k + 2], bx = s[k + 3], by = s[k + 4], bz = s[k + 5];
-              if (Math.max(az, bz) < lo - 1e-9 || Math.min(az, bz) > hi + 1e-9) continue;
-              const cut = (z) => { const f = (z - az) / (bz - az); return [ax + (bx - ax) * f, ay + (by - ay) * f]; };
-              if (az < lo && bz > lo || az > lo && bz < lo) { const [x, y] = cut(lo); if (az < lo) { ax = x; ay = y; az = lo; } else { bx = x; by = y; bz = lo; } }
-              if (az > hi && bz < hi || az < hi && bz > hi) { const [x, y] = cut(hi); if (az > hi) { ax = x; ay = y; az = hi; } else { bx = x; by = y; bz = hi; } }
-              seg3.push(ax, ay, az, bx, by, bz);
-            }
-            const lines = visibleFromAbove(S.V, S.T, seg3, hi);
-            // where the top of the band cuts through material: the cut's own edges (on top, so always seen)
-            for (const z of [hi]) if (isFinite(z)) {
-              const sl = S.m.slice(z), sp = sl.toPolygons().map(xy).filter(L => L.length > 2 && area(L) > tiny); sl.delete();
-              for (const P of sp) for (let i = 0; i < P.length; i++) { const A = P[i], B = P[(i + 1) % P.length]; lines.push([A[0], A[1], B[0], B[1]]); }
-            }
-            res = { loops, lines };
-          }
-        } catch (e) { res = null; }
-        if (job !== topMonoJob) return;
-        topMonoJob = null;
-        topMonoCache = { t, lo, hi, res };
-        if (topMode() && monoOn()) drawSection();
-      }, 0);
-      return topMonoCache && topMonoCache.t === t ? topMonoCache.res : null;
+          let ln = visiblePath(S.ix, seg3, lid, dir, f);
+          // where the band's end on the viewer's side cuts through material: the cut's own edges (on top, so seen)
+          if (isFinite(lid)) { const sl = S.m.slice(lid); ln += sl.toPolygons().map(xy).filter(real).map(path).join(''); sl.delete(); }
+          res = { dd, ln };
+        }
+      } catch (e) { res = null; }
+      if (job !== topMonoWant) return;
+      topMonoWant = null;
+      topMonoCache = { t, lo, hi, fl, res };
+      if (topMode() && monoOn()) drawSection();
     }
 
     // ---- the part seen from above: x across, y up (the plane the part turns in) ----
@@ -3581,7 +3616,6 @@
     // radius/height → above: the radius stays where it was, and the section line (the x axis from above) lands where the
     // height the view from above looks down from (the top of its height band) was on the screen.
     // above → radius/height: back at the height the radius/height view had (or the part's middle height, if none yet).
-    let sideCz = null;
     // the height the view from above looks down from: the top of its band (flipped: what is on top)
     function lookFromZ() {
       const r = sceneZRange(), band = topBand(), up = state.flip ? 0 : 1;
@@ -3595,7 +3629,7 @@
     // (when that height is off the screen, the section line goes to the middle instead)
     const onScreen = (y) => y >= 0 && y <= size().h - AX_B;
     const LINK = () => state.linkViews !== false;
-    // not linked: each view keeps its own place and zoom
+    // where each view was left (not linked: it comes back just so; linked: the radius/height view's height does)
     const ownViews = { section: null, top: null };
     const otherView = (v, toTop) => {
       if (!v) return v;
@@ -3605,7 +3639,7 @@
       }
       let cz;
       if (toTop) { cz = v.cz - FZ() * lookFromZ(); if (!onScreen(size().h / 2 + cz * v.s)) cz = 0; }
-      else cz = sideCz != null ? sideCz : v.cz + FZ() * partZMid();
+      else cz = ownViews.section ? ownViews.section.cz : v.cz + FZ() * partZMid();
       return { cy: v.cy, cz, s: v.s, fit: v.fit };
     };
     function setSecMode(m) {
@@ -3613,7 +3647,6 @@
       const toTop = m === 'top';
       zoomAnim = null;
       const before = view;
-      if (toTop && view) sideCz = view.cz;
       if (view) ownViews[toTop ? 'section' : 'top'] = { ...view };
       view = otherView(view, toTop);
       state.secMode = toTop ? 'top' : 'section'; saveSettings();
@@ -3629,11 +3662,11 @@
         ghost.style.position = 'absolute'; ghost.style.inset = '0';
         // the radius/height view turns about a level line through the middle of the pane
         const pv = '50% 50%';
-        // TIP_FROM_CUT: the radius/height view turns about the height the view from above looks down from (the top of
+        // linked views: the radius/height view turns about the height the view from above looks down from (the top of
         // its height band), and the view from above about its own x axis (the section line), so the two meet there.
-        // (false: both views turn about the middle of the pane, as before.)
+        // (not linked: both turn about the middle of the pane.)
         let pSide = pv, pTop = pv;
-        if (TIP_FROM_CUT && LINK()) {
+        if (LINK()) {
           const sideV = toTop ? before : view, topV = toTop ? view : before, zTop = lookFromZ(), H = size().h;
           // (a line off the screen: about the middle instead)
           const yS = sideV && zTop != null ? H / 2 - (FZ() * zTop - sideV.cz) * sideV.s : NaN, yT = topV ? H / 2 + topV.cz * topV.s : NaN;
@@ -3806,8 +3839,7 @@
         // world → screen is a turn, a scale and a shift: one transform for the whole drawing
         const [x0, y0] = toScreen(0, 0), [x1, y1] = toScreen(1, 0), [x2, y2] = toScreen(0, 1);
         const gT = sv('g', { transform: 'matrix(' + [x1 - x0, y1 - y0, x2 - x0, y2 - y0, x0, y0].map(v => +v.toFixed(6)).join(' ') + ')' });
-        const dd = exactTop.loops.map(L => 'M' + L.map(p => p[0].toFixed(5) + ' ' + p[1].toFixed(5)).join('L') + 'Z').join('');
-        const ln = exactTop.lines.map(l => 'M' + l[0].toFixed(5) + ' ' + l[1].toFixed(5) + 'L' + l[2].toFixed(5) + ' ' + l[3].toFixed(5)).join('');
+        const { dd, ln } = exactTop;
         if (dd) {
           gT.append(sv('path', { d: dd, fill: 'none', stroke: '#868e96', 'stroke-width': 2.4, 'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke' }));
           gT.append(sv('path', { d: dd, fill: '#dee2e6', 'fill-rule': 'evenodd', stroke: 'none' }));
@@ -4157,7 +4189,10 @@
         : 'dedendum ' + num(q.dedendum, 3) + ' × module · root Ø ' + num(mm(2 * cogRoot(q)), 3);
       drag.label += ' ' + UNIT_LABEL;
     }
+    let seenSwaps = sceneSwaps;
     function drawSection() {
+      measure();
+      if (seenSwaps !== sceneSwaps) { seenSwaps = sceneSwaps; view = null; ownViews.section = ownViews.top = null; }
       syncModeBtns(); syncTopBox();
       svg.textContent = '';
       if (!state.scene) return;
@@ -4199,7 +4234,6 @@
       const order = frontOrder(), ext = { y0: Infinity, y1: -Infinity, z0: Infinity, z1: -Infinity };
       lastPolys = { 1: {}, '-1': {} };
       // monomorphic: everything not selected drawn as one grey shape, without handles
-      const monoHidden = monoHid;
       for (const sideK of [-1, 1]) {
       MS = sideK;
       const monoG = sv('g', { 'pointer-events': 'none' }), monoPos = [], monoNeg = [];
@@ -4215,7 +4249,7 @@
         const fill = role === 'negative' ? 'url(#aa-hatch)' : crossing ? 'rgba(220,38,38,.18)' : col + (role === 'intersect' ? '18' : '26');
         const dAll = pathOf(poly) + (twin ? pathOf(twin) : '');
         lastPolys[MS][id] = { d: dAll, col };      // for the hover highlight
-        if (monoHidden(id)) { (role === 'negative' ? monoNeg : monoPos).push(pathOf(poly)); if (twin) (role === 'negative' ? monoNeg : monoPos).push(pathOf(twin)); continue; }
+        if (monoHid(id)) { (role === 'negative' ? monoNeg : monoPos).push(pathOf(poly)); if (twin) (role === 'negative' ? monoNeg : monoPos).push(pathOf(twin)); continue; }
         for (const part of twin ? [poly, twin] : [poly])
           g.append(sv('path', { d: pathOf(part), fill, stroke: crossing || role === 'negative' ? '#e03131' : col, 'stroke-width': selected ? 2.8 : 1.4,
             'stroke-dasharray': role === 'negative' ? '6 3' : 'none', 'stroke-linejoin': 'round' }));
@@ -4246,7 +4280,7 @@
       } else drawMono(monoG, monoPos, monoNeg, MS > 0 ? 'r' : 'l');
       // bevels: grab one to make it bigger or smaller
       for (const id of order) {
-        if (monoHidden(id)) continue;
+        if (monoHid(id)) continue;
         const n = state.scene.nodes[id], arcs = new Map(), xf = xfOf(state.scene, id);
         for (const it of expandProfile(n.pts, n.runs)) if (!it.band && it.corner != null) { if (!arcs.has(it.corner)) arcs.set(it.corner, []); arcs.get(it.corner).push(xf.fwd(it)); }
         for (const [i, arc] of arcs) {
@@ -4285,7 +4319,7 @@
       }
       // handles that would cover each other are fanned out around their common point (with a thin leader), so each can be grabbed
       const hds = [];
-      for (const id of order) if (!monoHidden(id)) for (const hd of handlesOf(id)) { const [x, y] = toScreen(hd.y, hd.z); hds.push({ id, hd, x, y, dx: 0, dy: 0 }); }
+      for (const id of order) if (!monoHid(id)) for (const hd of handlesOf(id)) { const [x, y] = toScreen(hd.y, hd.z); hds.push({ id, hd, x, y, dx: 0, dy: 0 }); }
       const grid2 = new Map(), cell = (x, y) => Math.floor(x / 6) + ',' + Math.floor(y / 6);
       hds.forEach((h, i) => { const c = cell(h.x, h.y); if (!grid2.has(c)) grid2.set(c, []); grid2.get(c).push(i); });
       const seen = new Set();
@@ -4357,9 +4391,9 @@
         if (h.kind !== 'e') continue;
         const n = state.scene.nodes[h.node]; if (!n) continue;
         const xf = xfOf(state.scene, h.node), a = xf.fwd(n.pts[h.i]), b = xf.fwd(n.pts[(h.i + 1) % n.pts.length]), L = Math.hypot(b.y - a.y, b.z - a.z);
-        const ang = Math.atan2(b.z - a.z, b.y - a.y) * 180 / Math.PI;
+        const ang = Math.atan2(FZ() * (b.z - a.z), b.y - a.y) * 180 / Math.PI;      // as shown
         const [x, y] = toScreen((a.y + b.y) / 2, (a.z + b.z) / 2);
-        label(svg, x + 8, y + 14, ['length ' + num(mm(L), 3) + ' ' + UNIT_LABEL + ' · angle ' + num((((ang % 180) + 180) % 180) * ANG_SCALE, ANG_SCALE === 1 ? 2 : 4) + ANG_LABEL, 'Δx (radius) ' + num(mm(b.y - a.y), 3) + ' · Δy (height) ' + num(mm(b.z - a.z), 3) + ' ' + UNIT_LABEL], { border: '#ffa8a8' });
+        label(svg, x + 8, y + 14, ['length ' + num(mm(L), 3) + ' ' + UNIT_LABEL + ' · angle ' + num((((ang % 180) + 180) % 180) * ANG_SCALE, ANG_SCALE === 1 ? 2 : 4) + ANG_LABEL, 'Δx (radius) ' + num(mm(b.y - a.y), 3) + ' · Δy (height) ' + num(HS() * mm(b.z - a.z), 3) + ' ' + UNIT_LABEL], { border: '#ffa8a8' });
       }
       // sample positions of points that would be inserted (menu hover)
       for (const p of previewMarks) {
@@ -4485,7 +4519,7 @@
       return runs;
     }
     let wrapKey = '', wrapTimer = 0;
-    function drawWrap() {
+    function drawWrap(settled) {
       if (topMode()) {
         // nothing behind the view from above
         clearTimeout(wrapTimer);
@@ -4495,14 +4529,15 @@
       const { w, h } = size();
       const key = [state.job, state.viewAngle, !!state.flip, view && view.s, view && view.cy, view && view.cz, w, h, UNIT_SCALE, state.quality, state.scene ? state.scene.root.length : 0].join('|');
       if (key === wrapKey) return;
-      const busy = !!((drag && drag.moved) || zoomAnim);
+      const busy = !settled && !!((drag && (drag.moved || drag.type === 'pan')) || zoomAnim);
       clearTimeout(wrapTimer);
       if (busy && wrapView) {
         // keep the shading drawn last, moved and scaled to the current view, until things settle
         const a = view.s / wrapView.s, bx = w / 2 - a * w / 2 + (wrapView.cy - view.cy) * view.s, by = h / 2 - a * h / 2 - (wrapView.cz - view.cz) * view.s;
         wrapCanvas.style.transformOrigin = '0 0'; wrapCanvas.style.transform = 'matrix(' + a + ',0,0,' + a + ',' + bx + ',' + by + ')';
         wrapKey = '';
-        wrapTimer = setTimeout(() => { if (!(drag && drag.moved) && !zoomAnim && root.isConnected) drawWrap(); }, 140);
+        // (a pan that pauses gets its shading at once; other drags when they end)
+        wrapTimer = setTimeout(() => { if (!(drag && drag.moved && drag.type !== 'pan') && !zoomAnim && root.isConnected) drawWrap(true); }, 140);
         return;
       }
       drawWrapNow(false);
@@ -4749,10 +4784,10 @@
       if (!t.pts.length && !t.runs.length) return;
       pushUndo();
       if (kind === 'translate') {
-        const dy = tf.dx / UNIT_SCALE, dz = tf.dy / UNIT_SCALE;
+        const dy = tf.dx / UNIT_SCALE, dz = HS() * tf.dy / UNIT_SCALE;       // Δy as heights are shown
         if (state.sel.size) moveKeysView(state.scene, [...state.sel], dy, dz); else t.nodes.forEach(n => moveNodeView(state.scene, n.id, dy, dz));
       } else {
-        const P = pivotOf(t), a = tf.angle / ANG_SCALE * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
+        const P = pivotOf(t), a = FZ() * tf.angle / ANG_SCALE * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);     // counter-clockwise as shown
         const map = kind === 'scale'
           ? (q) => ({ y: P.y + (q.y - P.y) * tf.sx, z: P.z + (q.z - P.z) * (tf.linkScale ? tf.sx : tf.sy) })
           : (q) => ({ y: P.y + (q.y - P.y) * c - (q.z - P.z) * s, z: P.z + (q.y - P.y) * s + (q.z - P.z) * c });
@@ -4777,6 +4812,7 @@
         selBtn.querySelector('.aa-hl').textContent = 'Selection — ' + (keys.length ? pk.length + ' point' + (pk.length === 1 ? '' : 's') + (keys.some(k => parseKey(k).kind === 'e') ? ' (with edges)' : '')
           : objs.length + ' object' + (objs.length === 1 ? '' : 's')); }
       if (!open) {
+        coord.style.top = '32px';
         if (selBox.style.display !== 'none' && selBox.animate && !reduceMotion()) {
           const a = selBox.animate([{ opacity: 1 }, { opacity: 0, transform: 'translateY(-6px)' }], { duration: 120, easing: 'ease-in' });
           a.onfinish = () => { if ((!state.sel.size && !state.selNodes.size) || state.selBoxCollapsed) selBox.style.display = 'none'; };
@@ -4831,6 +4867,7 @@
       piv.value = tf.pivot; piv.addEventListener('change', () => { tf.pivot = piv.value; });
       add('About', { span: [piv] }, null);
       selBox.append(grid);
+      coord.style.top = (selBox.offsetTop + selBox.offsetHeight + 4) + 'px';
     }
 
     // ---- pointer interaction ----
@@ -5334,6 +5371,8 @@
         return box;
       };
       const folded = new Set(state.treeFolded || []);
+      const selIds = new Set([...state.selNodes, ...[...state.sel].map(k => parseKey(k).node)]);
+      const holdsSel = (id) => { const n = sc.nodes[id]; return !!n && isContainer(n) && n.children.some(c => c != null && (selIds.has(c) || holdsSel(c))); };
       // groups, booleans and cloners fold their contents away (remembered)
       const twisty = (n) => {
         if (!isContainer(n)) return el('span', { style: 'display:inline-block;width:11px' });
@@ -5353,7 +5392,7 @@
         if (n.type === 'group' || n.type === 'cloner') target = { parent: id, slot: null };
         else if (n.type === 'boolean') { const s = n.children.indexOf(null); target = s >= 0 ? { parent: id, slot: s } : drop; }
         mkRow({ id, drop: target, title: 'Drag onto a group, a boolean slot or the scene to move it',
-          style: 'position:relative;padding:1px 4px;margin-left:' + depth * 14 + 'px;border-radius:4px;cursor:pointer;user-select:none;transition:background-color .15s,outline-color .15s;' + (selected ? 'background:#ddf4ff;outline:1px solid #54aeff' : ''),
+          style: 'position:relative;padding:1px 4px;margin-left:' + depth * 14 + 'px;border-radius:4px;cursor:pointer;user-select:none;transition:background-color .15s,outline-color .15s;' + (selected ? 'background:#ddf4ff;outline:1px solid #54aeff' : folded.has(id) && holdsSel(id) ? 'background:#eef8ff;outline:1px dashed #a5d8ff' : ''),
           kids: [treeLines(depth, trail), twisty(n),
             el('span', { style: 'display:inline-flex;vertical-align:-2px;margin-right:4px;color:' + (COLORS[n.type] || '#555') }, icon(nodeIcon(n), 14)), (label ? label + ' ' : '') + (n.name || id),
             n.type === 'boolean' ? el('span', { style: 'color:#888' }, ' (' + (n.op === 'difference' ? 'A − B' : n.op) + ')') : n.type === 'group' ? el('span', { style: 'color:#888' }, ' (group, ' + n.children.length + ')')
@@ -5469,7 +5508,7 @@
           sect('Length and position', pgrid(2,
           ['Turns', numInput(() => q.turns, v => setT(t => { t.turns = Math.max(1, v); }), { step: '0.5', min: 1, digits: 3 })],
           ['Length (y' + UX, numInput(() => mm(q.turns * q.pitch), v => setT(t => { t.turns = Math.max(1, v / UNIT_SCALE / t.pitch); }), { step: '0.5' })],
-          ['Bottom y offset' + U, numInput(() => hDisp(q.z, zBase()), v => setT(t => { t.z = hInv(v, zBase()); }))])),
+          ['Bottom y offset' + U, numInput(() => hDisp(lowEnd(q.z, q.turns * q.pitch), zBase()), v => setT(t => { t.z = fromLowEnd(hInv(v, zBase()), t.turns * t.pitch); }))])),
           sect('Backing', pgrid(2,
           ['Solid backing (× depth)', numInput(backing, v => setT(t => { t.backing = Math.max(0.05, v); }), { step: '0.25', min: 0.05, digits: 3 })],
           ['Backing (x' + UX, numInput(() => mm(backing() * q.depth), v => setT(t => { t.backing = Math.max(0.05, v / UNIT_SCALE / t.depth); }), { step: '0.1' })])),
@@ -5531,7 +5570,7 @@
         { wide: dyn(() => 'Pitch Ø ' + num(mm(q.module * q.teeth), 3) + ', tip Ø ' + num(mm(2 * cogTip(q)), 3) + ', root Ø ' + num(mm(2 * cogRoot(q)), 3) + ' ' + UNIT_LABEL +
           (UNIT_SCALE === 1 ? ' · diametral pitch ' + num(1 / q.module, 3) : '') + ' · circular pitch ' + num(mm(Math.PI * q.module), 3) + ' ' + UNIT_LABEL, 'color:#666;font-size:11px') })) : null,
         sect('Position and height', pgrid(2,
-        ['Bottom y offset' + U, numInput(() => hDisp(q.z, zBase()), v => setP(t => { t.z = hInv(v, zBase()); }))],
+        ['Bottom y offset' + U, numInput(() => hDisp(lowEnd(q.z, q.h), zBase()), v => setP(t => { t.z = fromLowEnd(hInv(v, zBase()), t.h); }))],
         ['Height' + U, len('h', { min: 0.01 })])),
         cg && cogIn(q) ? sect('Rim', pgrid(2,
         ['Rim radius bottom (x' + UX, len('rob', { min: 0 })],
@@ -5822,7 +5861,7 @@
     // pixels per mm on the plane through the view's centre (the same for perspective and orthographic)
     function pxPerMm() { return canvas.clientHeight / Math.max(1e-9, 2 * dist * Math.tan(0.35)); }
     let projT = state.ortho ? 0 : 1, projAnim = 0;   // 1 = perspective, 0 = orthographic (animated in between)
-    let camBasis = null, lastM = null, lastEye = null, badBuf = null, badCount = 0, gizmoBuf = null, cutDrag = null;
+    let camBasis = null, lastM = null, badBuf = null, badCount = 0, gizmoBuf = null, cutDrag = null;
     const cross3 = (p, q) => [p[1] * q[2] - p[2] * q[1], p[2] * q[0] - p[0] * q[2], p[0] * q[1] - p[1] * q[0]];
     const norm3 = (p) => { const l = Math.hypot(p[0], p[1], p[2]) || 1; return [p[0] / l, p[1] / l, p[2] / l]; };
     // The three cut axes through the middle of the part's base: X across (red), Y up (green), Z depth (blue).
@@ -5890,12 +5929,13 @@
       const pos = (t) => horiz ? { left: t * 100 + '%' } : { top: (1 - t) * 100 + '%' };
       const sync = () => {
         const f = cutFrame(), lo = tOf(loOf(k)), hi = tOf(hiOf(k));
-        Object.assign(tick.style, pos(tOf(0)));
+        const down = k === 'y' && state.heightFrom === 'top';      // heights counted from the top down
+        Object.assign(tick.style, pos(tOf(down ? 1 : 0)));
         Object.assign(hiK.style, pos(hi)); Object.assign(loK.style, pos(lo)); Object.assign(hiL.style, pos(hi)); Object.assign(loL.style, pos(lo));
         if (horiz) { range.style.left = lo * 100 + '%'; range.style.width = (hi - lo) * 100 + '%'; }
         else { range.style.top = (1 - hi) * 100 + '%'; range.style.height = (hi - lo) * 100 + '%'; }
         // the mesh is in mm: distance from the middle of the base (the height above it, for Y), in the display unit
-        const txt = (v) => f ? num(mm(v * f.ext[k] / MM), 2) + ' ' + UNIT_LABEL : '';
+        const txt = (v) => f ? num(mm((down ? 1 - v : v) * f.ext[k] / MM), 2) + ' ' + UNIT_LABEL : '';
         hiL.textContent = hiOf(k) < 0.999 ? txt(hiOf(k)) : '';
         loL.textContent = loOf(k) > L + 0.001 ? txt(loOf(k)) : '';
         box.style.display = bbox ? '' : 'none';
@@ -6284,7 +6324,6 @@
       const cx = (mn[0] + mx[0]) / 2, cy = (mn[1] + mx[1]) / 2;
       // steps round in the shown unit; at low quality one minor step halves each major one instead of nine tenths
       const sub = lowQuality() ? 2 : 10, kU = MM / UNIT_SCALE, major = niceStep(10 / px / kU) * kU * 10, minor = major / sub;
-      const floorNice = (x) => { const e = Math.pow(10, Math.floor(Math.log10(x))), m = x / e; return (m >= 5 ? 5 : m >= 2 ? 2 : 1) * e; };
       // the ground under the middle of the view, a little below centre
       const G = groundAt(0, -0.3, mn[2]), rG = G ? Math.hypot(G[0] - cx, G[1] - cy) : 0;
       // the angle scale goes on a major ring: the largest one that is (nearly) all in view, or, zoomed in,
@@ -6297,7 +6336,6 @@
       let Ra = 0;
       for (let k = 1; k <= 80; k++) { if (inView(k * major) >= 0.85) Ra = k * major; else if (Ra) break; }
       if (!Ra) Ra = Math.max(major, Math.round(rG / major) * major);
-      void floorNice;
       const arc = (deg) => Ra * deg * Math.PI / 180 * px;
       const aMajor = ANGLE_MAJORS.slice().reverse().find(m => arc(m / 10) >= 5) || 90, aMinor = aMajor / sub;
       // how far the grid reaches: well past the view (low views look far along the ground)
@@ -6364,7 +6402,6 @@
       const wire = wireBox.checked && lineCount > 0, ssao = state.ssao && !lowQuality();
       const T = (ssao || wire) ? targets(CW, CH) : null;
       const planes = cutPlanes();
-      lastEye = eye;
       // the part (+ the cut faces of each active plane) with a given program
       const drawPart = (pr, extra) => {
         gl.useProgram(pr);
@@ -6499,12 +6536,15 @@
           if (!A || !B) return;
           cutDrag.v = [B[0] - A[0], B[1] - A[1]];
         }
-        const [vx, vy] = cutDrag.v, L2 = vx * vx + vy * vy;
-        if (L2 > 1) {
-          // follow the pointer along the axis; within 10 px of the origin (the middle of the base) it snaps there
-          const raw = Math.max(f.lo[k], Math.min(1, cutDrag.v0 + ((e.clientX - cutDrag.x0) * vx + (e.clientY - cutDrag.y0) * vy) / L2 * 0.1));
-          const pxPerUnit = Math.sqrt(L2) / 0.1;
-          const v = Math.abs(raw) * pxPerUnit < 10 && !e.altKey ? 0 : raw;
+        {
+          // follow the pointer along the axis as it is seen on the screen. An axis seen nearly end-on is only a few
+          // pixels long there: followed exactly, the slightest move would sweep the cut from one end to the other,
+          // so it is never taken as shorter than MINPX pixels (and one seen exactly end-on goes by up and down).
+          const MINPX = 140, len = Math.hypot(cutDrag.v[0], cutDrag.v[1]), pxPerUnit = len / 0.1;
+          const ux = len > 0.3 ? cutDrag.v[0] / len : 0, uy = len > 0.3 ? cutDrag.v[1] / len : -1, scale = Math.max(pxPerUnit, MINPX);
+          const raw = Math.max(f.lo[k], Math.min(1, cutDrag.v0 + ((e.clientX - cutDrag.x0) * ux + (e.clientY - cutDrag.y0) * uy) / scale));
+          // within 10 px of the origin (the middle of the base) it snaps there (not on an axis seen end-on, where that is everywhere)
+          const v = Math.abs(raw) * pxPerUnit < 10 && pxPerUnit >= MINPX && !e.altKey ? 0 : raw;
           // (the same cuts as the sliders: the lower one stays below the upper)
           if (key.length > 1) setCut(k, v, hiOf(k), 'lo'); else setCut(k, loOf(k), v, 'hi');
           cutDrag.snapped = v === 0 && raw !== 0;
@@ -6631,7 +6671,7 @@
     drawCompasses();
     flipBox.addEventListener('change', () => setFlip(flipBox.checked));
 
-    const ro = new ResizeObserver(() => { if (root.isConnected) { if (state.scene && !view) fit(); drawSection(); draw3d(); } });
+    const ro = new ResizeObserver(() => { if (root.isConnected) { measure(); if (state.scene && !view) fit(); drawSection(); draw3d(); } });
     ro.observe(left); ro.observe(view3d);
     // property columns fold to one when the side bar gets narrow
     const roSide = new ResizeObserver(() => { const c = rightBar.clientWidth && rightBar.clientWidth < 560 ? 1 : 2; if (c !== pgridMaxCols && root.isConnected) renderSide(); else fitHeads(); });
@@ -6646,9 +6686,11 @@
       if (!drag) drawSection();
       if (!drag || !drag.moved) renderSide(); else headStatus(statusText());
       busyTag.textContent = state.busy ? 'Updating…' : '';
+      if (seenHeights !== state.heightFrom) { seenHeights = state.heightFrom; syncSlice(); }     // the 3D height slider's label
     }
+    let seenHeights = state.heightFrom;
     function destroy() { ro.disconnect(); roSide.disconnect(); window.removeEventListener('keydown', onKey, true); window.removeEventListener('keyup', onKeyUp, true); root.remove(); }
-    const flipped = () => { if (view) view.cz = -view.cz; if (sideCz != null) sideCz = -sideCz; for (const o of Object.values(ownViews)) if (o) o.cz = -o.cz; flipBox.checked = !!state.flip; drawSection(); };
+    const flipped = () => { if (view) view.cz = -view.cz; for (const o of Object.values(ownViews)) if (o) o.cz = -o.cz; flipBox.checked = !!state.flip; drawSection(); };
     return { root, render, destroy, showSplash, flipped };
   }
 
