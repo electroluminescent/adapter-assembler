@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.15.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.16.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.15.1';
+  const APP_VERSION = '3.16.0';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -3329,6 +3329,110 @@
       return loops;
     }
 
+    // ---- monomorphic from above: the finished part itself, so a subtraction only takes away what it really removes ----
+    // The outline is Manifold's projection of the solid cut to the height band (exact, with the holes that go right
+    // through); the lines inside are the part's sharp edges in the band (where one part stands over another, steps,
+    // bores), all of them, seen through. Worked out off the drawing (it can take a moment) and cached per model and band.
+    let topMonoSolid = null, topMonoCache = null, topMonoJob = null;
+    async function mainManifold() {
+      if (W.__aaManifold) return W.__aaManifold;
+      const mod = await import(jobSettings().manifoldUrl), wasm = await mod.default();
+      wasm.setup(); W.__aaManifold = wasm;
+      return wasm;
+    }
+    // the model welded, in scene units where the scene has it; its sharp edges as 3D segments
+    function topMonoMesh(t) {
+      const fy = meshFlip ? -1 : 1, sh = meshShift || [0, 0, 0], ids = new Map(), V = [], T = new Uint32Array(t.length / 6);
+      for (let o = 0, k = 0; o + 17 < t.length; o += 18) for (let c = 0; c < 3; c++, k++) {
+        const p = o + c * 6, key = t[p] + ',' + t[p + 1] + ',' + t[p + 2];
+        let id = ids.get(key);
+        if (id === undefined) { id = V.length / 3; ids.set(key, id); V.push(t[p] / MM + sh[0], (t[p + 1] / MM + sh[1]) * fy, (t[p + 2] / MM + sh[2]) * fy); }
+        T[k] = id;
+      }
+      const nt = T.length / 3, N = new Float64Array(nt * 3), edges = new Map();
+      for (let f = 0; f < nt; f++) {
+        const a = T[f * 3] * 3, b = T[f * 3 + 1] * 3, c = T[f * 3 + 2] * 3;
+        const ux = V[b] - V[a], uy = V[b + 1] - V[a + 1], uz = V[b + 2] - V[a + 2], vx = V[c] - V[a], vy = V[c + 1] - V[a + 1], vz = V[c + 2] - V[a + 2];
+        let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx; const l = Math.hypot(nx, ny, nz) || 1;
+        N[f * 3] = nx / l; N[f * 3 + 1] = ny / l; N[f * 3 + 2] = nz / l;
+        for (let e = 0; e < 3; e++) {
+          const i = T[f * 3 + e], j = T[f * 3 + (e + 1) % 3], key = i < j ? i * 4294967296 + j : j * 4294967296 + i;
+          const s = edges.get(key); if (s) s.push(f); else edges.set(key, [f]);
+        }
+      }
+      const seg = [], COS = Math.cos(25 * Math.PI / 180);
+      for (const [key, fs] of edges) {
+        let sharp = fs.length !== 2;
+        if (!sharp) {
+          const [f, g] = fs, dot = N[f * 3] * N[g * 3] + N[f * 3 + 1] * N[g * 3 + 1] + N[f * 3 + 2] * N[g * 3 + 2];
+          const zf = N[f * 3 + 2], zg = N[g * 3 + 2];
+          sharp = dot < COS || (zf > 1e-3 && zg < -1e-3) || (zf < -1e-3 && zg > 1e-3);   // a crease, or where the surface turns away from above
+        }
+        if (!sharp) continue;
+        const i = Math.floor(key / 4294967296) * 3, j = (key % 4294967296) * 3;
+        if (Math.hypot(V[i] - V[j], V[i + 1] - V[j + 1]) < 1e-7) continue;          // upright: a point from above
+        seg.push(V[i], V[i + 1], V[i + 2], V[j], V[j + 1], V[j + 2]);
+      }
+      return { V: new Float32Array(V), T, seg };
+    }
+    // { loops, lines } for this band, or null while it is being worked out (or when it cannot be)
+    function topMono(band) {
+      const t = meshTris;
+      if (!t || !t.length) return null;
+      const lo = band ? band.lo : -Infinity, hi = band ? band.hi : Infinity;
+      if (topMonoCache && topMonoCache.t === t && topMonoCache.lo === lo && topMonoCache.hi === hi) return topMonoCache.res;
+      if (topMonoJob && topMonoJob.t === t && topMonoJob.lo === lo && topMonoJob.hi === hi) return topMonoCache && topMonoCache.t === t ? topMonoCache.res : null;
+      const job = topMonoJob = { t, lo, hi };
+      setTimeout(async () => {
+        let res = null;
+        try {
+          const mf = await mainManifold();
+          if (job !== topMonoJob) return;
+          if (!topMonoSolid || topMonoSolid.t !== t) {
+            if (topMonoSolid && topMonoSolid.m) topMonoSolid.m.delete();
+            const mesh = topMonoMesh(t);
+            let m = null;
+            try { const mm = new mf.Mesh({ numProp: 3, vertProperties: mesh.V, triVerts: mesh.T }); mm.merge(); m = new mf.Manifold(mm); } catch (_) { m = null; }
+            topMonoSolid = { t, m, seg: mesh.seg };
+          }
+          const S = topMonoSolid;
+          if (S.m) {
+            const tmp = [];
+            let m = S.m;
+            if (isFinite(lo)) { m = m.trimByPlane([0, 0, 1], lo); tmp.push(m); }
+            if (isFinite(hi)) { m = m.trimByPlane([0, 0, -1], -hi); tmp.push(m); }
+            const cs = m.project(), polys = cs.toPolygons();
+            cs.delete(); for (const x of tmp) x.delete();
+            const loops = polys.map(P => P.map(p => Array.isArray(p) ? [p[0], p[1]] : [p.x, p.y])).filter(L => L.length > 2);
+            // the sharp edges, cut to the band
+            const lines = [], s = S.seg;
+            for (let k = 0; k < s.length; k += 6) {
+              let ax = s[k], ay = s[k + 1], az = s[k + 2], bx = s[k + 3], by = s[k + 4], bz = s[k + 5];
+              if (Math.max(az, bz) < lo - 1e-9 || Math.min(az, bz) > hi + 1e-9) continue;
+              const cut = (z) => { const f = (z - az) / (bz - az); return [ax + (bx - ax) * f, ay + (by - ay) * f]; };
+              if (az < lo && bz > lo || az > lo && bz < lo) { const [x, y] = cut(lo); if (az < lo) { ax = x; ay = y; az = lo; } else { bx = x; by = y; bz = lo; } }
+              if (az > hi && bz < hi || az < hi && bz > hi) { const [x, y] = cut(hi); if (az > hi) { ax = x; ay = y; az = hi; } else { bx = x; by = y; bz = hi; } }
+              lines.push([ax, ay, bx, by]);
+            }
+            // where the band cuts through material: the cut's own edges
+            for (const z of [lo, hi]) if (isFinite(z)) {
+              const sl = S.m.slice(z), sp = sl.toPolygons(); sl.delete();
+              for (const P of sp) for (let i = 0; i < P.length; i++) {
+                const a = P[i], b = P[(i + 1) % P.length], A = Array.isArray(a) ? a : [a.x, a.y], B = Array.isArray(b) ? b : [b.x, b.y];
+                lines.push([A[0], A[1], B[0], B[1]]);
+              }
+            }
+            res = { loops, lines };
+          }
+        } catch (e) { res = null; }
+        if (job !== topMonoJob) return;
+        topMonoJob = null;
+        topMonoCache = { t, lo, hi, res };
+        if (topMode() && monoOn()) drawSection();
+      }, 0);
+      return topMonoCache && topMonoCache.t === t ? topMonoCache.res : null;
+    }
+
     // ---- the part seen from above: x across, y up (the plane the part turns in) ----
     const topMode = () => state.secMode === 'top';
     let lastTop = [];
@@ -3516,7 +3620,20 @@
         }
         lastPolys[1][it.id] = { d, col };
       }
-      drawMono(monoG, monoPos, monoNeg, 't');
+      const exactTop = monoPos.length + monoNeg.length ? topMono(topBand()) : null;
+      if (exactTop) {
+        // world → screen is a turn, a scale and a shift: one transform for the whole drawing
+        const [x0, y0] = toScreen(0, 0), [x1, y1] = toScreen(1, 0), [x2, y2] = toScreen(0, 1);
+        const gT = sv('g', { transform: 'matrix(' + [x1 - x0, y1 - y0, x2 - x0, y2 - y0, x0, y0].map(v => +v.toFixed(6)).join(' ') + ')' });
+        const dd = exactTop.loops.map(L => 'M' + L.map(p => p[0].toFixed(5) + ' ' + p[1].toFixed(5)).join('L') + 'Z').join('');
+        const ln = exactTop.lines.map(l => 'M' + l[0].toFixed(5) + ' ' + l[1].toFixed(5) + 'L' + l[2].toFixed(5) + ' ' + l[3].toFixed(5)).join('');
+        if (dd) {
+          gT.append(sv('path', { d: dd, fill: 'none', stroke: '#868e96', 'stroke-width': 2.4, 'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke' }));
+          gT.append(sv('path', { d: dd, fill: '#dee2e6', 'fill-rule': 'evenodd', stroke: 'none' }));
+        }
+        if (ln) gT.append(sv('path', { d: ln, fill: 'none', stroke: '#868e96', 'stroke-width': 1, 'stroke-linecap': 'round', opacity: 0.8, 'vector-effect': 'non-scaling-stroke' }));
+        monoG.append(gT);
+      } else drawMono(monoG, monoPos, monoNeg, 't');
       // the axis, and the plane the cross-section is cut in: its right half solid, the mirrored left half dashed
       const { w, h } = size(), [ox, oy] = toScreen(0, 0), th = state.viewAngle * Math.PI / 180, far = Math.hypot(w, h) / view.s + Math.hypot(view.cy, view.cz);
       const [ex, ey] = toScreen(far * Math.cos(th), far * Math.sin(th)), [bx, by] = toScreen(-far * Math.cos(th), -far * Math.sin(th));
