@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.22.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.22.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.22.0';
+  const APP_VERSION = '3.22.1';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -1148,10 +1148,13 @@
   //    weld/repair/check → STL or OBJ. Runs in a module Web Worker.
   // ---------------------------------------------------------------------------
   async function runJob(data) {
-    let mesh = data.mesh, engine = 'direct';
+    let mesh = data.mesh, engine = 'direct', solid = null;
     if (data.scene) {
       const r = await evaluateScene(data.scene, data.holes, data.settings);
       mesh = soup(r.mesh); engine = r.engine;
+      // the solid as it was built (scene units, upright, its faces joined as the solid has them): what the overhead
+      // monomorphic drawing is worked out from. (The export's welded copy can join faces that only touch.)
+      solid = { V: new Float32Array(r.mesh.V), T: new Uint32Array(r.mesh.T) };
     }
     if (data.opts && data.opts.flip) {
       // upside down: a half turn about the X axis (not a mirror), so a right-hand thread is still right-hand
@@ -1159,7 +1162,7 @@
       for (let o = 0; o < mesh.length; o += 7) { mesh[o + 1] = -mesh[o + 1]; mesh[o + 2] = -mesh[o + 2]; }
     }
     const res = processMesh(mesh, data.opts);
-    res.report.engine = engine; res.preview.flip = !!(data.opts && data.opts.flip);
+    res.report.engine = engine; res.preview.flip = !!(data.opts && data.opts.flip); res.preview.solid = solid;
     return res;
   }
 
@@ -1171,7 +1174,7 @@
       const src = [processMesh, ngonFaces, bevelReach, cornerPoints, toothPattern, toothAt, runoutOf, runsOf, runoutDelta, runoutPattern, runoutCorner, runoutRadiusAt, threadProfile, expandProfile, runVertices, cogShape, cogWarp, revolve, holeMesh, nodeMesh, evaluateScene, soup, runJob]
         .map(f => f.toString()).join('\n') +
         '\nself.onmessage = async function (e) {' +
-        '  try { const r = await runJob(e.data); self.postMessage({ job: e.data.job, result: r }, [r.buffer, r.preview.tris.buffer, r.preview.lines.buffer, r.preview.bad.buffer]); }' +
+        '  try { const r = await runJob(e.data); self.postMessage({ job: e.data.job, result: r }, [r.buffer, r.preview.tris.buffer, r.preview.lines.buffer, r.preview.bad.buffer].concat(r.preview.solid ? [r.preview.solid.V.buffer, r.preview.solid.T.buffer] : [])); }' +
         '  catch (err) { self.postMessage({ job: e.data.job, error: String(err && err.message || err) }); }' +
         '};';
       worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })), { type: 'module' });
@@ -3612,8 +3615,11 @@
         if (!topMonoSolid || topMonoSolid.t !== t) {
           if (topMonoSolid && topMonoSolid.m) topMonoSolid.m.delete();
           const mesh = topMonoMesh(t);
-          let m = null;
-          try { const mm = new mf.Mesh({ numProp: 3, vertProperties: mesh.V, triVerts: mesh.T }); mm.merge(); m = new mf.Manifold(mm); } catch (_) { m = null; }
+          const build = (V, T) => { try { const mm = new mf.Mesh({ numProp: 3, vertProperties: V, triVerts: T }); mm.merge(); return new mf.Manifold(mm); } catch (_) { return null; } };
+          // The solid as it was built. (Not the export's welded copy: welding joins faces that only touch along an
+          // edge, which Manifold then refuses as not a solid, at some circle precisions and not others; that copy
+          // is only the stand-in for a model that came without its solid.)
+          const m = (meshSolid && build(meshSolid.V, meshSolid.T)) || build(mesh.V, mesh.T);
           topMonoSolid = { t, m, seg: mesh.seg, ix: m ? coverIndex(mesh.V, mesh.T) : null };
         }
         const S = topMonoSolid;
@@ -5936,7 +5942,7 @@
       shown = result;
       const firstMesh = !triCount;
       const t = result.preview.tris, l = result.preview.lines;
-      meshTris = t; meshShift = result.preview.shift || null; meshFlip = !!result.preview.flip; cutEdgeCache = null;
+      meshTris = t; meshShift = result.preview.shift || null; meshFlip = !!result.preview.flip; meshSolid = result.preview.solid || null; cutEdgeCache = null;
       gl.bindBuffer(gl.ARRAY_BUFFER, triBuf); gl.bufferData(gl.ARRAY_BUFFER, t, gl.STATIC_DRAW); triCount = t.length / 6;
       const lv = new Float32Array(l.length * 2);
       for (let i = 0, j = 0; i < l.length; i += 3) { lv[j++] = l[i]; lv[j++] = l[i + 1]; lv[j++] = l[i + 2]; lv[j++] = 0; lv[j++] = 0; lv[j++] = 1; }
@@ -6193,7 +6199,7 @@
     // edges that keep the part from being solid, drawn on top in magenta
     // The outline where each active cut plane meets the part, as a bright line in that plane's colour
     // (cut back by the other planes). The crossings are found once per mesh and plane position.
-    let meshTris = null, meshShift = null, meshFlip = false, cutEdgeCache = null, cutEdgeBuf = null;
+    let meshTris = null, meshShift = null, meshFlip = false, meshSolid = null, cutEdgeCache = null, cutEdgeBuf = null;
     const EDGE_COL = { x: [1, 0.28, 0.28, 1], y: [0.3, 1, 0.38, 1], z: [0.32, 0.62, 1, 1] };
     for (const k of ['x', 'y', 'z']) EDGE_COL[k + 'lo'] = EDGE_COL[k];
     function cutSegments(planes) {
