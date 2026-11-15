@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.12.2. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.13.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.12.2';
+  const APP_VERSION = '3.13.0';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -865,13 +865,16 @@
     if (q.kind === 'internal') {
       const n = Math.max(3, Math.round(q.teeth) || 3), m = Math.max(1e-4, q.module);
       const s = cogShape({ ...q, kind: 'external', addendum: q.dedendum, dedendum: q.addendum, backlash: -(q.backlash || 0), rotation: (q.rotation || 0) + 180 / n,
+        toothWidth: 1 - (q.toothWidth > 0 ? q.toothWidth : 0.5),
         tipRound: q.rootRound, rootRound: q.tipRound }, prec);
       return { ...s, ra: s.rf, rf: s.ra, tip: m * (n / 2 - Math.max(0, q.addendum)), internal: true, corners: { tip: s.corners.root, root: s.corners.tip } };
     }
     const N = Math.max(3, Math.round(q.teeth) || 3), m = Math.max(1e-4, q.module), al = Math.max(1, Math.min(45, q.pressure || 20)) * Math.PI / 180;
     const rp = m * N / 2, rb = rp * Math.cos(al), ra0 = rp + Math.max(0, q.addendum) * m, rf = Math.max(m * 0.05, rp - Math.max(0, q.dedendum) * m);
     const inv = (a) => Math.tan(a) - a, half = Math.PI / N;
-    const psiP = Math.max(1e-4, (Math.PI * m / 2 - (q.backlash || 0)) / (2 * rp));
+    // toothWidth: the tooth's share of the circular pitch, at the pitch circle (½ = teeth as wide as the gaps)
+    const tw = Math.max(0.05, Math.min(0.95, q.toothWidth > 0 ? q.toothWidth : 0.5));
+    const psiP = Math.max(1e-4, (Math.PI * m * tw - (q.backlash || 0)) / (2 * rp));
     const psiInv = (r) => psiP + inv(al) - inv(Math.acos(Math.min(1, rb / r)));      // half the tooth's angle at radius r (r ≥ rb)
     // a tooth too thin for its tip ends in a point
     let ra = ra0;
@@ -879,7 +882,8 @@
     const r0 = Math.max(rb, rf), psiB = psiInv(r0);
     // below the base circle the side runs down to the root, widening a little into it (a simple fillet)
     const fil = rf < rb ? Math.max(0, 0.25 * (half - psiB)) : 0;
-    const psi = (r) => r >= r0 ? psiInv(r) : psiB + fil * (r0 - r) / Math.max(1e-12, r0 - rf);
+    // (never past the middle of the gap: teeth too wide for their pitch meet their neighbours there)
+    const psi = (r) => Math.min(0.995 * half, r >= r0 ? psiInv(r) : psiB + fil * (r0 - r) / Math.max(1e-12, r0 - rf));
     const P = Math.max(8, Math.min(300, Math.round(prec) || 100)), step = 2 * Math.PI / P;
     const K = Math.max(2, Math.min(40, Math.round(P / 10))), side = [];
     if (rf < rb) for (let i = 0; i < 2; i++) side.push(rf + (r0 - rf) * i / 2);
@@ -1748,7 +1752,7 @@
   // (prec: the object's own circular precision, or the project's)
   function cogShapeOf(q, prec) {
     prec = prec > 2 ? prec : state.precision;
-    const k = [prec, q.kind, q.teeth, q.module, q.pressure, q.addendum, q.dedendum, q.backlash, q.rotation, q.tipRound, q.rootRound].join('|');
+    const k = [prec, q.toothWidth, q.kind, q.teeth, q.module, q.pressure, q.addendum, q.dedendum, q.backlash, q.rotation, q.tipRound, q.rootRound].join('|');
     let s = cogCache.get(k);
     if (!s) { if (cogCache.size > 64) cogCache.clear(); s = cogShape(q, prec); cogCache.set(k, s); }
     return s;
@@ -3347,6 +3351,7 @@
         shape.setAttribute('fill', on ? '#e03131' : hd.shape === 'ring' ? '#fff' : hd.col);
         shape.setAttribute('stroke', hd.shape === 'ring' ? hd.col : hd.bevel ? '#fab005' : '#fff'); shape.setAttribute('stroke-width', hd.shape === 'ring' || hd.bevel ? 2.2 : 1.4);
         shape.setAttribute('style', 'cursor:' + (hd.kind === 'radius' || hd.kind === 'cog' || hd.kind === 'thr' ? 'ew-resize' : 'move'));
+        if (hd.kind === 'width') shape.setAttribute('stroke', '#fff');
         shape.__topH = hd;
         const tip = sv('title'); tip.textContent = hd.tip; shape.append(tip);
         svg.append(shape);
@@ -3445,6 +3450,12 @@
             out.push({ key: it.id + '|f|' + what, id: it.id, kind: 'fillet', what, pkeyName: key, c, P, x, y, col: '#f08c00', shape: 'dot', bevel: true,
               tip: name + ': ' + lab + ' ' + num(mm(r), 3) + ' ' + UNIT_LABEL + ' — drag into the corner to round it' });
           }
+          {
+            // the first tooth's width: a handle on its side at the pitch circle (drag round to widen or narrow the teeth)
+            const rp = q.module * q.teeth / 2, tw = q.toothWidth > 0 ? q.toothWidth : 0.5, psi = (Math.PI * q.module * tw - (q.backlash || 0)) / (2 * rp);
+            const a = (q.rotation || 0) * Math.PI / 180 + psi, [x, y] = P.w(rp * Math.cos(a), rp * Math.sin(a));
+            out.push({ key: it.id + '|w', id: it.id, kind: 'width', P, x, y, col: '#7048e8', shape: 'diamond', tip: name + ': tooth width ' + num(tw, 3) + ' × pitch — drag round the pitch circle' });
+          }
           const sh = cogShapeOf(q, n.precision), loc = (q.rotation || 0) * Math.PI / 180, R = Math.max(sh.ra, sh.rf) + pad, [x, y] = P.w(R * Math.cos(loc), R * Math.sin(loc));
           out.push({ key: it.id + '|rot', id: it.id, kind: 'rot', P, x, y, col, shape: 'ring', tip: name + ': turn the teeth (rotation ' + num((q.rotation || 0) * ANG_SCALE, 3) + ANG_LABEL + ')' });
         }
@@ -3478,7 +3489,7 @@
       } else if (h.kind === 'pt') {
         const i = +h.pkey.split('|')[2], np = n.pts.length, at = (j) => { const p = n.pts[(j + np) % np]; return P.w(p.z, h.m * p.y); };
         line([at(i - 1), at(i), at(i + 1)], false);
-      } else if (h.kind === 'rot' || h.kind === 'fillet') {
+      } else if (h.kind === 'rot' || h.kind === 'fillet' || h.kind === 'width') {
         const sh = cogShapeOf(n.params, n.precision), o = outlineOf(n.pts, []), fix = cogFix(n.params, o), rr = cogIn(n.params) ? Math.min(...o.map(p => p.y)) : Math.max(...o.map(p => p.y));
         line(Array.from(sh.ang, (a, j) => { const r = cogWarp(rr, sh.rad[j], fix, sh.tip); return P.w(r * Math.cos(a), r * Math.sin(a)); }), true);
       } else if (h.kind === 'clone') {
@@ -3612,6 +3623,16 @@
         if (snap) r = rs(r);
         q[h.pkeyName] = r;
         drag.label = (h.what === 'tip' ? 'tip' : 'root') + ' rounding ' + num(mm(r), 3) + ' ' + UNIT_LABEL;
+      } else if (h.kind === 'width') {
+        // how far round from the tooth's middle the pointer is, at the pitch circle: half the tooth's width
+        const q = n.params, rp = q.module * q.teeth / 2, c0 = (q.rotation || 0) * Math.PI / 180;
+        let d = Math.atan2(rel[1], rel[0]) - c0;
+        while (d > Math.PI) d -= 2 * Math.PI;
+        while (d < -Math.PI) d += 2 * Math.PI;
+        let tw = (2 * Math.abs(d) * rp + (q.backlash || 0)) / (Math.PI * q.module);
+        if (snap) tw = Math.round(tw / 0.05) * 0.05;
+        q.toothWidth = Math.max(0.1, Math.min(0.9, tw));
+        drag.label = 'tooth width ' + num(q.toothWidth, 3) + ' × pitch (' + num(mm(Math.PI * q.module * q.toothWidth), 3) + ' ' + UNIT_LABEL + ' at the pitch circle)';
       } else if (h.kind === 'rot') {
         const q = n.params, a = Math.atan2(rel[1], rel[0]) * 180 / Math.PI, f = P.inv(drag.from[0] - P.C[0], drag.from[1] - P.C[1]), a0 = Math.atan2(f[1], f[0]) * 180 / Math.PI;
         let rot = drag.snapRot + (a - a0);
@@ -4938,6 +4959,7 @@
         ['Rotation (' + ANG_LABEL.trim() + ')', numInput(() => (q.rotation || 0) * ANG_SCALE, v => setP(t => { t.rotation = v / ANG_SCALE; }), { step: ANG_SCALE === 1 ? '1' : '0.01', digits: 4 })],
         ['Addendum (× module)', numInput(() => q.addendum, v => setP(t => { t.addendum = Math.max(0, Math.min(3, v)); }), { step: '0.05', min: 0, max: 3, digits: 3, title: 'Tooth height above the pitch circle' })],
         ['Dedendum (× module)', numInput(() => q.dedendum, v => setP(t => { t.dedendum = Math.max(0, cogIn(t) ? Math.min(3, v) : Math.min(q.teeth / 2 - 0.05, v)); }), { step: '0.05', min: 0, max: 3, digits: 3, title: 'Tooth depth below the pitch circle' })],
+        ['Tooth width (× pitch)', numInput(() => q.toothWidth > 0 ? q.toothWidth : 0.5, v => setP(t => { t.toothWidth = Math.max(0.1, Math.min(0.9, v)); }), { step: '0.01', min: 0.1, max: 0.9, digits: 3, title: 'The tooth\'s share of the pitch at the pitch circle (0.5: as wide as the gaps)' })],
         ['Tip rounding' + U, numInput(() => mm(q.tipRound || 0), v => setP(t => { t.tipRound = Math.max(0, v / UNIT_SCALE); }), { step: UNIT_SCALE === 1 ? '0.005' : '0.05', min: 0, title: 'Rounds the teeth\'s top corners (seen from above)' })],
         ['Root rounding' + U, numInput(() => mm(q.rootRound || 0), v => setP(t => { t.rootRound = Math.max(0, v / UNIT_SCALE); }), { step: UNIT_SCALE === 1 ? '0.005' : '0.05', min: 0, title: 'Rounds the corners between the teeth (seen from above)' })],
         ['Backlash' + U, numInput(() => mm(q.backlash || 0), v => setP(t => { t.backlash = Math.max(0, v / UNIT_SCALE); }), { step: UNIT_SCALE === 1 ? '0.001' : '0.02', min: 0, title: 'Taken off each tooth\'s width at the pitch circle, for a looser mesh' })],
