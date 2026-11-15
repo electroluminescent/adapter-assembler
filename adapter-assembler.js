@@ -2,7 +2,7 @@
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.20.0';
+  const APP_VERSION = '3.20.1';
   // switching between radius/height and overhead: radius/height tips about the height the overhead view looks down
   // from, overhead about its own x axis
   // (set false to go back to both views tipping about the middle of the pane)
@@ -3878,10 +3878,10 @@
     //    for the selected object a quarter turn apart all round; an n-sided object's corners (drag: size and turn);
     //  · a cog's teeth (tip, pitch circle, root) and a ring to turn it;
     //  · a radial cloner's first copy (distance from the axis and angle).
-    function topHandles() {
+    function topHandles(all = false) {
       const sc = state.scene, out = [], th = state.viewAngle * Math.PI / 180, pad = 9 / view.s;
       for (const it of lastTop) {
-        if (monoHid(it.id)) continue;      // (no handles on the monomorphic shape)
+        if (!all && monoHid(it.id)) continue;      // (no handles on the monomorphic shape; still something to snap to)
         const n = sc.nodes[it.id], col = COLORS[n.type] || '#1f6feb', name = n.name || n.id, P = topPlace(sc, it.id), q = n.params || {};
         if (P.side) {
           n.pts.forEach((p, i) => {
@@ -3991,7 +3991,7 @@
       const sc = state.scene, pts = [{ p: [0, 0] }], circles = [], moving = new Set();
       if (h.pkey) { if (state.sel.has(h.pkey)) for (const k of state.sel) moving.add(k); else moving.add(h.pkey); }
       const own = (hd) => hd.id === h.id && (h.kind !== 'pt' || hd.kind !== 'pt' || moving.has(hd.pkey));
-      for (const hd of topHandles()) {
+      for (const hd of topHandles(true)) {
         if (own(hd) || hd.kind === 'rot' || hd.kind === 'fillet') continue;
         pts.push({ p: [hd.x, hd.y] });
         const r = hd.kind === 'radius' || hd.kind === 'thr' ? hd.r0 : hd.kind === 'cog' ? Math.hypot(hd.x - hd.P.C[0], hd.y - hd.P.C[1]) : null;
