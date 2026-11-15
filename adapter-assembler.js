@@ -2,7 +2,7 @@
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.19.0';
+  const APP_VERSION = '3.20.0';
   // switching between radius/height and overhead: radius/height tips about the height the overhead view looks down
   // from, overhead about its own x axis
   // (set false to go back to both views tipping about the middle of the pane)
@@ -46,6 +46,7 @@
     cutsLo: { x: -1, y: -0.05, z: -1 },   // 3D: the lower slice on each axis, in the same units as cuts (at its low end = none)
     mono: false,           // cross-section: everything not selected as one grey shape
     autoSimplify: true,
+    heightFrom: 'bottom',  // heights shown from the lowest point up ('bottom') or from the top down ('top'), as the part is shown
     linkViews: true,       // radius/height and overhead line up with each other when switching (off: each keeps its own view)
     settingsRev: 0,        // which one-time changes to saved settings have been made
     treeFolded: [],        // objects list: groups / booleans / cloners shown folded   // ... and automatically at 50 % zoom or less
@@ -73,7 +74,7 @@
 
 
   // Settings remembered in this browser.
-  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'quality', 'collapsed', 'secMode', 'mono', 'autoSimplify', 'linkViews', 'settingsRev', 'treeFolded', 'cutsLo', 'cutHandles', 'topCut', 'cut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts', 'cutLo'];
+  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'quality', 'collapsed', 'secMode', 'mono', 'autoSimplify', 'heightFrom', 'linkViews', 'settingsRev', 'treeFolded', 'cutsLo', 'cutHandles', 'topCut', 'cut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts', 'cutLo'];
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     for (const k of SAVED_SETTINGS) if (k in saved && typeof saved[k] === typeof state[k]) state[k] = saved[k];
@@ -84,6 +85,7 @@
   state.helical = true; state.optimize = true;
   if (!['ngons', 'quads', 'tris'].includes(state.faces)) state.faces = 'ngons';
   if (state.secMode !== 'top') state.secMode = 'section';
+  if (state.heightFrom !== 'top') state.heightFrom = 'bottom';
   state.precision = Math.max(8, Math.min(300, Math.round(+state.precision) || 100));   // circle precision: 8…300 edges
   function applyUnits() {
     if (state.lenUnit !== 'in') state.lenUnit = 'mm';
@@ -1414,16 +1416,21 @@
     return ids.filter(id => !ids.some(o => o !== id && subtreeIds(sc, o).has(id)));
   }
   // Heights are always shown from the lowest point of the whole model (as in the exported file).
+  // Heights are shown from zero at the part's lowest point up, or (top down) from zero at its top downward, as the part
+  // is shown: flipped upside down, its lowest point is what was its top. zBase is that zero (scene units); HS the sign.
   function zBase(sc = state.scene) {
-    let lo = Infinity;
+    let lo = Infinity, hi = -Infinity;
     if (!sc) return 0;
     for (const id of leafOrder(sc)) {
       const n = sc.nodes[id], xf = xfOf(sc, id), o = outlineOf(n.pts, n.runs);
-      for (const p of o) { if (xf.id) { if (p.z < lo) lo = p.z; continue; } const a = xf.fwd(p), b = xf.mir(p); lo = Math.min(lo, a.z, b.z); }
+      for (const p of o) { if (xf.id) { lo = Math.min(lo, p.z); hi = Math.max(hi, p.z); continue; } const a = xf.fwd(p), b = xf.mir(p); lo = Math.min(lo, a.z, b.z); hi = Math.max(hi, a.z, b.z); }
     }
-    return isFinite(lo) ? lo : 0;
+    if (!isFinite(lo)) return 0;
+    return (state.heightFrom === 'top') !== !!state.flip ? hi : lo;
   }
-  const hDisp = (z, base) => (z - base) * UNIT_SCALE;
+  const HS = () => (state.flip ? -1 : 1) * (state.heightFrom === 'top' ? -1 : 1);
+  const hDisp = (z, base) => HS() * (z - base) * UNIT_SCALE;
+  const hInv = (v, base) => base + HS() * v / UNIT_SCALE;      // a shown height → scene
   function newId(prefix) { state.scene.seq = (state.scene.seq || 1) + 1; return prefix + state.scene.seq; }
   const PREFIX = { circle: 'c', ngon: 'n', cog: 'w', boolean: 'b', group: 'g', source: 's', thread: 't', cloner: 'k', holes: 'h' };
 
@@ -2482,6 +2489,7 @@
         selectRow('Angles', state.angUnit, [['deg', 'degrees (°)'], ['rad', 'radians']], v => setUnit('angUnit', v)),
         selectRow('Quality', state.quality, [['high', 'high'], ['low', 'low (no animations, less detail)']], v => setUnit('quality', v))),
       checkRow('Flip upside down', () => state.flip, v => set('flip', v)),
+      el('div', null, selectRow('Heights', state.heightFrom, [['bottom', 'bottom up (0 at the lowest point)'], ['top', 'top down (0 at the top)']], v => { state.heightFrom = v; saveSettings(); renderAll(); })),
       checkRow('Linked cross-section views (radius/height and overhead line up when switching; height band set in both)', () => state.linkViews !== false, v => { state.linkViews = v; saveSettings(); renderAll(); }),
       checkRow('Auto-simplify (cross-section drawn monomorphic at 50% zoom or less)', () => !!state.autoSimplify, v => { state.autoSimplify = v; saveSettings(); renderAll(); }),
       el('div', null,
@@ -3252,11 +3260,11 @@
           const [, y] = toScreen(0, base + zr);
           if (y > h - AX_B) continue;
           g.append(sv('line', { x1: AX_L - (st === main ? 4 : 3), y1: y, x2: AX_L, y2: y, stroke: '#adb5bd', 'stroke-opacity': aL }));
-          if (aT > 0.01) lab(AX_L - 6, y + 3, num((top ? Math.abs(zr) : zr) * UNIT_SCALE, 3) + ' ' + UNIT_LABEL, { anchor: 'end', op: aT });
+          if (aT > 0.01) lab(AX_L - 6, y + 3, num((top ? Math.abs(zr) : HS() * zr) * UNIT_SCALE, 3) + ' ' + UNIT_LABEL, { anchor: 'end', op: aT });
         }
       }
       const t1 = sv('text', { x: AX_L + 4, y: h - AX_B - 4, 'font-size': 10, fill: '#adb5bd' }); t1.textContent = 'x: radius / Ø →'; g.append(t1);
-      const t2 = sv('text', { x: 4, y: 12, 'font-size': 10, fill: '#adb5bd' }); t2.textContent = top ? 'distance' : state.flip ? 'y: height ↓ (flipped)' : 'y: height ↑'; g.append(t2);
+      const t2 = sv('text', { x: 4, y: 12, 'font-size': 10, fill: '#adb5bd' }); t2.textContent = top ? 'distance' : state.heightFrom === 'top' ? 'y: depth from the top ↓' : 'y: height ↑'; g.append(t2);
     }
     // Ticks on both axes for the mouse position, or for the point being dragged.
     let cursorW = null;
@@ -4600,7 +4608,7 @@
       const rMin = Math.min(r.rFirst, r.rOther), rMax = Math.max(r.rFirst, r.rOther), depth = rMax - rMin, len = Math.abs(r.zLast - r.zFirst);
       const flank = Math.max(0, (1 - (r.flatA || 0) - (r.flatB || 0)) / 2) * r.pitch;
       return { pitch: mm(r.pitch), turns: len / r.pitch, depth: mm(depth), angle: 2 * Math.atan2(flank, depth) * 180 / Math.PI,
-        dmin: mm(2 * rMin), dmax: mm(2 * rMax), len: mm(len), from: hDisp(Math.min(r.zFirst, r.zLast), base), to: hDisp(Math.max(r.zFirst, r.zLast), base) };
+        dmin: mm(2 * rMin), dmax: mm(2 * rMax), len: mm(len), from: Math.min(hDisp(r.zFirst, base), hDisp(r.zLast, base)), to: Math.max(hDisp(r.zFirst, base), hDisp(r.zLast, base)) };
     }
     // Apply an edited value; the values that depend on it follow.
     function setThreadValue(r, kind, f, v, base) {
@@ -4619,8 +4627,12 @@
         case 'dmin': if (inch / 2 < rMax) setRadii(Math.max(0, inch / 2), rMax); break;
         case 'dmax': if (inch / 2 > rMin) setRadii(rMin, inch / 2); break;
         case 'len': if (inch >= r.pitch) r[highKey] = r[lowKey] + inch; break;
-        case 'from': { const z = base + inch; if (r[highKey] - z >= r.pitch) r[lowKey] = z; break; }
-        case 'to': { const z = base + inch; if (z - r[lowKey] >= r.pitch) r[highKey] = z; break; }
+        // (from: the end with the smaller shown height; heights shown top down or flipped run the other way)
+        case 'from': case 'to': {
+          const z = hInv(v, base), lowEnd = (f === 'from') === (HS() > 0);
+          if (lowEnd) { if (r[highKey] - z >= r.pitch) r[lowKey] = z; } else if (z - r[lowKey] >= r.pitch) r[highKey] = z;
+          break;
+        }
       }
     }
     function makeThreadBox(nodeId, ri) {
@@ -4802,7 +4814,7 @@
           i.addEventListener('input', () => go(true)); i.addEventListener('change', () => { go(false); i.__fresh = false; }); return i; };
         const cur = () => xfOf(state.scene, h.node).fwd(state.scene.nodes[h.node].pts[h.i]);
         add('Point', ['x r', live(mm(p.y), v => moveKeysView(state.scene, pk, v / UNIT_SCALE - cur().y, 0)), 'Ø', live(mm(2 * p.y), v => moveKeysView(state.scene, pk, v / 2 / UNIT_SCALE - cur().y, 0)), UNIT_LABEL], null);
-        add('', ['y', live(hDisp(p.z, base), v => moveKeysView(state.scene, pk, 0, v / UNIT_SCALE + base - cur().z)), null, null, UNIT_LABEL], null);
+        add('', ['y', live(hDisp(p.z, base), v => moveKeysView(state.scene, pk, 0, hInv(v, base) - cur().z)), null, null, UNIT_LABEL], null);
       }
       const inp = (key, o = {}) => {
         const i = el('input', { 'data-unit': key === 'dx' || key === 'dy' ? 'len' : key === 'angle' ? 'ang' : '', type: 'number', step: o.step || '0.1', value: num(tf[key], 4), style: 'width:64px;font-size:11px;box-sizing:border-box', title: o.title || null });
@@ -4815,7 +4827,7 @@
       const uni = el('label', { style: 'cursor:pointer;display:inline-flex;gap:3px;align-items:center;white-space:nowrap' }, link, 'uniform');
       add('Scale', tf.linkScale ? ['×', inp('sx', { step: '0.05' }), null, null, uni] : ['× x', inp('sx', { step: '0.05' }), '× y', inp('sy', { step: '0.05' }), uni], 'scale');
       add('Rotate', [ANG_LABEL.trim(), inp('angle', { step: ANG_SCALE === 1 ? '1' : '0.01', title: (ANG_SCALE === 1 ? 'degrees' : 'radians') + ', counter-clockwise' }), null, null, 'counter-clockwise'], 'rotate');
-      const piv = el('select', { style: 'font-size:11px;max-width:100%' }, el('option', { value: 'centre' }, 'selection centre'), el('option', { value: 'origin' }, 'axis at the lowest point'));
+      const piv = el('select', { style: 'font-size:11px;max-width:100%' }, el('option', { value: 'centre' }, 'selection centre'), el('option', { value: 'origin' }, 'axis at height 0'));
       piv.value = tf.pivot; piv.addEventListener('change', () => { tf.pivot = piv.value; });
       add('About', { span: [piv] }, null);
       selBox.append(grid);
@@ -5423,7 +5435,7 @@
           ['Spread (' + ANG_LABEL.trim() + ')', numInput(() => q.spread * ANG_SCALE, v => setC('spread', Math.max(0, Math.min(360, v / ANG_SCALE))), { step: ANG_SCALE === 1 ? '5' : '0.05', min: 0, max: 360 * ANG_SCALE, digits: 4, width: 80 })])),
           sect('Placement', pgrid(2,
           ['Distance from axis (x' + UX, numInput(() => mm(q.radius), v => setC('radius', Math.max(0, v / UNIT_SCALE)), { min: 0 })],
-          q.orient === 'radial' ? ['Copies\' axis height (y' + UX, numInput(() => hDisp(q.height, zBase()), v => setC('height', v / UNIT_SCALE + zBase()))] : null)));
+          q.orient === 'radial' ? ['Copies\' axis height (y' + UX, numInput(() => hDisp(q.height, zBase()), v => setC('height', hInv(v, zBase())))] : null)));
         return box;
       }
       if (n.type === 'thread') {
@@ -5457,7 +5469,7 @@
           sect('Length and position', pgrid(2,
           ['Turns', numInput(() => q.turns, v => setT(t => { t.turns = Math.max(1, v); }), { step: '0.5', min: 1, digits: 3 })],
           ['Length (y' + UX, numInput(() => mm(q.turns * q.pitch), v => setT(t => { t.turns = Math.max(1, v / UNIT_SCALE / t.pitch); }), { step: '0.5' })],
-          ['Bottom y offset' + U, numInput(() => hDisp(q.z, zBase()), v => setT(t => { t.z = v / UNIT_SCALE + zBase(); }))])),
+          ['Bottom y offset' + U, numInput(() => hDisp(q.z, zBase()), v => setT(t => { t.z = hInv(v, zBase()); }))])),
           sect('Backing', pgrid(2,
           ['Solid backing (× depth)', numInput(backing, v => setT(t => { t.backing = Math.max(0.05, v); }), { step: '0.25', min: 0.05, digits: 3 })],
           ['Backing (x' + UX, numInput(() => mm(backing() * q.depth), v => setT(t => { t.backing = Math.max(0.05, v / UNIT_SCALE / t.depth); }), { step: '0.1' })])),
@@ -5519,7 +5531,7 @@
         { wide: dyn(() => 'Pitch Ø ' + num(mm(q.module * q.teeth), 3) + ', tip Ø ' + num(mm(2 * cogTip(q)), 3) + ', root Ø ' + num(mm(2 * cogRoot(q)), 3) + ' ' + UNIT_LABEL +
           (UNIT_SCALE === 1 ? ' · diametral pitch ' + num(1 / q.module, 3) : '') + ' · circular pitch ' + num(mm(Math.PI * q.module), 3) + ' ' + UNIT_LABEL, 'color:#666;font-size:11px') })) : null,
         sect('Position and height', pgrid(2,
-        ['Bottom y offset' + U, numInput(() => hDisp(q.z, zBase()), v => setP(t => { t.z = v / UNIT_SCALE + zBase(); }))],
+        ['Bottom y offset' + U, numInput(() => hDisp(q.z, zBase()), v => setP(t => { t.z = hInv(v, zBase()); }))],
         ['Height' + U, len('h', { min: 0.01 })])),
         cg && cogIn(q) ? sect('Rim', pgrid(2,
         ['Rim radius bottom (x' + UX, len('rob', { min: 0 })],
