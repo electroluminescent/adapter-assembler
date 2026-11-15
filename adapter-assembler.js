@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.14.3. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.14.4. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.14.3';
+  const APP_VERSION = '3.14.4';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -3289,6 +3289,43 @@
       for (const dd of neg) into.append(sv('path', { d: dd, fill: 'none', stroke: '#868e96', 'stroke-width': 2.4, 'stroke-linejoin': 'round', 'clip-path': 'url(#' + cid + ')' }));
     }
 
+    // The finished part (after every union, subtraction and intersection) cut by the section's plane: closed loops of
+    // (signed radius, height) in scene units, the left half at negative radius. From the 3D model, so it is exact;
+    // null until there is one. Cached per model and angle.
+    let meshSecCache = null;
+    function meshSection(theta) {
+      const t = meshTris;
+      if (!t || !t.length) return null;
+      if (meshSecCache && meshSecCache.t === t && meshSecCache.theta === theta && meshSecCache.flip === !!state.flip) return meshSecCache.loops;
+      const c = Math.cos(theta), s = Math.sin(theta), fy = state.flip ? -1 : 1, segs = [];
+      // a model point (mm, turned over when flipped) → across the plane, along it, height (scene units)
+      const P = (o) => { const x = t[o], y = t[o + 1] * fy, z = t[o + 2] * fy; return [(-x * s + y * c), (x * c + y * s) / MM, z / MM]; };
+      for (let o = 0; o + 17 < t.length; o += 18) {
+        const A = P(o), B = P(o + 6), C = P(o + 12), pts = [];
+        for (const [p, q] of [[A, B], [B, C], [C, A]]) {
+          if ((p[0] < 0) !== (q[0] < 0)) { const k = p[0] / (p[0] - q[0]); pts.push([p[1] + (q[1] - p[1]) * k, p[2] + (q[2] - p[2]) * k]); }
+        }
+        if (pts.length === 2) segs.push(pts);
+      }
+      // chain the pieces into loops
+      const key = (p) => Math.round(p[0] * 1e6) + ',' + Math.round(p[1] * 1e6), ends = new Map();
+      segs.forEach((sg, i) => { for (const e of [0, 1]) { const k = key(sg[e]); if (!ends.has(k)) ends.set(k, []); ends.get(k).push([i, e]); } });
+      const used = new Uint8Array(segs.length), loops = [];
+      for (let i = 0; i < segs.length; i++) {
+        if (used[i]) continue;
+        used[i] = 1;
+        const loop = [segs[i][0], segs[i][1]];
+        for (let guard = 0; guard < segs.length; guard++) {
+          const nxt = (ends.get(key(loop[loop.length - 1])) || []).find(([j]) => !used[j]);
+          if (!nxt) break;
+          used[nxt[0]] = 1; loop.push(segs[nxt[0]][1 - nxt[1]]);
+        }
+        if (loop.length > 2) loops.push(loop);
+      }
+      meshSecCache = { t, theta, flip: !!state.flip, loops };
+      return loops;
+    }
+
     // ---- the part seen from above: x across, y up (the plane the part turns in) ----
     const topMode = () => state.secMode === 'top';
     let lastTop = [];
@@ -3852,16 +3889,18 @@
       for (const id of order) {
         // the section at the view angle (copies in radial cloners are shown as their first copy)
         const n = state.scene.nodes[id], xf = xfOf(state.scene, id), local = outlineOf(n.pts, n.runs), poly = xf.id ? sectionOutline(n, viewTheta()) : (n.type === 'thread' ? sectionOutline(n, 0) : local).map(xf.fwd), role = roleOf(state.scene, id);
-        if (MS < 0 && !xf.id) continue;     // copies in radial cloners: their opposite copy is drawn faintly from the right side
-        if (MS > 0) for (const p of poly) { ext.y0 = Math.min(ext.y0, p.y); ext.y1 = Math.max(ext.y1, p.y); ext.z0 = Math.min(ext.z0, p.z); ext.z1 = Math.max(ext.z1, p.z); }
-        // a cloned object: show the other half of its section faintly
-        if (!xf.id && !monoHidden(id)) g.append(sv('path', { d: pathOf(local.map(xf.mir)), fill: 'none', stroke: COLORS[n.type] || '#1f6feb', 'stroke-width': 1, 'stroke-dasharray': '3 3', opacity: 0.6 }));
+        // a copy in a radial cloner: its section has two halves, either side of the copy's own axis; both are drawn
+        // (and, like everything, mirrored on the left)
+        const twin = xf.id ? null : local.map(xf.mir);
+        if (MS > 0) for (const p of twin ? poly.concat(twin) : poly) { ext.y0 = Math.min(ext.y0, p.y); ext.y1 = Math.max(ext.y1, p.y); ext.z0 = Math.min(ext.z0, p.z); ext.z1 = Math.max(ext.z1, p.z); }
         const col = COLORS[n.type] || '#1f6feb', crossing = polygonSelfIntersects(local), selected = selectedAncestorOf(id);
         const fill = role === 'negative' ? 'url(#aa-hatch)' : crossing ? 'rgba(220,38,38,.18)' : col + (role === 'intersect' ? '18' : '26');
-        lastPolys[MS][id] = { d: pathOf(poly), col };      // for the hover highlight
-        if (monoHidden(id)) { (role === 'negative' ? monoNeg : monoPos).push(pathOf(poly)); continue; }
-        g.append(sv('path', { d: pathOf(poly), fill, stroke: crossing || role === 'negative' ? '#e03131' : col, 'stroke-width': selected ? 2.8 : 1.4,
-          'stroke-dasharray': role === 'negative' ? '6 3' : 'none', 'stroke-linejoin': 'round' }));
+        const dAll = pathOf(poly) + (twin ? pathOf(twin) : '');
+        lastPolys[MS][id] = { d: dAll, col };      // for the hover highlight
+        if (monoHidden(id)) { (role === 'negative' ? monoNeg : monoPos).push(pathOf(poly)); if (twin) (role === 'negative' ? monoNeg : monoPos).push(pathOf(twin)); continue; }
+        for (const part of twin ? [poly, twin] : [poly])
+          g.append(sv('path', { d: pathOf(part), fill, stroke: crossing || role === 'negative' ? '#e03131' : col, 'stroke-width': selected ? 2.8 : 1.4,
+            'stroke-dasharray': role === 'negative' ? '6 3' : 'none', 'stroke-linejoin': 'round' }));
         if (n.type === 'cog') {
           // the range the section moves through as the view turns: root (min) and tip (max)
           const sh = cogShapeOf(n.params, n.precision), fix = cogFix(n.params, local), lo = Math.min(sh.rf, sh.ra), hi = Math.max(sh.rf, sh.ra);
@@ -3876,7 +3915,17 @@
           g.append(sv('path', { d: pathOf(local.map(p => xf.fwd({ y: p.y * maxK, z: p.z }))), fill: 'none', stroke: '#c2255c', 'stroke-width': 1.2, 'stroke-dasharray': '6 4', 'pointer-events': 'none' }));
         }
       }
-      drawMono(monoG, monoPos, monoNeg, MS > 0 ? 'r' : 'l');
+      // the grey shape is the finished part's own section (both sides at once), when the 3D model is there
+      const exact = state.mono || monoPos.length ? meshSection(state.viewAngle * Math.PI / 180) : null;
+      if (exact && monoPos.length + monoNeg.length) {
+        if (MS < 0) {
+          const MS0 = MS; MS = 1;
+          const dd = exact.map(L => 'M' + L.map(p => toScreen(p[0], p[1]).map(v => v.toFixed(1)).join(' ')).join('L') + 'Z').join('');
+          MS = MS0;
+          monoG.append(sv('path', { d: dd, fill: 'none', stroke: '#868e96', 'stroke-width': 2.4, 'stroke-linejoin': 'round' }));
+          monoG.append(sv('path', { d: dd, fill: '#dee2e6', 'fill-rule': 'evenodd', stroke: '#868e96', 'stroke-width': 1.2, 'stroke-linejoin': 'round' }));
+        }
+      } else drawMono(monoG, monoPos, monoNeg, MS > 0 ? 'r' : 'l');
       // bevels: grab one to make it bigger or smaller
       for (const id of order) {
         if (monoHidden(id)) continue;
@@ -3956,9 +4005,8 @@
       // (drag across to change the addendum, the module or the dedendum)
       for (const id of order) {
         const n = state.scene.nodes[id];
-        if (n.type !== 'cog') continue;
+        if (n.type !== 'cog' || monoHid(id)) continue;
         const xf = xfOf(state.scene, id);
-        if (MS < 0 && !xf.id) continue;
         for (const ch of cogHandles(n)) {
           const at = xf.fwd({ y: ch.r, z: ch.z }), [x, y] = toScreen(at.y, at.z), hot = drag && drag.type === 'cog' && drag.id === id && drag.what === ch.what;
           const c = sv('path', { d: 'M' + x.toFixed(1) + ' ' + (y - 6).toFixed(1) + 'l6 6l-6 6l-6-6z', fill: hot ? '#e03131' : ch.col, stroke: '#fff', 'stroke-width': 1.4, style: 'cursor:ew-resize' });
