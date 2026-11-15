@@ -2,7 +2,7 @@
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.18.1';
+  const APP_VERSION = '3.19.0';
   // switching between radius/height and overhead: radius/height tips about the height the overhead view looks down
   // from, overhead about its own x axis
   // (set false to go back to both views tipping about the middle of the pane)
@@ -45,7 +45,9 @@
     cutLo: 0,              // (old: the slice from below as a fraction of the height; read once into cutsLo.y)
     cutsLo: { x: -1, y: -0.05, z: -1 },   // 3D: the lower slice on each axis, in the same units as cuts (at its low end = none)
     mono: false,           // cross-section: everything not selected as one grey shape
-    autoSimplify: false,
+    autoSimplify: true,
+    linkViews: true,       // radius/height and overhead line up with each other when switching (off: each keeps its own view)
+    settingsRev: 0,        // which one-time changes to saved settings have been made
     treeFolded: [],        // objects list: groups / booleans / cloners shown folded   // ... and automatically at 50 % zoom or less
     cutHandles: false,     // 3D: show the slicing handles on the model
     topCut: { lo: 0, hi: 1 },             // overhead view: the band of heights shown (fractions of the part's height)   // 3D cut planes: slider positions (1 = no cut)
@@ -71,11 +73,13 @@
 
 
   // Settings remembered in this browser.
-  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'quality', 'collapsed', 'secMode', 'mono', 'autoSimplify', 'treeFolded', 'cutsLo', 'cutHandles', 'topCut', 'cut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts', 'cutLo'];
+  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'quality', 'collapsed', 'secMode', 'mono', 'autoSimplify', 'linkViews', 'settingsRev', 'treeFolded', 'cutsLo', 'cutHandles', 'topCut', 'cut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts', 'cutLo'];
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     for (const k of SAVED_SETTINGS) if (k in saved && typeof saved[k] === typeof state[k]) state[k] = saved[k];
   } catch (_) { /* storage unavailable */ }
+  // one-time: auto-simplify is on by default now
+  if (!(state.settingsRev >= 1)) { state.autoSimplify = true; state.settingsRev = 1; }
   // always on: true helical threads, and welding / T-junction repair of the exported mesh
   state.helical = true; state.optimize = true;
   if (!['ngons', 'quads', 'tris'].includes(state.faces)) state.faces = 'ngons';
@@ -2478,6 +2482,7 @@
         selectRow('Angles', state.angUnit, [['deg', 'degrees (°)'], ['rad', 'radians']], v => setUnit('angUnit', v)),
         selectRow('Quality', state.quality, [['high', 'high'], ['low', 'low (no animations, less detail)']], v => setUnit('quality', v))),
       checkRow('Flip upside down', () => state.flip, v => set('flip', v)),
+      checkRow('Linked cross-section views (radius/height and overhead line up when switching; height band set in both)', () => state.linkViews !== false, v => { state.linkViews = v; saveSettings(); renderAll(); }),
       checkRow('Auto-simplify (cross-section drawn monomorphic at 50% zoom or less)', () => !!state.autoSimplify, v => { state.autoSimplify = v; saveSettings(); renderAll(); }),
       el('div', null,
         numRow('Circular precision (edges)', state.precision, v => set('precision', Math.max(8, Math.min(300, Math.round(v)))), { step: '1', min: 8, max: 300, digits: 0, width: 64 }),
@@ -2585,7 +2590,7 @@
     const topBox = el('div', { style: 'position:absolute;right:6px;top:64px;bottom:64px;width:20px;touch-action:none;z-index:6', title: 'Heights shown from above' }, tbTrack, tbRange, tbHiL, tbLoL, tbHi, tbLo);
     let tbDrag = null;
     function syncTopBox() {
-      topBox.style.display = state.scene ? '' : 'none';
+      topBox.style.display = state.scene && (topMode() || LINK()) ? '' : 'none';
       topBox.title = topMode() ? 'Heights shown from above' : 'Heights the view from above will show (nothing is cut here)';
       const c = state.topCut || { lo: 0, hi: 1 }, lo = Math.max(0, Math.min(1, c.lo)), hi = Math.max(0, Math.min(1, c.hi)), top = (t) => (1 - tbF(t)) * 100 + '%';
       tbHi.style.top = top(hi); tbLo.style.top = top(lo); tbHiL.style.top = top(hi); tbLoL.style.top = top(lo);
@@ -3085,7 +3090,7 @@
         for (const d of dirs) lines.push({ p: T, d });
       }
       // the heights the view from above shows (the band's lines)
-      { const bz = bandZs(); if (bz) for (const z of bz) lines.push({ p: { y: 0, z }, d: [1, 0] }); }
+      { const bz = LINK() ? bandZs() : null; if (bz) for (const z of bz) lines.push({ p: { y: 0, z }, d: [1, 0] }); }
       // the grid: the nearest vertical and horizontal grid lines (heights measured from the lowest point)
       {
         const st = gridStep(), base = info.base || 0;
@@ -3581,8 +3586,15 @@
     }
     // (when that height is off the screen, the section line goes to the middle instead)
     const onScreen = (y) => y >= 0 && y <= size().h - AX_B;
+    const LINK = () => state.linkViews !== false;
+    // not linked: each view keeps its own place and zoom
+    const ownViews = { section: null, top: null };
     const otherView = (v, toTop) => {
       if (!v) return v;
+      if (!LINK()) {
+        const o = ownViews[toTop ? 'top' : 'section'];
+        return o ? { ...o } : toTop ? null : { cy: v.cy, cz: FZ() * partZMid(), s: v.s, fit: v.fit };
+      }
       let cz;
       if (toTop) { cz = v.cz - FZ() * lookFromZ(); if (!onScreen(size().h / 2 + cz * v.s)) cz = 0; }
       else cz = sideCz != null ? sideCz : v.cz + FZ() * partZMid();
@@ -3594,8 +3606,10 @@
       zoomAnim = null;
       const before = view;
       if (toTop && view) sideCz = view.cz;
+      if (view) ownViews[toTop ? 'section' : 'top'] = { ...view };
       view = otherView(view, toTop);
       state.secMode = toTop ? 'top' : 'section'; saveSettings();
+      if (!view) fit();
       drag = null; hoverNode = null; hoverEdge = null; cursorW = null; hoverTopH = null;
       // the old view tips away as the new one tips in (side → top: as if looking down onto the part; and back)
       const ghost = !reduceMotion() && svg.isConnected ? svg.cloneNode(true) : null;
@@ -3611,7 +3625,7 @@
         // its height band), and the view from above about its own x axis (the section line), so the two meet there.
         // (false: both views turn about the middle of the pane, as before.)
         let pSide = pv, pTop = pv;
-        if (TIP_FROM_CUT) {
+        if (TIP_FROM_CUT && LINK()) {
           const sideV = toTop ? before : view, topV = toTop ? view : before, zTop = lookFromZ(), H = size().h;
           // (a line off the screen: about the middle instead)
           const yS = sideV && zTop != null ? H / 2 - (FZ() * zTop - sideV.cz) * sideV.s : NaN, yT = topV ? H / 2 + topV.cz * topV.s : NaN;
@@ -4157,7 +4171,7 @@
       grid(g, sceneBase);
       // the heights the view from above will show (set with the slider at the right): guides only, nothing is cut
       // (drag a line to move it; Ctrl snaps it to points; dragged points snap to the lines with Ctrl)
-      const bandS = topBand(), bz = bandZs();
+      const bandS = topBand(), bz = LINK() ? bandZs() : null;
       if (bz) {
         const { w: wS } = size(), hot = drag && drag.type === 'bandline';
         if (bandS) {
@@ -6622,7 +6636,7 @@
       busyTag.textContent = state.busy ? 'Updating…' : '';
     }
     function destroy() { ro.disconnect(); roSide.disconnect(); window.removeEventListener('keydown', onKey, true); window.removeEventListener('keyup', onKeyUp, true); root.remove(); }
-    const flipped = () => { if (view) view.cz = -view.cz; if (sideCz != null) sideCz = -sideCz; flipBox.checked = !!state.flip; drawSection(); };
+    const flipped = () => { if (view) view.cz = -view.cz; if (sideCz != null) sideCz = -sideCz; for (const o of Object.values(ownViews)) if (o) o.cz = -o.cz; flipBox.checked = !!state.flip; drawSection(); };
     return { root, render, destroy, showSplash, flipped };
   }
 
