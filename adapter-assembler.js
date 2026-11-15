@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.14.4. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.15.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.14.4';
+  const APP_VERSION = '3.15.0';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -44,7 +44,8 @@
     cutLo: 0,              // (old: the slice from below as a fraction of the height; read once into cutsLo.y)
     cutsLo: { x: -1, y: -0.05, z: -1 },   // 3D: the lower slice on each axis, in the same units as cuts (at its low end = none)
     mono: false,           // cross-section: everything not selected as one grey shape
-    autoSimplify: false,   // ... and automatically at 50 % zoom or less
+    autoSimplify: false,
+    treeFolded: [],        // objects list: groups / booleans / cloners shown folded   // ... and automatically at 50 % zoom or less
     cutHandles: false,     // 3D: show the slicing handles on the model
     topCut: { lo: 0, hi: 1 },             // overhead view: the band of heights shown (fractions of the part's height)   // 3D cut planes: slider positions (1 = no cut)
     sidePanels: {},        // side bar views: { key: { size, min } }                          // the selection box in the cross-section is folded
@@ -69,7 +70,7 @@
 
 
   // Settings remembered in this browser.
-  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'quality', 'collapsed', 'secMode', 'mono', 'autoSimplify', 'cutsLo', 'cutHandles', 'topCut', 'cut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts', 'cutLo'];
+  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'quality', 'collapsed', 'secMode', 'mono', 'autoSimplify', 'treeFolded', 'cutsLo', 'cutHandles', 'topCut', 'cut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts', 'cutLo'];
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     for (const k of SAVED_SETTINGS) if (k in saved && typeof saved[k] === typeof state[k]) state[k] = saved[k];
@@ -2161,6 +2162,7 @@
     sideview: '<path d="M8 1.5v13" stroke-dasharray="1.6 1.6"/><rect x="10" y="4" width="3.8" height="8"/><rect x="2.2" y="4" width="3.8" height="8"/>',
     topview: '<circle cx="8" cy="8" r="6"/><circle cx="8" cy="8" r="2.4"/><path d="M8 8h6"/>',
     mono: '<path d="M2.5 6.5h5v-4h6v8h-5v3h-6z"/>',
+    transform: '<path d="M8 1.5v13M1.5 8h13M6 3.5 8 1.5l2 2M6 12.5l2 2 2-2M3.5 6 1.5 8l2 2M12.5 6l2 2-2 2"/>',
     thread: '<path d="M2 5l3-2 3 2 3-2 3 2M2 9l3-2 3 2 3-2 3 2M2 13l3-2 3 2 3-2 3 2"/>',
     cloner: '<circle cx="8" cy="8" r="1.3"/><circle cx="8" cy="2.9" r="1.3"/><circle cx="12.4" cy="10.6" r="1.3"/><circle cx="3.6" cy="10.6" r="1.3"/><path d="M8 6.7V4.2M9.1 8.6l2.2 1.3M6.9 8.6 4.7 9.9" stroke-width="1"/>',
     group: '<rect x="2" y="5" width="8.5" height="8.5" rx="1"/><path d="M5.5 5V2.5H14V11h-3.5"/>',
@@ -2551,11 +2553,12 @@
     const modeBar = el('div', { style: 'display:inline-flex;gap:2px' },
       modeBtn('section', 'sideview', 'Radius/height', 'Cross-section: radius across, height up'),
       modeBtn('top', 'topview', 'Overhead', 'Seen from above: teeth of cogs, sides of n-sided objects, the section\'s angle'));
-    const viewBar = el('div', { style: 'position:absolute;right:30px;top:6px;display:flex;gap:6px;align-items:center;z-index:2' }, monoBtn, modeBar, zoomTag);
+    // the selection's transforms open from a button beside the view buttons
+    const selBtn = hbtn('transform', 'Selection', () => { state.selBoxCollapsed = !state.selBoxCollapsed; saveSettings(); renderSelBox(); },
+      { title: 'Move, scale or rotate the selection' });
+    selBtn.style.display = 'none';
+    const viewBar = el('div', { style: 'position:absolute;right:30px;top:6px;display:flex;gap:6px;align-items:center;z-index:4' }, selBtn, monoBtn, modeBar, zoomTag);
     const coord = el('div', { style: 'position:absolute;right:30px;top:32px;font-size:11px;color:#555;background:rgba(255,255,255,.9);padding:2px 6px;border-radius:3px;pointer-events:none' });
-    const legend = el('div', { style: 'position:absolute;left:70px;top:6px;font-size:11px;color:#555;background:rgba(255,255,255,.9);padding:3px 6px;border-radius:3px;pointer-events:none;line-height:1.5' });
-    legend.innerHTML = '<span style="color:#2f9e44">■ circular</span> <span style="color:#7048e8">■ n-sided</span> <span style="color:#a61e4d">■ cog</span> <span style="color:#d9480f">● thread</span> <span style="color:#e03131">▨ subtracted</span><br>' +
-      '<span class="aa-sideonly">n-sided, cog: <span style="color:#0c8599">— smallest radius</span> <span style="color:#c2255c">- - largest radius</span></span>';
     const loading = el('div', { style: 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#666;background:#fbfbfc' }, 'Start a project with New / open…');
     const overlay = el('div', { style: 'position:absolute;inset:0;pointer-events:none;overflow:hidden' });
     // 1-D compass under the cross-section: the angle of the section around the axis (drag to turn)
@@ -2614,7 +2617,7 @@
       if (Math.abs(t - c.lo) < Math.abs(t - c.hi)) setTopCut(t, c.hi); else setTopCut(c.lo, t);
       saveSettings();
     });
-    left.append(overlay, viewBar, coord, legend, loading, compass1, topBox);
+    left.append(overlay, viewBar, coord, loading, compass1, topBox);
 
     // right: 3D preview + side panel
     const canvas = el('canvas', { style: 'width:100%;height:100%;display:block;touch-action:none;cursor:grab;background:#1c1f24' });
@@ -3357,7 +3360,7 @@
         const box = el('div', { style: 'position:absolute;inset:0;pointer-events:none;background:#fbfbfc;transform-origin:' + pv }, shot, ghost);
         for (const n of [svg, wrapCanvas]) n.style.transformOrigin = pv;
         left.insertBefore(box, overlay);
-        const down = state.secMode === 'top', ms = 380, ease = 'cubic-bezier(.45,0,.2,1)';
+        const down = state.secMode !== 'top', ms = 380, ease = 'cubic-bezier(.45,0,.2,1)';
         box.animate([{ transform: 'perspective(1400px) rotateX(0deg)', opacity: 1 }, { transform: 'perspective(1400px) rotateX(' + (down ? 70 : -70) + 'deg)', opacity: 0 }], { duration: ms, easing: ease, fill: 'forwards' })
           .onfinish = () => box.remove();
         for (const n of [svg, wrapCanvas])
@@ -3367,7 +3370,6 @@
     }
     function syncModeBtns() {
       for (const b of [...modeBar.children, monoBtn]) { const on = b === monoBtn ? !!state.mono : (b.__mode === 'top') === topMode(); b.style.background = on ? '#ddf4ff' : '#fff'; b.style.borderColor = on ? '#54aeff' : '#ced4da'; }
-      for (const s of legend.querySelectorAll('.aa-sideonly')) s.style.display = topMode() ? 'none' : '';
     }
     // where new objects go: the cross-section's view, whichever is showing
     const secView = () => topMode() ? otherView(view, false) : view;
@@ -4100,8 +4102,8 @@
       inp.addEventListener('click', (e) => e.stopPropagation());
       inp.addEventListener('pointerdown', (e) => e.stopPropagation());
       row.draggable = false;
-      const icon = row.firstChild;
-      row.textContent = ''; if (icon) row.append(icon); row.append(inp);
+      const lead = [...row.children].slice(0, 3);   // tree lines, fold arrow, icon
+      row.textContent = ''; row.append(...lead, inp);
       inp.focus(); inp.select();
     }
     function drawHover() {
@@ -4390,7 +4392,7 @@
     }
 
     // ---- selection box (inside the cross-section): coordinates, Translate, Scale, Rotate ----
-    const selBox = el('div', { style: 'position:absolute;right:8px;top:30px;z-index:3;pointer-events:auto;background:rgba(255,255,255,.97);border:1px solid #ced4da;border-radius:6px;padding:6px 8px;font:11px/1.4 sans-serif;color:#343a40;box-shadow:0 1px 6px rgba(0,0,0,.15);width:max-content;max-width:calc(100% - 90px);box-sizing:border-box;display:none' });
+    const selBox = el('div', { style: 'position:absolute;right:30px;top:30px;z-index:3;pointer-events:auto;background:rgba(255,255,255,.97);border:1px solid #ced4da;border-radius:6px;padding:6px 8px;font:11px/1.4 sans-serif;color:#343a40;box-shadow:0 1px 6px rgba(0,0,0,.15);width:max-content;max-width:calc(100% - 90px);box-sizing:border-box;display:none' });
     overlay.append(selBox);
     const tf = { dx: 0, dy: 0, sx: 1, sy: 1, linkScale: true, angle: 0, pivot: 'centre' };
     // The points a transform acts on: selected points/edges, or every point of the selected objects.
@@ -4447,10 +4449,17 @@
     }
     let selBoxSig = null;
     function renderSelBox() {
-      if (!state.scene || (!state.sel.size && !state.selNodes.size)) {
+      const any = state.scene && (state.sel.size || state.selNodes.size);
+      selBtn.style.display = any ? 'inline-flex' : 'none';
+      const open = any && !state.selBoxCollapsed;
+      selBtn.style.background = open ? '#ddf4ff' : '#fff'; selBtn.style.borderColor = open ? '#54aeff' : '#ced4da';
+      if (any) { const keys = [...state.sel], pk = pointKeys(keys), objs = topSelected(state.scene);
+        selBtn.querySelector('.aa-hl').textContent = 'Selection — ' + (keys.length ? pk.length + ' point' + (pk.length === 1 ? '' : 's') + (keys.some(k => parseKey(k).kind === 'e') ? ' (with edges)' : '')
+          : objs.length + ' object' + (objs.length === 1 ? '' : 's')); }
+      if (!open) {
         if (selBox.style.display !== 'none' && selBox.animate && !reduceMotion()) {
           const a = selBox.animate([{ opacity: 1 }, { opacity: 0, transform: 'translateY(-6px)' }], { duration: 120, easing: 'ease-in' });
-          a.onfinish = () => { if (!state.sel.size && !state.selNodes.size) selBox.style.display = 'none'; };
+          a.onfinish = () => { if ((!state.sel.size && !state.selNodes.size) || state.selBoxCollapsed) selBox.style.display = 'none'; };
         } else selBox.style.display = 'none';
         selBoxSig = null;
         return;
@@ -4466,9 +4475,6 @@
     }
     function buildSelBox() {
       const keys = [...state.sel], pk = pointKeys(keys), base = zBase();
-      const objs = topSelected(state.scene);
-      const what = keys.length ? pk.length + ' point' + (pk.length === 1 ? '' : 's') + (keys.some(k => parseKey(k).kind === 'e') ? ' (with edges)' : '')
-        : objs.length + ' object' + (objs.length === 1 ? '' : 's');
       const btn = (kind) => el('button', { type: 'button', style: BTN2 + ';padding:2px 8px;font-size:11px', onclick: () => applyTransform(kind) }, 'Apply');
       // columns: name | label | field | label | field | note | Apply
       const grid = el('div', { style: 'display:grid;grid-template-columns:58px 30px 64px 30px 64px max-content auto;gap:3px 5px;align-items:center' });
@@ -4479,19 +4485,7 @@
         else for (let i = 0; i < 5; i++) grid.append(cell(c[i]));
         grid.append(kind ? btn(kind) : el('span'));
       };
-      const collapsed = !!state.selBoxCollapsed;
-      const toggle = el('button', { type: 'button', title: collapsed ? 'Expand' : 'Collapse', style: 'border:0;background:none;cursor:pointer;font-size:12px;padding:0 2px;color:#495057' }, collapsed ? '▸' : '▾');
-      toggle.addEventListener('click', () => {
-        state.selBoxCollapsed = !state.selBoxCollapsed; saveSettings();
-        const w0 = selBox.offsetWidth, h0 = selBox.offsetHeight;
-        buildSelBox();
-        const w1 = selBox.offsetWidth, h1 = selBox.offsetHeight;
-        if (selBox.animate && !reduceMotion()) selBox.animate([{ width: w0 + 'px', height: h0 + 'px', overflow: 'hidden' }, { width: w1 + 'px', height: h1 + 'px', overflow: 'hidden' }],
-          { duration: 200, easing: 'cubic-bezier(.2,.8,.2,1)' });
-      });
       selBox.textContent = '';
-      selBox.append(el('div', { style: 'font-weight:700;display:flex;align-items:center;gap:4px;cursor:default' + (collapsed ? '' : ';margin-bottom:5px') }, toggle, 'Selection — ' + what));
-      if (collapsed) return;
       if (pk.length === 1 && parseKey(pk[0]).kind === 'p') {
         const h = parseKey(pk[0]), p = xfOf(state.scene, h.node).fwd(state.scene.nodes[h.node].pts[h.i]);
         const live = (val, set) => { const i = el('input', { 'data-unit': 'len', type: 'number', step: '0.01', value: num(val, 4), style: 'width:64px;font-size:11px;box-sizing:border-box' });
@@ -4980,29 +4974,58 @@
         }
         rows.append(r);
       };
-      const nodeRow = (id, depth, label, drop) => {
+      // the tree's lines, left of a row at this depth: trail[L-1] says whether level L carries on below this row
+      const LINE = 'position:absolute;background:#ced4da;';
+      const treeLines = (depth, trail) => {
+        const box = el('span', { style: 'position:absolute;left:' + (-depth * 14) + 'px;top:0;bottom:0;width:' + depth * 14 + 'px;pointer-events:none' });
+        for (let L = 1; L <= depth; L++) {
+          const x = (L - 1) * 14 + 6;
+          if (L === depth) {
+            box.append(el('span', { style: LINE + 'left:' + x + 'px;width:1px;top:0;' + (trail[L - 1] ? 'bottom:0' : 'height:50%') }));
+            box.append(el('span', { style: LINE + 'left:' + x + 'px;right:2px;height:1px;top:50%' }));
+          } else if (trail[L - 1]) box.append(el('span', { style: LINE + 'left:' + x + 'px;width:1px;top:0;bottom:0' }));
+        }
+        return box;
+      };
+      const folded = new Set(state.treeFolded || []);
+      // groups, booleans and cloners fold their contents away (remembered)
+      const twisty = (n) => {
+        if (!isContainer(n)) return el('span', { style: 'display:inline-block;width:11px' });
+        const t = el('span', { style: 'display:inline-block;width:11px;color:#868e96;font-size:10px;cursor:pointer', title: folded.has(n.id) ? 'Show its contents' : 'Hide its contents' }, folded.has(n.id) ? '▸' : '▾');
+        t.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (folded.has(n.id)) folded.delete(n.id); else folded.add(n.id);
+          state.treeFolded = [...folded]; saveSettings(); renderAll();
+        });
+        t.addEventListener('dblclick', (e) => e.stopPropagation());
+        return t;
+      };
+      const nodeRow = (id, depth, label, drop, trail = []) => {
         const n = sc.nodes[id], selected = state.selNodes.has(id);
         // dropping onto a group adds to it; onto a boolean fills its first empty slot; onto anything else inserts before it
         let target = drop;
         if (n.type === 'group' || n.type === 'cloner') target = { parent: id, slot: null };
         else if (n.type === 'boolean') { const s = n.children.indexOf(null); target = s >= 0 ? { parent: id, slot: s } : drop; }
         mkRow({ id, drop: target, title: 'Drag onto a group, a boolean slot or the scene to move it',
-          style: 'padding:1px 4px;margin-left:' + depth * 14 + 'px;border-radius:4px;cursor:pointer;user-select:none;transition:background-color .15s,outline-color .15s;' + (selected ? 'background:#ddf4ff;outline:1px solid #54aeff' : ''),
-          kids: [el('span', { style: 'display:inline-flex;vertical-align:-2px;margin-right:4px;color:' + (COLORS[n.type] || '#555') }, icon(nodeIcon(n), 14)), (label ? label + ' ' : '') + (n.name || id),
+          style: 'position:relative;padding:1px 4px;margin-left:' + depth * 14 + 'px;border-radius:4px;cursor:pointer;user-select:none;transition:background-color .15s,outline-color .15s;' + (selected ? 'background:#ddf4ff;outline:1px solid #54aeff' : ''),
+          kids: [treeLines(depth, trail), twisty(n),
+            el('span', { style: 'display:inline-flex;vertical-align:-2px;margin-right:4px;color:' + (COLORS[n.type] || '#555') }, icon(nodeIcon(n), 14)), (label ? label + ' ' : '') + (n.name || id),
             n.type === 'boolean' ? el('span', { style: 'color:#888' }, ' (' + (n.op === 'difference' ? 'A − B' : n.op) + ')') : n.type === 'group' ? el('span', { style: 'color:#888' }, ' (group, ' + n.children.length + ')')
               : n.type === 'cloner' ? el('span', { style: 'color:#888' }, ' (×' + n.params.count + ', ' + n.params.orient + ')') : null] });
+        if (folded.has(id)) return;
         if (n.type === 'boolean') n.children.forEach((c, s) => {
-          if (c != null) nodeRow(c, depth + 1, s ? 'B:' : 'A:', { parent: id, slot: s });
-          else mkRow({ drop: { parent: id, slot: s }, style: 'padding:1px 4px;margin-left:' + (depth + 1) * 14 + 'px;color:#999;font-style:italic;border-radius:4px',
-            kids: [(s ? 'B' : 'A') + ': empty — drop an object here'] });
+          const tr = [...trail, s < n.children.length - 1];
+          if (c != null) nodeRow(c, depth + 1, s ? 'B:' : 'A:', { parent: id, slot: s }, tr);
+          else mkRow({ drop: { parent: id, slot: s }, style: 'position:relative;padding:1px 4px;margin-left:' + (depth + 1) * 14 + 'px;color:#999;font-style:italic;border-radius:4px',
+            kids: [treeLines(depth + 1, tr), (s ? 'B' : 'A') + ': empty — drop an object here'] });
         });
         if (n.type === 'group' || n.type === 'cloner') {
-          n.children.forEach((c, i) => nodeRow(c, depth + 1, null, { parent: id, slot: i }));
-          if (!n.children.length) mkRow({ drop: { parent: id, slot: null }, style: 'padding:1px 4px;margin-left:' + (depth + 1) * 14 + 'px;color:#999;font-style:italic;border-radius:4px', kids: ['empty — drop objects here'] });
+          n.children.forEach((c, i) => nodeRow(c, depth + 1, null, { parent: id, slot: i }, [...trail, i < n.children.length - 1]));
+          if (!n.children.length) mkRow({ drop: { parent: id, slot: null }, style: 'position:relative;padding:1px 4px;margin-left:' + (depth + 1) * 14 + 'px;color:#999;font-style:italic;border-radius:4px', kids: [treeLines(depth + 1, [...trail, false]), 'empty — drop objects here'] });
         }
       };
       mkRow({ drop: { parent: null, slot: null }, style: 'color:#666;padding:1px 4px;border-radius:4px', kids: ['Scene'], title: 'Drop here to move to the top level (hold Ctrl to copy)' });
-      sc.root.forEach((id, i) => nodeRow(id, 1, null, { parent: null, slot: i }));
+      sc.root.forEach((id, i) => nodeRow(id, 1, null, { parent: null, slot: i }, [i < sc.root.length - 1]));
       return el('div', { style: BOX },
         el('div', { style: H }, 'Objects'),
         rows);
