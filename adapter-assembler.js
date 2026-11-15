@@ -2,8 +2,9 @@
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.17.1';
-  // switching between radius/height and overhead: the overhead view tips in about the height it looks down from
+  const APP_VERSION = '3.17.2';
+  // switching between radius/height and overhead: radius/height tips about the height the overhead view looks down
+  // from, overhead about its own x axis
   // (set false to go back to both views tipping about the middle of the pane)
   const TIP_FROM_CUT = true;
   const MM = 25.4;
@@ -3349,7 +3350,8 @@
     // ---- monomorphic from above: the finished part itself, so a subtraction only takes away what it really removes ----
     // The outline is Manifold's projection of the solid cut to the height band (exact, with the holes that go right
     // through); the lines inside are the part's sharp edges in the band (where one part stands over another, steps,
-    // bores), all of them, seen through. Worked out off the drawing (it can take a moment) and cached per model and band.
+    // bores), where nothing of the part covers them from above. Worked out off the drawing (it can take a moment) and
+    // cached per model and band.
     let topMonoSolid = null, topMonoCache = null, topMonoJob = null;
     async function mainManifold() {
       if (W.__aaManifold) return W.__aaManifold;
@@ -3402,6 +3404,56 @@
         dn.forEach((f, j) => { if (cd[j] > 0.6 * Math.abs(area(D[j]))) ghost[f] = 1; });
       }
       return ghost;
+    }
+    // keeps the pieces of these segments ([ax, ay, az, bx, by, bz] …) that can be seen from above (nothing of the part over
+    // them up to the height hi; above hi, inside the part counts as covered: the cut there is a lid). → [[x0, y0, x1, y1] …]
+    function visibleFromAbove(V, T, segs, hi) {
+      const nt = T.length / 3;
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+      for (let i = 0; i < V.length; i += 3) { x0 = Math.min(x0, V[i]); x1 = Math.max(x1, V[i]); y0 = Math.min(y0, V[i + 1]); y1 = Math.max(y1, V[i + 1]); z0 = Math.min(z0, V[i + 2]); z1 = Math.max(z1, V[i + 2]); }
+      if (!isFinite(x0)) return [];
+      const diag = Math.hypot(x1 - x0, y1 - y0, z1 - z0) || 1, eps = diag * 2e-5, G = Math.max(16, Math.min(256, Math.round(Math.sqrt(nt) * 1.5)));
+      const sx = G / ((x1 - x0) || 1), sy = G / ((y1 - y0) || 1), cells = Array.from({ length: G * G }, () => []);
+      const cx = (x) => Math.max(0, Math.min(G - 1, Math.floor((x - x0) * sx))), cy = (y) => Math.max(0, Math.min(G - 1, Math.floor((y - y0) * sy)));
+      for (let f = 0; f < nt; f++) {
+        const a = T[f * 3] * 3, b = T[f * 3 + 1] * 3, c = T[f * 3 + 2] * 3;
+        const ar = (V[b] - V[a]) * (V[c + 1] - V[a + 1]) - (V[c] - V[a]) * (V[b + 1] - V[a + 1]);
+        if (Math.abs(ar) < 1e-14) continue;                         // upright: seen edge-on from above
+        const i0 = cx(Math.min(V[a], V[b], V[c])), i1 = cx(Math.max(V[a], V[b], V[c])), j0 = cy(Math.min(V[a + 1], V[b + 1], V[c + 1])), j1 = cy(Math.max(V[a + 1], V[b + 1], V[c + 1]));
+        for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) cells[j * G + i].push(f);
+      }
+      // nudged off any shared edge so a ray up from here crosses each surface once
+      const DX = diag * 1.37e-7, DY = diag * 0.73e-7;
+      const covered = (x, y, z) => {
+        x += DX; y += DY;
+        let overHi = 0;
+        for (const f of cells[cy(y) * G + cx(x)]) {
+          const a = T[f * 3] * 3, b = T[f * 3 + 1] * 3, c = T[f * 3 + 2] * 3;
+          const d = (V[b] - V[a]) * (V[c + 1] - V[a + 1]) - (V[c] - V[a]) * (V[b + 1] - V[a + 1]);
+          const u = ((x - V[a]) * (V[c + 1] - V[a + 1]) - (V[c] - V[a]) * (y - V[a + 1])) / d, v = ((V[b] - V[a]) * (y - V[a + 1]) - (x - V[a]) * (V[b + 1] - V[a + 1])) / d;
+          if (u < 0 || v < 0 || u + v > 1) continue;
+          const zf = V[a + 2] + (V[b + 2] - V[a + 2]) * u + (V[c + 2] - V[a + 2]) * v;
+          if (zf <= z + eps) continue;
+          if (zf <= hi) return true;
+          overHi++;
+        }
+        return (overHi & 1) === 1;
+      };
+      const out = [], step = Math.hypot(x1 - x0, y1 - y0) / 700;
+      for (let k = 0; k < segs.length; k += 6) {
+        const ax = segs[k], ay = segs[k + 1], az = segs[k + 2], bx = segs[k + 3], by = segs[k + 4], bz = segs[k + 5];
+        const L = Math.hypot(bx - ax, by - ay), n = Math.max(1, Math.min(64, Math.ceil(L / step)));
+        // hidden only when covered just to both sides of it (an edge right under the rim of a wall is still seen)
+        const ox = -(by - ay) / (L || 1) * eps * 5, oy = (bx - ax) / (L || 1) * eps * 5;
+        let from = -1;
+        for (let i = 0; i <= n; i++) {
+          const mx = ax + (bx - ax) * (i + 0.5) / n, my = ay + (by - ay) * (i + 0.5) / n, mz = az + (bz - az) * (i + 0.5) / n;
+          const vis = i < n && !(covered(mx + ox, my + oy, mz) && covered(mx - ox, my - oy, mz));
+          if (vis && from < 0) from = i;
+          if (!vis && from >= 0) { out.push([ax + (bx - ax) * from / n, ay + (by - ay) * from / n, ax + (bx - ax) * i / n, ay + (by - ay) * i / n]); from = -1; }
+        }
+      }
+      return out;
     }
     // the model welded, in scene units where the scene has it; its sharp edges as 3D segments
     function topMonoMesh(t) {
@@ -3458,7 +3510,7 @@
             const mesh = topMonoMesh(t);
             let m = null;
             try { const mm = new mf.Mesh({ numProp: 3, vertProperties: mesh.V, triVerts: mesh.T }); mm.merge(); m = new mf.Manifold(mm); } catch (_) { m = null; }
-            topMonoSolid = { t, m, seg: mesh.seg };
+            topMonoSolid = { t, m, seg: mesh.seg, V: mesh.V, T: mesh.T };
           }
           const S = topMonoSolid;
           if (S.m) {
@@ -3468,24 +3520,27 @@
             if (isFinite(hi)) { m = m.trimByPlane([0, 0, -1], -hi); tmp.push(m); }
             const cs = m.project(), polys = cs.toPolygons();
             cs.delete(); for (const x of tmp) x.delete();
-            const loops = polys.map(P => P.map(p => Array.isArray(p) ? [p[0], p[1]] : [p.x, p.y])).filter(L => L.length > 2);
-            // the sharp edges, cut to the band
-            const lines = [], s = S.seg;
+            // (no slivers: where faces just touch, Manifold leaves loops with no area)
+            const xy = (P) => P.map(p => Array.isArray(p) ? [p[0], p[1]] : [p.x, p.y]);
+            const area = (L) => { let a = 0; for (let i = 0; i < L.length; i++) { const A = L[i], B = L[(i + 1) % L.length]; a += A[0] * B[1] - B[0] * A[1]; } return Math.abs(a) / 2; };
+            const vb = S.V; let span = 0; for (let i = 0; i < vb.length; i += 3) span = Math.max(span, Math.abs(vb[i]), Math.abs(vb[i + 1]));
+            const tiny = (span * 2e-3) ** 2;
+            const loops = polys.map(xy).filter(L => L.length > 2 && area(L) > tiny);
+            // the sharp edges, cut to the band; only what can be seen from above
+            const seg3 = [], s = S.seg;
             for (let k = 0; k < s.length; k += 6) {
               let ax = s[k], ay = s[k + 1], az = s[k + 2], bx = s[k + 3], by = s[k + 4], bz = s[k + 5];
               if (Math.max(az, bz) < lo - 1e-9 || Math.min(az, bz) > hi + 1e-9) continue;
               const cut = (z) => { const f = (z - az) / (bz - az); return [ax + (bx - ax) * f, ay + (by - ay) * f]; };
               if (az < lo && bz > lo || az > lo && bz < lo) { const [x, y] = cut(lo); if (az < lo) { ax = x; ay = y; az = lo; } else { bx = x; by = y; bz = lo; } }
               if (az > hi && bz < hi || az < hi && bz > hi) { const [x, y] = cut(hi); if (az > hi) { ax = x; ay = y; az = hi; } else { bx = x; by = y; bz = hi; } }
-              lines.push([ax, ay, bx, by]);
+              seg3.push(ax, ay, az, bx, by, bz);
             }
-            // where the band cuts through material: the cut's own edges
-            for (const z of [lo, hi]) if (isFinite(z)) {
-              const sl = S.m.slice(z), sp = sl.toPolygons(); sl.delete();
-              for (const P of sp) for (let i = 0; i < P.length; i++) {
-                const a = P[i], b = P[(i + 1) % P.length], A = Array.isArray(a) ? a : [a.x, a.y], B = Array.isArray(b) ? b : [b.x, b.y];
-                lines.push([A[0], A[1], B[0], B[1]]);
-              }
+            const lines = visibleFromAbove(S.V, S.T, seg3, hi);
+            // where the top of the band cuts through material: the cut's own edges (on top, so always seen)
+            for (const z of [hi]) if (isFinite(z)) {
+              const sl = S.m.slice(z), sp = sl.toPolygons().map(xy).filter(L => L.length > 2 && area(L) > tiny); sl.delete();
+              for (const P of sp) for (let i = 0; i < P.length; i++) { const A = P[i], B = P[(i + 1) % P.length]; lines.push([A[0], A[1], B[0], B[1]]); }
             }
             res = { loops, lines };
           }
@@ -3532,17 +3587,18 @@
         ghost.style.position = 'absolute'; ghost.style.inset = '0';
         // the radius/height view turns about a level line through the middle of the pane
         const pv = '50% 50%';
-        // TIP_FROM_CUT: the view from above turns about the height it looks down from (the top of its height band),
-        // where that height was in the radius/height view, so it seems to be seen from that place in the part.
+        // TIP_FROM_CUT: the radius/height view turns about the height the view from above looks down from (the top of
+        // its height band), and the view from above about its own x axis (the section line), so the two meet there.
         // (false: both views turn about the middle of the pane, as before.)
-        let pTop = pv;
+        let pSide = pv, pTop = pv;
         if (TIP_FROM_CUT) {
-          const sideV = toTop ? before : view, r = sceneZRange(), band = topBand(), up = state.flip ? 0 : 1;
-          const zTop = band ? (up ? band.hi : band.lo) : r ? r[up] : null;
-          if (sideV && zTop != null) pTop = '50% ' + (size().h / 2 - (FZ() * zTop - sideV.cz) * sideV.s).toFixed(1) + 'px';
+          const sideV = toTop ? before : view, topV = toTop ? view : before, r = sceneZRange(), band = topBand(), up = state.flip ? 0 : 1;
+          const zTop = band ? (up ? band.hi : band.lo) : r ? r[up] : null, H = size().h;
+          if (sideV && zTop != null) pSide = '50% ' + (H / 2 - (FZ() * zTop - sideV.cz) * sideV.s).toFixed(1) + 'px';
+          if (topV) pTop = '50% ' + (H / 2 + topV.cz * topV.s).toFixed(1) + 'px';
         }
-        const box = el('div', { style: 'position:absolute;inset:0;pointer-events:none;background:#fbfbfc;transform-origin:' + (toTop ? pv : pTop) }, shot, ghost);
-        for (const n of [svg, wrapCanvas]) n.style.transformOrigin = toTop ? pTop : pv;
+        const box = el('div', { style: 'position:absolute;inset:0;pointer-events:none;background:#fbfbfc;transform-origin:' + (toTop ? pSide : pTop) }, shot, ghost);
+        for (const n of [svg, wrapCanvas]) n.style.transformOrigin = toTop ? pTop : pSide;
         left.insertBefore(box, overlay);
         const down = state.secMode !== 'top', ms = 380, ease = 'cubic-bezier(.45,0,.2,1)';
         box.animate([{ transform: 'perspective(1400px) rotateX(0deg)', opacity: 1 }, { transform: 'perspective(1400px) rotateX(' + (down ? 70 : -70) + 'deg)', opacity: 0 }], { duration: ms, easing: ease, fill: 'forwards' })
