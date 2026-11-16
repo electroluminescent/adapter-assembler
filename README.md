@@ -21,6 +21,7 @@ A browser tool for designing threaded adapters, rings and gears, and exporting t
 - #### **Threads**
 
   * Helical threads, male or female, right- or left-hand.
+  * Each sized to take a standard thread of the other kind.
   * Presets for camera, telescope and screw threads, or any diameter × pitch.
 
 - #### **Outlines**

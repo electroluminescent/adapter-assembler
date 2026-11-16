@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.22.2. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.23.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.22.2';
+  const APP_VERSION = '3.23.0';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -600,7 +600,7 @@
         if (i === runs[inRun[i]].start) {
           const r = runs[inRun[i]];
           items.push({ band: { rFirst: r.rFirst, rOther: r.rOther, zFirst: r.zFirst, zLast: r.zLast, pitch: r.pitch, hand: r.hand, flatA: r.flatA || 0, flatB: r.flatB || 0,
-            dir: Math.sign(r.zLast - r.zFirst) || 1, zMin: Math.min(r.zFirst, r.zLast), zMax: Math.max(r.zFirst, r.zLast), runout: r.runout || null } });
+            inner: r.kind === 'internal', dir: Math.sign(r.zLast - r.zFirst) || 1, zMin: Math.min(r.zFirst, r.zLast), zMax: Math.max(r.zFirst, r.zLast), runout: r.runout || null } });
         }
         continue;
       }
@@ -754,15 +754,19 @@
     const pats = new Map();
     const patOf = (b) => { let p = pats.get(b); if (!p) { p = b.runout ? runoutPattern(b) : toothPattern(b); pats.set(b, p); } return p; };
     const hand = (b) => opts.helical ? (b.hand || 0) : 0;
+    // A female thread's surface is made of flat facets between the columns, which lie inside the circle through
+    // its points, into the hole: its points go out by the facets' sag, so the facets lie on the circle and the hole
+    // is never smaller than drawn. (A male's facets only lie inside its material.)
+    const SAG = 1 / Math.cos(Math.PI / N);
     function column(j) {
       col = j;
       const phi = A ? A[j] : TAU * j / N, out = [];
       items.forEach((it, pi) => {
         if (!it.band) { out.push({ id: vert(it.y, it.z, phi), key: [pi, 0] }); return; }
-        const b = it.band, shift = hand(b) * b.pitch * phi / TAU, d = b.dir, P = b.pitch, pat = patOf(b), ro = b.runout;
+        const b = it.band, shift = hand(b) * b.pitch * phi / TAU, d = b.dir, P = b.pitch, pat = patOf(b), ro = b.runout, kf = b.inner && !warp ? SAG : 1;
         const zs = d > 0 ? b.zMin : b.zMax, ze = d > 0 ? b.zMax : b.zMin;
         const endR = (z) => ro ? runoutRadiusAt(b, pat, z, shift) : toothAt(b, pat, z - b.zFirst - shift);
-        out.push({ id: vert(endR(zs), zs, phi), key: [pi, -Infinity] });
+        out.push({ id: vert(endR(zs) * kf, zs, phi), key: [pi, -Infinity] });
         // tooth corners lie on helices: z = zFirst + (m·pitch + corner phase) + shift
         const mLo = Math.floor((b.zMin - b.zFirst - shift) / P) - 1, mHi = Math.ceil((b.zMax - b.zFirst - shift) / P) + 1;
         const vs = [];
@@ -772,8 +776,8 @@
           if (c.z - b.zMin > 1e-7 && b.zMax - c.z > 1e-7) vs.push({ uu, z, c });
         }
         vs.sort((x, y) => d * (x.z - y.z));
-        for (const v of vs) out.push({ id: vert(v.c.r, v.c.z, phi), key: [pi, d * (b.zFirst + v.uu)] });
-        out.push({ id: vert(endR(ze), ze, phi), key: [pi, Infinity] });
+        for (const v of vs) out.push({ id: vert(v.c.r * kf, v.c.z, phi), key: [pi, d * (b.zFirst + v.uu)] });
+        out.push({ id: vert(endR(ze) * kf, ze, phi), key: [pi, Infinity] });
       });
       return out;
     }
@@ -849,8 +853,13 @@
     const P = q.pitch, L = Math.max(P, q.turns * P), z0 = q.z, z1 = q.z + L, c = q.clearance || 0, iso = q.profile !== 'v';
     // solid material behind the teeth (inside a male thread, outside a female one): a multiple of the depth
     q = { ...q, wall: q.backing != null ? q.backing * q.depth : q.wall };
+    // Each kind is made to take a standard (ISO) thread of the other kind: a male's crests sit at the standard major
+    // diameter and its depth runs inward from there; a female's crests sit at the standard minor diameter
+    // (d − 1.0825 × pitch, the innermost a standard male leaves free) and its depth runs outward. With the ISO
+    // profile that is the basic profile of each; a sharp V female then has its sharp crests at the minor diameter
+    // and its roots past the major, so it never reaches into a standard male's roots or flanks.
     if (q.kind === 'internal') {
-      const rRoot = q.d / 2 + c, rCrest = Math.max(0, rRoot - q.depth), rOut = rRoot + Math.max(0.001, q.wall);
+      const rCrest = Math.max(0, q.d / 2 + c - 5 * Math.sqrt(3) / 16 * P), rRoot = rCrest + q.depth, rOut = rRoot + Math.max(0.001, q.wall);
       return {
         pts: [{ y: rOut, z: z0, bevel: null }, { y: rOut, z: z1, bevel: null }, { y: rCrest, z: z1, bevel: null }, { y: rCrest, z: z0, bevel: null }],
         runs: [{ start: 2, end: 3, rFirst: rCrest, rOther: rRoot, zFirst: z1, zLast: z0, pitch: P, pitchDrawn: P, hand: q.hand || 1,
@@ -1635,7 +1644,7 @@
       let keep;
       if (q.kind === 'internal') {
         if (r.start !== 2 || r.end !== 3) return null;
-        f.z = r.zLast; f.turns = (r.zFirst - r.zLast) / r.pitch; f.depth = r.rOther - r.rFirst; f.d = 2 * (r.rOther - c);
+        f.z = r.zLast; f.turns = (r.zFirst - r.zLast) / r.pitch; f.depth = r.rOther - r.rFirst; f.d = 2 * (r.rFirst - c + ISO_DEPTH * r.pitch);
         f.backing = (P[0].y - r.rOther) / f.depth; keep = [0, 1];
       } else {
         if (r.start !== 1 || r.end !== 2) return null;
@@ -5589,7 +5598,7 @@
           setT(t => { const std = isStd(t), L = t.turns * t.pitch; t.preset = p[0]; t.d = p[2] / MM; t.pitch = p[3] / MM; t.turns = Math.max(1, L / t.pitch); if (std) t.depth = stdOf(t.pitch, t.profile); });
         });
         const backing = () => q.backing != null ? q.backing : q.wall / q.depth;
-        const diam = () => (q.kind === 'internal' ? 'Minor Ø ' + num(mm(q.d - 2 * q.depth + 2 * (q.clearance || 0)), 3) + ', major Ø ' + num(mm(q.d + 2 * (q.clearance || 0)), 3)
+        const diam = () => (q.kind === 'internal' ? 'Minor Ø ' + num(mm(q.d - 2 * ISO_DEPTH * q.pitch + 2 * (q.clearance || 0)), 3) + ', major Ø ' + num(mm(q.d - 2 * ISO_DEPTH * q.pitch + 2 * q.depth + 2 * (q.clearance || 0)), 3)
           : 'Major Ø ' + num(mm(q.d - 2 * (q.clearance || 0)), 3) + ', minor Ø ' + num(mm(q.d - 2 * q.depth - 2 * (q.clearance || 0)), 3)) + ' ' + UNIT_LABEL + ' (basic sizes).';
         box.append(sect('Standard', pgrid(2,
           ['Standard', presetSel], GBR,
