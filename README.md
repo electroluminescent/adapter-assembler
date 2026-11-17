@@ -6,9 +6,9 @@ A browser tool for designing threaded adapters, rings and gears, and exporting t
 
 ## Objects
 
-- #### **Circular rings**
+- #### **Radial rings**
 
-  * Rings with separate inner and outer radii at the top and bottom.
+  * Round rings with separate inner and outer radii at the top and bottom.
 
 - #### **N-sided rings**
 
@@ -24,14 +24,21 @@ A browser tool for designing threaded adapters, rings and gears, and exporting t
   * Each sized to take a standard thread of the other kind.
   * Presets for camera, telescope and screw threads, or any diameter × pitch.
 
+- #### **Geometric objects**
+
+  * Any flat shape seen from above, stood up between two heights.
+  * Corners added, moved, bevelled and deleted; placed by its centre.
+  * Turned about any of the three axes, with snapping.
+
 - #### **Outlines**
 
   * Every profile is editable point by point.
   * Corners bevel convex, concave or flared outward.
 
-- #### **Cloners**
+- #### **Symmetries**
 
   * Copies around the axis, upright or on their side.
+  * Copies can turn with their place or keep their orientation.
 
 - #### **Groups and booleans**
 
@@ -67,6 +74,10 @@ A browser tool for designing threaded adapters, rings and gears, and exporting t
 - #### **Monomorphic drawing**
 
   * Everything not selected as one grey shape, taken from the finished solid.
+
+- #### **Move readout**
+
+  * Distance and angle, or a radial or orthogonal vector, by the pointer while dragging.
 
 - #### **Snapping**
 
@@ -115,6 +126,7 @@ A browser tool for designing threaded adapters, rings and gears, and exporting t
 - #### **Navigation**
 
   * Orbit, pan and zoom; the section angle turns with the view.
+  * Fit buttons for each view, and Frame all for both.
 
 ## Output and storage
 

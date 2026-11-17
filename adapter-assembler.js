@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.23.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.26.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.23.0';
+  const APP_VERSION = '3.26.0';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -45,7 +45,9 @@
     mono: false,           // cross-section: everything not selected as one grey shape
     autoSimplify: true,
     heightFrom: 'bottom',  // heights shown from the lowest point up ('bottom') or from the top down ('top'), as the part is shown
-    linkSlicers: false,    // the 2D height band is the 3D height slicer, and the 2D cross-section is cut where the blue slicer is
+    linkSlicers: false,
+    rotMode: 'absolute',   // rotation fields and snapping: the angle itself ('absolute') or the change ('relative')
+    offsetMode: 'polar',   // what a drag shows by the pointer: 'polar' (distance, angle), 'radial' (Δr, Δθ, Δh), 'xyz'    // the 2D height band is the 3D height slicer, and the 2D cross-section is cut where the blue slicer is
     linkViews: true,       // radius/height and overhead line up with each other when switching (off: each keeps its own view)
     settingsRev: 0,        // which one-time changes to saved settings have been made
     treeFolded: [],        // objects list: groups / booleans / cloners shown folded   // ... and automatically at 50 % zoom or less
@@ -73,7 +75,7 @@
 
 
   // Settings remembered in this browser.
-  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'quality', 'collapsed', 'secMode', 'mono', 'autoSimplify', 'heightFrom', 'linkViews', 'linkSlicers', 'settingsRev', 'treeFolded', 'cutsLo', 'cutHandles', 'topCut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts', 'cutLo'];
+  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'quality', 'collapsed', 'secMode', 'mono', 'autoSimplify', 'rotMode', 'offsetMode', 'heightFrom', 'linkViews', 'linkSlicers', 'settingsRev', 'treeFolded', 'cutsLo', 'cutHandles', 'topCut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts', 'cutLo'];
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     for (const k of SAVED_SETTINGS) if (k in saved && typeof saved[k] === typeof state[k]) state[k] = saved[k];
@@ -568,6 +570,7 @@
   // Loop of items for revolving: plain points (bevels expanded) and thread bands.
   function expandProfile(pts, runs) {
     const np = pts.length, inRun = new Int32Array(np).fill(-1);
+    if (!np) return [];                  // (a geometric object has no profile)
     (runs || []).forEach((r, ri) => { for (let k = r.start; k <= r.end; k++) inRun[k] = ri; });
     let s0 = 0; while (s0 < np && inRun[s0] >= 0) s0++;
     if (s0 === np) throw new Error('profile is all thread');
@@ -1051,8 +1054,68 @@
     return rFix + (y - rFix) * Math.max((R - rFix) / span, 0.02);
   }
 
+  // ---- Geometric objects: a flat shape seen from above (x, y), stood up between two heights ----
+  // its corners in the scene: the shape round its centre (cx, cy)
+  // Its outline from above, turned by its rotation about the height axis and placed at its centre (raw: the corners
+  // themselves; otherwise with any bevelled corners rounded; local: in its own frame, round its centre, not turned)
+  function geoCorners(node, raw, local) {
+    const q = node.params, sh = node.shape || [];
+    const own = raw || !sh.some(p => p.bevel && p.bevel.r > 0) ? sh.map(p => [p.x, p.y])
+      : expandProfile(sh.map(p => ({ y: p.x, z: p.y, bevel: p.bevel || null })), []).map(it => [it.y, it.z]);
+    if (local) return own;
+    const a = (q.rz || 0) * Math.PI / 180, c = Math.cos(a), sn = Math.sin(a);
+    return own.map(([x, y]) => [q.cx + x * c - y * sn, q.cy + x * sn + y * c]);
+  }
+  // its rotation: about x, then y, then the height axis (degrees), as one matrix (rows)
+  function geoRot(q) {
+    const a = (q.rx || 0) * Math.PI / 180, b = (q.ry || 0) * Math.PI / 180, g = (q.rz || 0) * Math.PI / 180;
+    const ca = Math.cos(a), sa = Math.sin(a), cb = Math.cos(b), sb = Math.sin(b), cg = Math.cos(g), sg = Math.sin(g);
+    return [[cg * cb, cg * sb * sa - sg * ca, cg * sb * ca + sg * sa], [sg * cb, sg * sb * sa + cg * ca, sg * sb * ca - cg * sa], [-sb, cb * sa, cb * ca]];
+  }
+  function polyArea(P) { let a = 0; for (let i = 0; i < P.length; i++) { const A = P[i], B = P[(i + 1) % P.length]; a += A[0] * B[1] - B[0] * A[1]; } return a / 2; }
+  // triangles covering a simple polygon given counter-clockwise (ear clipping): index triples into P
+  function earClip(P) {
+    const idx = P.map((_, i) => i), out = [];
+    const cross = (a, b, c) => (P[b][0] - P[a][0]) * (P[c][1] - P[a][1]) - (P[b][1] - P[a][1]) * (P[c][0] - P[a][0]);
+    const inside = (p, a, b, c) => { const A = P[a], B = P[b], C = P[c], q = P[p];
+      const d1 = (B[0] - A[0]) * (q[1] - A[1]) - (B[1] - A[1]) * (q[0] - A[0]), d2 = (C[0] - B[0]) * (q[1] - B[1]) - (C[1] - B[1]) * (q[0] - B[0]), d3 = (A[0] - C[0]) * (q[1] - C[1]) - (A[1] - C[1]) * (q[0] - C[0]);
+      return d1 >= 0 && d2 >= 0 && d3 >= 0; };
+    let guard = 0;
+    while (idx.length > 3 && guard++ < 10000) {
+      let cut = false;
+      for (let k = 0; k < idx.length; k++) {
+        const a = idx[(k - 1 + idx.length) % idx.length], b = idx[k], c = idx[(k + 1) % idx.length];
+        if (cross(a, b, c) <= 1e-14) continue;                                   // a reflex (or flat) corner is not an ear
+        if (idx.some(p => p !== a && p !== b && p !== c && inside(p, a, b, c))) continue;
+        out.push([a, b, c]); idx.splice(k, 1); cut = true; break;
+      }
+      if (!cut) {                                                                 // (a shape that crosses itself: fan what is left)
+        for (let k = 1; k + 1 < idx.length; k++) out.push([idx[0], idx[k], idx[k + 1]]);
+        return out;
+      }
+    }
+    if (idx.length === 3) out.push([idx[0], idx[1], idx[2]]);
+    return out;
+  }
+  // a geometric object as a closed, outward-facing mesh (scene units)
+  function geoMesh(node) {
+    const q = node.params;
+    let P = geoCorners(node, false, true).filter((p, i, a) => { const b = a[(i + 1) % a.length]; return Math.hypot(p[0] - b[0], p[1] - b[1]) > 1e-9; });
+    if (P.length < 3) throw new Error((node.name || 'a geometric object') + ' needs at least three corners');
+    if (polyArea(P) < 0) P = P.slice().reverse();
+    // built round its centre (half its height either side), turned, then placed
+    const n = P.length, hh = Math.abs(q.h) / 2, zc = Math.min(q.z, q.z + q.h) + hh, M = geoRot(q), V = [], T = [];
+    const put = (x, y, z) => V.push(M[0][0] * x + M[0][1] * y + M[0][2] * z + q.cx, M[1][0] * x + M[1][1] * y + M[1][2] * z + q.cy, M[2][0] * x + M[2][1] * y + M[2][2] * z + zc);
+    for (const [x, y] of P) put(x, y, -hh);
+    for (const [x, y] of P) put(x, y, hh);
+    for (let i = 0; i < n; i++) { const j = (i + 1) % n; T.push(i, j, n + j, i, n + j, n + i); }
+    for (const [a, b, c] of earClip(P)) { T.push(n + a, n + b, n + c); T.push(c, b, a); }
+    return { V, T };
+  }
+
   // Mesh for one leaf node of the scene.
   function nodeMesh(node, settings) {
+    if (node.type === 'geo') return geoMesh(node);
     if (node.type === 'source' || node.type === 'thread') {
       return revolve(expandProfile(node.pts, runsOf(node)), { segments: Math.min(300, node.precision > 2 ? node.precision : settings.precision), helical: settings.helical });
     }
@@ -1109,13 +1172,15 @@
         // 'axial' keeps their axis parallel to the main axis, 'radial' points it outward
         const base = unionAll(node.children);
         if (!base) return null;
+        // (keepOrient: the copies are only moved round the axis, each keeping the orientation of the first)
         const q = node.params, n = Math.max(1, q.count | 0), R = q.radius * 1, spread = q.spread == null ? 360 : q.spread;
         const step = spread >= 360 - 1e-9 ? 360 / n : (n > 1 ? spread / (n - 1) : 0);
         let total = null;
         for (let k = 0; k < n; k++) {
-          const a = (q.angle || 0) + k * step;
-          const c = q.orient === 'radial' ? keep(keep(keep(base.rotate([0, 90, 0])).translate([R, 0, q.height || 0])).rotate([0, 0, a]))
-            : keep(keep(base.translate([R, 0, 0])).rotate([0, 0, a]));
+          const a = (q.angle || 0) + k * step, ar = a * Math.PI / 180, at = [R * Math.cos(ar), R * Math.sin(ar)];
+          const c = q.orient === 'radial'
+            ? (q.keepOrient ? keep(keep(base.rotate([0, 90, 0])).translate([at[0], at[1], q.height || 0])) : keep(keep(keep(base.rotate([0, 90, 0])).translate([R, 0, q.height || 0])).rotate([0, 0, a])))
+            : (q.keepOrient ? keep(base.translate([at[0], at[1], 0])) : keep(keep(base.translate([R, 0, 0])).rotate([0, 0, a])));
           total = total ? keep(total.add(c)) : c;
         }
         return total;
@@ -1180,7 +1245,7 @@
   function getWorker() {
     if (worker || workerFailed) return worker;
     try {
-      const src = [processMesh, ngonFaces, bevelReach, cornerPoints, toothPattern, toothAt, runoutOf, runsOf, runoutDelta, runoutPattern, runoutCorner, runoutRadiusAt, threadProfile, expandProfile, runVertices, cogShape, cogWarp, revolve, holeMesh, nodeMesh, evaluateScene, soup, runJob]
+      const src = [processMesh, ngonFaces, bevelReach, cornerPoints, toothPattern, toothAt, runoutOf, runsOf, runoutDelta, runoutPattern, runoutCorner, runoutRadiusAt, threadProfile, expandProfile, runVertices, cogShape, cogWarp, revolve, holeMesh, geoCorners, geoRot, polyArea, earClip, geoMesh, nodeMesh, evaluateScene, soup, runJob]
         .map(f => f.toString()).join('\n') +
         '\nself.onmessage = async function (e) {' +
         '  try { const r = await runJob(e.data); self.postMessage({ job: e.data.job, result: r }, [r.buffer, r.preview.tris.buffer, r.preview.lines.buffer, r.preview.bad.buffer].concat(r.preview.solid ? [r.preview.solid.V.buffer, r.preview.solid.T.buffer] : [])); }' +
@@ -1433,7 +1498,9 @@
     let lo = Infinity, hi = -Infinity;
     if (!sc) return 0;
     for (const id of leafOrder(sc)) {
-      const n = sc.nodes[id], xf = xfOf(sc, id), o = outlineOf(n.pts, n.runs);
+      const n = sc.nodes[id];
+      if (n.type === 'geo') { const gw = geoWorld(sc, id); if (gw) { lo = Math.min(lo, gw.z0); hi = Math.max(hi, gw.z1); } continue; }
+      const xf = xfOf(sc, id), o = outlineOf(n.pts, n.runs);
       for (const p of o) { if (xf.id) { lo = Math.min(lo, p.z); hi = Math.max(hi, p.z); continue; } const a = xf.fwd(p), b = xf.mir(p); lo = Math.min(lo, a.z, b.z); hi = Math.max(hi, a.z, b.z); }
     }
     if (!isFinite(lo)) return 0;
@@ -1446,7 +1513,137 @@
   const lowEnd = (z, height) => (state.flip ? z + (height || 0) : z);
   const fromLowEnd = (z, height) => (state.flip ? z - (height || 0) : z);
   function newId(prefix) { state.scene.seq = (state.scene.seq || 1) + 1; return prefix + state.scene.seq; }
-  const PREFIX = { circle: 'c', ngon: 'n', cog: 'w', boolean: 'b', group: 'g', source: 's', thread: 't', cloner: 'k', holes: 'h' };
+  const PREFIX = { circle: 'c', ngon: 'n', cog: 'w', boolean: 'b', group: 'g', source: 's', thread: 't', cloner: 'k', holes: 'h', geo: 'q' };
+
+  // ---- Geometric objects in the scene ----
+  // A symmetry's copies of a geometric object: for each, a map from its own (x, y, z) to the scene's, and whether a
+  // symmetry lays it on its side. (As the 3D build places them.)
+  function geoCopies(sc, id) {
+    let list = [{ f: (p) => p, side: false }];
+    for (let cur = id, guard = 0; guard < 64; guard++) {
+      const pr = findParent(sc, cur);
+      if (!pr || pr.parent === null) break;
+      const c = sc.nodes[pr.parent]; cur = pr.parent;
+      if (c.type !== 'cloner') continue;
+      const q = c.params, cnt = Math.max(1, q.count | 0), R = q.radius || 0, H = q.height || 0, spread = q.spread == null ? 360 : q.spread;
+      const step = spread >= 360 - 1e-9 ? 360 / cnt : (cnt > 1 ? spread / (cnt - 1) : 0), radial = q.orient === 'radial', keep = !!q.keepOrient, out = [];
+      for (const L of list) for (let k = 0; k < cnt; k++) {
+        const a = ((q.angle || 0) + k * step) * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a);
+        out.push({ side: L.side || radial, f: (p0) => {
+          const p = L.f(p0);
+          let x = p[0], y = p[1], z = p[2];
+          if (radial) { const t = x; x = z; z = H - t; }                 // laid on its side (a quarter turn about y)
+          if (keep) return [x + R * ca, y + R * sa, z];
+          x += R; return [x * ca - y * sa, x * sa + y * ca, z];
+        } });
+      }
+      list = out;
+    }
+    return list;
+  }
+  const hull2 = (P) => {
+    const p = P.map(v => [v[0], v[1]]).sort((a, b) => a[0] - b[0] || a[1] - b[1]), cr = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    const lo = [], hi = [];
+    for (const v of p) { while (lo.length > 1 && cr(lo[lo.length - 2], lo[lo.length - 1], v) <= 0) lo.pop(); lo.push(v); }
+    for (const v of p.slice().reverse()) { while (hi.length > 1 && cr(hi[hi.length - 2], hi[hi.length - 1], v) <= 0) hi.pop(); hi.push(v); }
+    return lo.slice(0, -1).concat(hi.slice(0, -1));
+  };
+  // A geometric object placed in the scene: its triangles (every copy), each copy's outline from above and heights,
+  // and its heights in all. Kept for as long as it and the symmetries around it stay the same.
+  const geoCache = new Map();
+  function geoWorld(sc, id) {
+    const n = sc.nodes[id];
+    if (!n || n.type !== 'geo') return null;
+    const chain = [];
+    for (let cur = id, guard = 0; guard < 64; guard++) { const pr = findParent(sc, cur); if (!pr || pr.parent === null) break; cur = pr.parent; if (sc.nodes[cur].type === 'cloner') chain.push(sc.nodes[cur].params); }
+    const key = JSON.stringify([n.params, n.shape, chain]);
+    const hit = geoCache.get(key);
+    if (hit) return hit;
+    let m;
+    try { m = geoMesh(n); } catch (_) { return null; }
+    const V = [], T = [], foot = [], corners = geoCorners(n);
+    let z0 = Infinity, z1 = -Infinity;
+    for (const c of geoCopies(sc, id)) {
+      const base = V.length / 3, pts = [];
+      let a = Infinity, b = -Infinity;
+      for (let i = 0; i < m.V.length; i += 3) { const w = c.f([m.V[i], m.V[i + 1], m.V[i + 2]]); V.push(w[0], w[1], w[2]); pts.push(w); a = Math.min(a, w[2]); b = Math.max(b, w[2]); }
+      for (const t of m.T) T.push(base + t);
+      foot.push({ side: c.side, zr: [a, b], poly: c.side || geoTilted(n.params) ? hull2(pts) : corners.map(([x, y]) => c.f([x, y, 0]).slice(0, 2)) });
+      z0 = Math.min(z0, a); z1 = Math.max(z1, b);
+    }
+    const out = { V, T, foot, z0, z1 };
+    if (geoCache.size > 200) geoCache.clear();
+    geoCache.set(key, out);
+    return out;
+  }
+  // Triangles (scene units) cut by the vertical plane through the axis at angle theta: closed loops of
+  // (place along the plane, height), the place negative on the far side of the axis.
+  function sliceLoops(V, T, theta, off = 0) {
+    const c = Math.cos(theta), s = Math.sin(theta), segs = [];
+    const P = (i) => { const x = V[i * 3], y = V[i * 3 + 1]; return [-x * s + y * c, x * c + y * s, V[i * 3 + 2]]; };
+    for (let t = 0; t + 2 < T.length; t += 3) {
+      const A = P(T[t]), B = P(T[t + 1]), C = P(T[t + 2]), pts = [];
+      for (const [p, q] of [[A, B], [B, C], [C, A]]) if ((p[0] < off) !== (q[0] < off)) { const k = (p[0] - off) / (p[0] - q[0]); pts.push([p[1] + (q[1] - p[1]) * k, p[2] + (q[2] - p[2]) * k]); }
+      if (pts.length === 2) segs.push(pts);
+    }
+    const key = (p) => Math.round(p[0] * 1e6) + ',' + Math.round(p[1] * 1e6), ends = new Map();
+    segs.forEach((sg, i) => { for (const e of [0, 1]) { const k = key(sg[e]); if (!ends.has(k)) ends.set(k, []); ends.get(k).push([i, e]); } });
+    const used = new Uint8Array(segs.length), loops = [];
+    for (let i = 0; i < segs.length; i++) {
+      if (used[i]) continue;
+      used[i] = 1;
+      const loop = [segs[i][0], segs[i][1]];
+      for (let guard = 0; guard < segs.length; guard++) {
+        const nxt = (ends.get(key(loop[loop.length - 1])) || []).find(([j]) => !used[j]);
+        if (!nxt) break;
+        used[nxt[0]] = 1; loop.push(segs[nxt[0]][1 - nxt[1]]);
+      }
+      if (loop.length > 2) loops.push(loop);
+    }
+    return loops;
+  }
+  // ---- rotations of geometric objects ----
+  const matMul = (A, B) => A.map((r, i) => [0, 1, 2].map(j => r[0] * B[0][j] + r[1] * B[1][j] + r[2] * B[2][j]));
+  // a turn by a (radians) about a unit axis
+  function axisRot(ax, a) {
+    const [x, y, z] = ax, c = Math.cos(a), s = Math.sin(a), t = 1 - c;
+    return [[t * x * x + c, t * x * y - s * z, t * x * z + s * y], [t * x * y + s * z, t * y * y + c, t * y * z - s * x], [t * x * z - s * y, t * y * z + s * x, t * z * z + c]];
+  }
+  // the angles (degrees: about x, then y, then the height axis) of a rotation matrix
+  function eulerOf(M) {
+    const ry = Math.asin(Math.max(-1, Math.min(1, -M[2][0])));
+    let rx, rz;
+    if (Math.abs(M[2][0]) < 0.999999) { rx = Math.atan2(M[2][1], M[2][2]); rz = Math.atan2(M[1][0], M[0][0]); }
+    else { rx = Math.atan2(-M[1][2], M[1][1]); rz = 0; }
+    const d = (v) => { const r = Math.round(v * 180 / Math.PI * 1e9) / 1e9; return r <= -180 ? r + 360 : r; };
+    return { rx: d(rx), ry: d(ry * 1), rz: d(rz) };
+  }
+  // turn a geometric object about a direction in the scene (through its centre) by a (radians)
+  function geoTurn(q, ax, a) { Object.assign(q, eulerOf(matMul(axisRot(ax, a), geoRot(q)))); }
+  const geoTilted = (q) => Math.abs(q.rx || 0) > 1e-9 || Math.abs(q.ry || 0) > 1e-9;
+  const snapAng = (v, st = 15) => Math.round(v / st) * st;
+  // which way the radius/height view's drags on a geometric object go: the side of the axis it was grabbed on
+  let GEO_SIDE = 1;
+  // Where an object sits from above: its first copy in the symmetries around it, as a turn a and a centre C
+  // (world = rot(a)·own + C). side: the innermost symmetry lays it on its side, so from above its outline is seen
+  // edge on, as (height along the copies' radius, ± radius across). A symmetry whose copies keep their orientation
+  // only moves them.
+  function placeOf(sc, id) {
+    let a = 0, C = [0, 0], side = false, first = true;
+    for (let cur = id, guard = 0; guard < 64; guard++) {
+      const p = findParent(sc, cur);
+      if (!p || p.parent === null) break;
+      const c = sc.nodes[p.parent]; cur = p.parent;
+      if (c.type !== 'cloner') continue;
+      const q = c.params, as = (q.angle || 0) * Math.PI / 180, R = q.radius || 0;
+      if (q.orient === 'radial' && first) side = true;
+      first = false;
+      if (q.keepOrient) C = [C[0] + R * Math.cos(as), C[1] + R * Math.sin(as)];
+      else { const x = C[0] + R, y = C[1]; C = [x * Math.cos(as) - y * Math.sin(as), x * Math.sin(as) + y * Math.cos(as)]; a += as; }
+    }
+    const ca = Math.cos(a), sa = Math.sin(a);
+    return { a, C, side, w: (x, y) => [x * ca - y * sa + C[0], x * sa + y * ca + C[1]], inv: (dx, dy) => [dx * ca + dy * sa, -dx * sa + dy * ca] };
+  }
 
   // Children of a radial cloner are built in their own frame; in the cross-section the editor
   // shows its first copy. xfOf gives the mapping between an object's own frame and the view.
@@ -1475,14 +1672,32 @@
     };
   }
   // An object's outline as shown in the view.
-  function viewOutline(sc, id) { const n = sc.nodes[id], xf = xfOf(sc, id), o = outlineOf(n.pts, n.runs); return xf.id ? o : o.map(xf.fwd); }
+  function viewOutline(sc, id) {
+    const n = sc.nodes[id];
+    if (n.type === 'geo') {
+      // (a geometric object: the box its sections can reach, for extents and fitting)
+      const gw = geoWorld(sc, id); if (!gw) return [];
+      let r = 0; for (let i = 0; i < gw.V.length; i += 3) r = Math.max(r, Math.hypot(gw.V[i], gw.V[i + 1]));
+      return [{ y: 0, z: gw.z0 }, { y: r, z: gw.z0 }, { y: r, z: gw.z1 }, { y: 0, z: gw.z1 }];
+    }
+    const xf = xfOf(sc, id), o = outlineOf(n.pts, n.runs); return xf.id ? o : o.map(xf.fwd);
+  }
   // Move points given a move in view coordinates (each object converts it into its own frame).
   function moveKeysView(sc, keys, dY, dZ) {
     const by = {};
     for (const k of keys) { const id = parseKey(k).node; (by[id] = by[id] || []).push(k); }
     for (const id in by) { const d = xfOf(sc, id).inv(dY, dZ); moveKeys(sc, by[id], d.y, d.z); }
   }
-  function moveNodeView(sc, id, dY, dZ) { const d = xfOf(sc, id).inv(dY, dZ); moveNode(sc.nodes[id], d.y, d.z); }
+  function moveNodeView(sc, id, dY, dZ) {
+    const n = sc.nodes[id];
+    if (n && n.type === 'geo') {
+      // a move in the radius/height view: along the section's plane (on the side it is on), and up or down
+      const th = state.viewAngle * Math.PI / 180, d = placeOf(sc, id).inv(dY * GEO_SIDE * Math.cos(th), dY * GEO_SIDE * Math.sin(th));
+      n.params.cx += d[0]; n.params.cy += d[1]; n.params.z += dZ;
+      return;
+    }
+    const d = xfOf(sc, id).inv(dY, dZ); moveNode(n, d.y, d.z);
+  }
   const singleSel = () => state.selNodes.size === 1 ? state.scene.nodes[[...state.selNodes][0]] : null;
 
   function defaultParams(view) {
@@ -1701,9 +1916,20 @@
     transferParams(n, before, n.params);
     markEdited(); recalc();
   }
-  function addObject(type, view) {
+  function addObject(type, view, at) {
     pushUndo();
     const sc = state.scene, id = newId(PREFIX[type]);
+    if (type === 'geo') {
+      // a 10 mm square, 5 mm high, where the view is looking; then seen from above, centred on it
+      const s = 5 / MM, h = 5 / MM, a = at || { x: 0, y: 0, z: 0 };
+      sc.nodes[id] = { id, type: 'geo', name: 'Geometric ' + id.slice(1), params: { cx: a.x, cy: a.y, z: a.z, h }, pts: [],
+        shape: [{ x: -s, y: -s }, { x: s, y: -s }, { x: s, y: s }, { x: -s, y: s }] };
+      place(sc, id, insertTarget());
+      state.selNodes = new Set([id]); state.sel = new Set();
+      markEdited(); recalc();
+      if (editor && editor.geoSpawned) editor.geoSpawned(id);
+      return;
+    }
     if (type === 'thread') {
       sc.nodes[id] = { id, type, name: 'Thread ' + id.slice(1), params: threadDefaults(view) };
       regenThread(sc.nodes[id]);
@@ -1714,7 +1940,7 @@
     const params = defaultParams(view);
     // a cog: 24 teeth of module 1 mm round a 6 mm bore
     if (type === 'cog') Object.assign(params, { teeth: 24, module: 1 / MM, pressure: 20, addendum: 1, dedendum: 1.25, backlash: 0, rotation: 0, rib: 3 / MM, rit: 3 / MM, linkIn: true, linkOut: true });
-    sc.nodes[id] = { id, type, name: (type === 'ngon' ? 'N-sided ' : type === 'cog' ? 'Cog ' : 'Circular ') + id.slice(1), params, pts: tagPts(profileOf(type, params)), custom: false };
+    sc.nodes[id] = { id, type, name: (type === 'ngon' ? 'N-sided ' : type === 'cog' ? 'Cog ' : 'Radial ') + id.slice(1), params, pts: tagPts(profileOf(type, params)), custom: false };
     place(sc, id, insertTarget());
     state.selNodes = new Set([id]); state.sel = new Set();
     markEdited(); recalc();
@@ -1725,8 +1951,8 @@
     pushUndo();
     const id = newId(PREFIX[type]);
     const node = type === 'group' ? { id, type: 'group', name: 'Group ' + id.slice(1), children: [] }
-      : type === 'cloner' ? { id, type: 'cloner', name: 'Radial cloner ' + id.slice(1), children: [],
-        params: { count: 6, radius: 0, angle: 0, spread: 360, orient: 'axial', height: zBase() } }
+      : type === 'cloner' ? { id, type: 'cloner', name: 'Symmetry ' + id.slice(1), children: [],
+        params: { count: 6, radius: 0, angle: 0, spread: 360, orient: 'axial', height: zBase(), keepOrient: false } }
       : { id, type: 'boolean', name: 'Boolean ' + id.slice(1), op: 'difference', children: [null, null] };
     sc.nodes[id] = node;
     const usable = type === 'boolean' ? ids.slice(0, 2) : ids;
@@ -1947,7 +2173,7 @@
   // Lengths are in inches; every object keeps its own outline, thread parameters and bevels,
   // so the file rebuilds the scene on its own.
   const JSON_FORMAT = 'adapter-assembler', JSON_FORMATS_READ = new Set([JSON_FORMAT, 'preciseparts-stl-export']);
-  const NODE_TYPES = new Set(['source', 'circle', 'ngon', 'cog', 'thread', 'group', 'boolean', 'cloner', 'holes']);
+  const NODE_TYPES = new Set(['source', 'circle', 'ngon', 'cog', 'thread', 'group', 'boolean', 'cloner', 'holes', 'geo']);
   function sceneForFile(sc) {
     const s = clone(sc);
     return s;
@@ -1966,6 +2192,7 @@
       if (!n || n.id !== id || !NODE_TYPES.has(n.type)) return false;
       if (n.children && !n.children.every(c => c == null || sc.nodes[c])) return false;
       if (!n.children && n.type !== 'holes' && !Array.isArray(n.pts)) return false;
+      if (n.type === 'geo' && (!Array.isArray(n.shape) || n.shape.length < 3 || !n.params)) return false;
     }
     return sc.root.every(id => sc.nodes[id]);
   }
@@ -2036,7 +2263,7 @@
     const groupsDone = new Set(), runSel = new Map();
     for (const key of pointKeys(keys, scene)) {
       const h = parseKey(key), node = scene.nodes[h.node];
-      if (!node) continue;
+      if (!node || h.kind === 'q') continue;           // (a geometric object's corners move from above)
       if (h.kind === 'p') {
         const p = node.pts[h.i]; if (!p) continue;
         p.y = Math.max(0, p.y + dy); p.z += dz;
@@ -2067,6 +2294,7 @@
     }
   }
   function moveNode(node, dy, dz) {
+    if (node.type === 'geo') { node.params.cx += dy; node.params.z += dz; return; }
     for (const p of node.pts) { p.y = Math.max(0, p.y + dy); p.z += dz; }
     for (const r of node.runs || []) { r.rFirst = Math.max(0, r.rFirst + dy); r.rOther = Math.max(0, r.rOther + dy); r.zFirst += dz; r.zLast += dz; }
     if (node.params) {
@@ -2085,8 +2313,17 @@
   }
   function deletePoints(keys) {
     const byNode = {};
-    for (const key of pointKeys(keys)) { const h = parseKey(key); if (h.kind === 'p') (byNode[h.node] = byNode[h.node] || []).push(h.i); }
+    const byGeo = {};
+    for (const key of pointKeys(keys)) { const h = parseKey(key); if (h.kind === 'p') (byNode[h.node] = byNode[h.node] || []).push(h.i); else if (h.kind === 'q') (byGeo[h.node] = byGeo[h.node] || []).push(h.i); }
     let refused = false;
+    // a geometric object's corners (it keeps at least three)
+    for (const id in byGeo) {
+      const node = state.scene.nodes[id];
+      if (!node || !node.shape) continue;
+      const idx = [...new Set(byGeo[id])].sort((a, b) => b - a);
+      if (node.shape.length - idx.length < 3) { refused = true; continue; }
+      for (const i of idx) node.shape.splice(i, 1);
+    }
     for (const id in byNode) {
       const node = state.scene.nodes[id];
       const idx = [...new Set(byNode[id])].filter(i => !inRunIndex(node, i)).sort((a, b) => b - a);
@@ -2184,6 +2421,7 @@
   const ICONS = {
     circle: '<circle cx="8" cy="8" r="5.5"/>',
     ngon: '<path d="M8 2.2 13 5.1v5.8L8 13.8 3 10.9V5.1z"/>',
+    geo: '<path d="M2.5 13 5.8 2.6 13.6 10.2z"/>',
     cog: '<path d="M12.85 6.79L14.75 7.20L14.75 8.80L12.85 9.21L12.28 10.58L13.34 12.21L12.21 13.34L10.58 12.28L9.21 12.85L8.80 14.75L7.20 14.75L6.79 12.85L5.42 12.28L3.79 13.34L2.66 12.21L3.72 10.58L3.15 9.21L1.25 8.80L1.25 7.20L3.15 6.79L3.72 5.42L2.66 3.79L3.79 2.66L5.42 3.72L6.79 3.15L7.20 1.25L8.80 1.25L9.21 3.15L10.58 3.72L12.21 2.66L13.34 3.79L12.28 5.42z"/><circle cx="8" cy="8" r="2.2"/>',
     sideview: '<path d="M8 1.5v13" stroke-dasharray="1.6 1.6"/><rect x="10" y="4" width="3.8" height="8"/><rect x="2.2" y="4" width="3.8" height="8"/>',
     topview: '<circle cx="8" cy="8" r="6"/><circle cx="8" cy="8" r="2.4"/><path d="M8 8h6"/>',
@@ -2504,6 +2742,8 @@
         selectRow('Quality', state.quality, [['high', 'high'], ['low', 'low (no animations, less detail)']], v => setUnit('quality', v))),
       checkRow('Invert y axis', () => state.flip, v => set('flip', v)),
       el('div', null, selectRow('Heights', state.heightFrom, [['bottom', 'bottom up (0 at the lowest point)'], ['top', 'top down (0 at the top)']], v => { state.heightFrom = v; saveSettings(); renderAll(); })),
+      el('div', null, selectRow('Rotation', state.rotMode || 'absolute', [['absolute', 'absolute (fields and Ctrl-snapping give the angle)'], ['relative', 'relative (fields and Ctrl-snapping give the change)']], v => { state.rotMode = v; saveSettings(); renderAll(); })),
+      el('div', null, selectRow('Move readout', state.offsetMode || 'polar', [['polar', 'distance and angle'], ['radial', 'vector, radial (Δr, Δθ, Δh)'], ['xyz', 'vector, orthogonal (Δx, Δy, Δz)']], v => { state.offsetMode = v; saveSettings(); renderAll(); })),
       checkRow('Linked slicers (the 2D height band and the 3D height slicer are one; the 2D cross-section is cut where the blue slicer is)', () => !!state.linkSlicers, v => setLinkSlicers(v)),
       checkRow('Linked cross-section views (radius/height and overhead line up when switching; height band set in both)', () => state.linkViews !== false, v => { state.linkViews = v; saveSettings(); renderAll(); }),
       checkRow('Auto-simplify (cross-section drawn monomorphic at 50% zoom or less)', () => !!state.autoSimplify, v => { state.autoSimplify = v; saveSettings(); renderAll(); }),
@@ -2583,6 +2823,7 @@
       el('b', { style: 'font-size:14px' }, 'Adapter Assembler'),
       el('button', { type: 'button', style: BTN2, onclick: () => showSplash(), title: 'Blank project, open a project file, or build an adapter between two threads' }, 'New / open…'),
       el('button', { type: 'button', style: BTN2, onclick: () => { if (state.scene && state.scene.root.length) saveScene(); }, title: 'Save everything in the scene to Saved models' }, 'Save scene'),
+      el('button', { type: 'button', style: BTN2, onclick: () => { if (state.scene) { fit(); drawSection(); } resetCamera(); }, title: 'Frame the whole part in the cross-section and the 3D view' }, 'Frame all'),
       el('span', { style: 'margin-left:auto;color:#868e96;font-size:11px', title: 'Adapter Assembler version' }, 'v' + APP_VERSION));
 
     // left: cross-section
@@ -2681,7 +2922,9 @@
       if (Math.abs(t - c.lo) < Math.abs(t - c.hi)) setTopCut(t, c.hi); else setTopCut(c.lo, t);
       saveSettings();
     });
-    left.append(overlay, viewBar, coord, loading, compass1, topBox);
+    // how far a drag has moved what it moves, by the pointer (the project setting chooses how it is given)
+    const offTag = el('div', { style: 'position:absolute;display:none;pointer-events:none;font-size:11px;line-height:1.35;color:#1f2328;background:rgba(255,249,219,.95);border:1px solid #ffc078;border-radius:3px;padding:1px 5px;white-space:nowrap;z-index:5' });
+    left.append(overlay, viewBar, coord, loading, compass1, topBox, offTag);
 
     // right: 3D preview + side panel
     const canvas = el('canvas', { style: 'width:100%;height:100%;display:block;touch-action:none;cursor:grab;background:#1c1f24' });
@@ -2704,7 +2947,8 @@
       el('label', { style: 'cursor:pointer' }, wireBox, ' wireframe'),
       el('label', { style: 'cursor:pointer', title: 'Ambient occlusion: darkens creases and corners' }, ssaoBox, ' SSAO'),
       el('label', { style: 'cursor:pointer', title: 'Orthographic view (no perspective): parallel lines stay parallel' }, orthoBox, ' orthographic'),
-      el('label', { style: 'cursor:pointer', title: 'Invert the y axis: the part is turned over, in every view and in the exported file' }, flipBox, ' invert y axis'));
+      el('label', { style: 'cursor:pointer', title: 'Invert the y axis: the part is turned over, in every view and in the exported file' }, flipBox, ' invert y axis'),
+      (() => { const b = hbtn('fit', 'Fit', () => resetCamera(), { title: 'Frame the part in the 3D view' }); b.style.height = '18px'; return b; })());
     const hint3d = el('div', { style: 'position:absolute;left:8px;bottom:5px;font-size:10px;color:#9aa;pointer-events:none' }, 'drag: turn the part');
     const view3d = el('div', { style: 'flex:1;position:relative;min-height:0;min-width:0' }, canvas, busyTag, toggles3d, hint3d);
     // minimizing panes: a pane shrinks to a bar; click the bar to bring it back
@@ -3209,6 +3453,7 @@
       const sc = state.scene, order = frontOrder(), th = viewTheta();
       for (let i = order.length - 1; i >= 0; i--) {
         const id = order[i], n = sc.nodes[id], xf = xfOf(sc, id);
+        if (n.type === 'geo') { if (inLoops(MS * y, z, geoSection(id))) return id; continue; }
         if (pointInPoly(y, z, viewOutline(sc, id))) return id;
         if (xf.id && pointInPoly(y, z, sectionOutline(n, th))) return id;
         // anywhere in a thread's teeth (root to crest, along its length)
@@ -3353,8 +3598,61 @@
       parent.append(g);
     }
     let sceneBase = 0;
-    const COLORS = { source: '#1f6feb', circle: '#2f9e44', ngon: '#7048e8', cog: '#a61e4d', thread: '#e8590c', group: '#495057', boolean: '#495057', cloner: '#495057', holes: '#c92a2a' };
+    const COLORS = { geo: '#0b7285', source: '#1f6feb', circle: '#2f9e44', ngon: '#7048e8', cog: '#a61e4d', thread: '#e8590c', group: '#495057', boolean: '#495057', cloner: '#495057', holes: '#c92a2a' };
     const viewTheta = () => state.viewAngle * Math.PI / 180 + (MS < 0 ? Math.PI : 0);
+    // A, B: the scene point moved (x, y, height) before and after; ang: the move's direction on the screen (degrees);
+    // extra: a line about the thing itself
+    function showTag(e, lines) {
+      const [sx, sy] = local(e);
+      offTag.textContent = '';
+      lines.forEach((t, i) => offTag.append(el('div', i ? { style: 'color:#868e96' } : null, t)));
+      offTag.style.display = '';
+      const w = offTag.offsetWidth || 160, { w: W } = size();
+      offTag.style.left = (sx + 16 + w > W ? sx - w - 12 : sx + 16) + 'px'; offTag.style.top = (sy + 18) + 'px';
+    }
+    function showOff(e, A, B, ang, extra) {
+      const [sx, sy] = local(e), d = [B[0] - A[0], B[1] - A[1], B[2] - A[2]], L = (v) => num(mm(v), 3), m = state.offsetMode || 'polar';
+      const ad = (v) => num(v * ANG_SCALE, ANG_SCALE === 1 ? 1 : 4) + ANG_LABEL;
+      let t;
+      if (m === 'xyz') t = 'Δx ' + L(d[0]) + ' · Δy ' + L(HS() * d[2]) + ' · Δz ' + L(d[1]) + ' ' + UNIT_LABEL;
+      else if (m === 'radial') {
+        let da = (Math.atan2(B[1], B[0]) - Math.atan2(A[1], A[0])) * 180 / Math.PI;
+        da = ((da + 540) % 360) - 180;
+        if (Math.hypot(A[0], A[1]) < 1e-9 || Math.hypot(B[0], B[1]) < 1e-9) da = 0;
+        t = 'Δr ' + L(Math.hypot(B[0], B[1]) - Math.hypot(A[0], A[1])) + ' ' + UNIT_LABEL + ' · Δθ ' + ad(da) + ' · Δh ' + L(HS() * d[2]) + ' ' + UNIT_LABEL;
+      } else t = L(Math.hypot(d[0], d[1], d[2])) + ' ' + UNIT_LABEL + ' at ' + ad((((ang || 0) % 360) + 360) % 360);
+      offTag.textContent = '';
+      offTag.append(el('div', null, t));
+      if (extra) offTag.append(el('div', { style: 'color:#868e96' }, extra));
+      offTag.style.display = '';
+      const w = offTag.offsetWidth || 160, { w: W } = size();
+      offTag.style.left = (sx + 16 + w > W ? sx - w - 12 : sx + 16) + 'px'; offTag.style.top = (sy + 18) + 'px';
+    }
+    // a geometric object's section in the radius/height view: loops of (place along the section, height)
+    function geoSection(id) { const gw = geoWorld(state.scene, id); return gw ? sliceLoops(gw.V, gw.T, state.viewAngle * Math.PI / 180) : []; }
+    const inLoops = (x, y, loops) => {
+      let c = false;
+      for (const L of loops) for (let i = 0, j = L.length - 1; i < L.length; j = i++) { const A = L[i], B = L[j]; if ((A[1] > y) !== (B[1] > y) && x < (B[0] - A[0]) * (y - A[1]) / (B[1] - A[1]) + A[0]) c = !c; }
+      return c;
+    };
+    // where a new geometric object goes: the middle of the view (radius/height: on the section's plane, half its
+    // height below the middle; from above: at the bottom of the part)
+    function geoSpawnPoint() {
+      if (!view) return { x: 0, y: 0, z: 0 };
+      measure();
+      const th = state.viewAngle * Math.PI / 180, { w, h } = size();
+      if (topMode()) { MS = 1; const [X, Y] = toWorld(AX_L + (w - AX_L) / 2, (h - AX_B) / 2), r = sceneZRange(); return { x: X, y: Y, z: r ? r[0] : 0 }; }
+      return { x: view.cy * Math.cos(th), y: view.cy * Math.sin(th), z: FZ() * view.cz - 2.5 / MM };
+    }
+    // a new geometric object: seen from above, centred on it
+    function geoSpawned(id) {
+      const n = state.scene.nodes[id]; if (!n) return;
+      if (!topMode()) setSecMode('top');
+      if (!view) fit();
+      const [X, Y] = placeOf(state.scene, id).w(n.params.cx, n.params.cy), t = topTurn(), c = Math.cos(t), s = Math.sin(t);
+      view.cy = X * c + Y * s - AX_L / 2 / view.s; view.cz = FZ() * (-X * s + Y * c) - AX_B / 2 / view.s;
+      drawSection();
+    }
 
     // ---- Monomorphic (or auto-simplified when zoomed out to 50 % or less): what is not selected is one grey shape ----
     const monoOn = () => !!(state.mono || (state.autoSimplify && view && view.fit > 0 && view.s / view.fit <= 0.5 + 1e-9));
@@ -3815,7 +4113,14 @@
     }
     // ... placed in the scene: every copy of the radial cloners it is in
     function topShapes(id) {
-      const sc = state.scene, band = topBand(), P0 = band ? topPlace(sc, id) : null;
+      const sc = state.scene, band = topBand();
+      if (sc.nodes[id].type === 'geo') {
+        // a geometric object: each copy's outline from above (one lying on its side: what it covers), where it has
+        // anything in the band of heights
+        const gw = geoWorld(sc, id); if (!gw) return [];
+        return gw.foot.filter(f => !band || (f.zr[1] >= band.lo - 1e-9 && f.zr[0] <= band.hi + 1e-9)).map(f => ({ outer: f.poly, inner: null, marks: [] }));
+      }
+      const P0 = band ? topPlace(sc, id) : null;
       // the band in the object's own heights (an object on its side is shown whole)
       const dz = band && !P0.side ? xfOf(sc, id).fwd({ y: 1, z: 0 }).z : 0;
       const L = topLocal(sc.nodes[id], band && !P0.side ? { lo: band.lo - dz, hi: band.hi - dz } : null);
@@ -3838,7 +4143,7 @@
         const out = [];
         for (let k = 0; k < cnt; k++) {
           const a = ((q.angle || 0) + k * step) * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a);
-          const f = (v) => { const x = v[0] + R, y = v[1]; return [x * ca - y * sa, x * sa + y * ca]; };
+          const f = q.keepOrient ? (v) => [v[0] + R * ca, v[1] + R * sa] : (v) => { const x = v[0] + R, y = v[1]; return [x * ca - y * sa, x * sa + y * ca]; };
           for (const s of shapes) out.push({ outer: s.outer.map(f), inner: s.inner && s.inner.map(f), marks: s.marks.map(m => m.map(f)) });
         }
         shapes = out;
@@ -3964,21 +4269,7 @@
     // Where an object sits from above: its first copy in the radial cloners around it, as a turn a and a centre C
     // (world = rot(a)·own + C). side: the innermost cloner lays it on its side, so from above its outline is seen
     // edge on, as (height along the copies' radius, ± radius across).
-    function topPlace(sc, id) {
-      let a = 0, C = [0, 0], side = false, first = true;
-      for (let cur = id, guard = 0; guard < 64; guard++) {
-        const p = findParent(sc, cur);
-        if (!p || p.parent === null) break;
-        const c = sc.nodes[p.parent]; cur = p.parent;
-        if (c.type !== 'cloner') continue;
-        const q = c.params, as = (q.angle || 0) * Math.PI / 180, R = q.radius || 0, x = C[0] + R, y = C[1];
-        if (q.orient === 'radial' && first) side = true;
-        first = false;
-        C = [x * Math.cos(as) - y * Math.sin(as), x * Math.sin(as) + y * Math.cos(as)]; a += as;
-      }
-      const ca = Math.cos(a), sa = Math.sin(a);
-      return { a, C, side, w: (x, y) => [x * ca - y * sa + C[0], x * sa + y * ca + C[1]], inv: (dx, dy) => [dx * ca + dy * sa, -dx * sa + dy * ca] };
-    }
+    function topPlace(sc, id) { return placeOf(sc, id); }
     // Handles from above:
     //  · an object lying on its side (in a radial cloner): every point of its outline, as in the cross-section (drag,
     //    select, right-click for bevels);
@@ -3991,6 +4282,31 @@
       for (const it of lastTop) {
         if (!all && monoHid(it.id)) continue;      // (no handles on the monomorphic shape; still something to snap to)
         const n = sc.nodes[it.id], col = COLORS[n.type] || '#1f6feb', name = n.name || n.id, P = topPlace(sc, it.id), q = n.params || {};
+        if (n.type === 'geo') {
+          // its corners, its centre, and (selected) the middles of its edges, to add a corner
+          if (P.side) continue;
+          {
+            // the rotation handle: beside the centre, along its own x (drag round the centre; Ctrl snaps to 15°)
+            const a = (q.rz || 0) * Math.PI / 180 + P.a, rr = 22 / view.s, [x, y] = P.w(q.cx, q.cy);
+            out.push({ key: it.id + '|gr', id: it.id, kind: 'grot', P, x: x + rr * Math.cos(a), y: y + rr * Math.sin(a), cx: x, cy: y, col: '#f08c00', shape: 'ring',
+              tip: name + ': turn it about the height axis (now ' + num((q.rz || 0) * ANG_SCALE, 3) + ANG_LABEL + '); Ctrl snaps to 15°' });
+          }
+          if (geoTilted(q)) {
+            const [x, y] = P.w(q.cx, q.cy); out.push({ key: it.id + '|gc', id: it.id, kind: 'gcen', P, x, y, col, shape: 'diamond', tip: name + ': centre — drag to move the shape (its corners are edited with no tilt)' });
+            continue;
+          }
+          const C = geoCorners(n, true), sel = !!selectedAncestorOf(it.id) || [...state.sel].some(k => k.startsWith(it.id + '|q|'));
+          C.forEach(([x0, y0], i) => {
+            const [x, y] = P.w(x0, y0), key = it.id + '|q|' + i, bv = n.shape[i].bevel, bev = !!(bv && bv.r > 0);
+            out.push({ key, pkey: key, id: it.id, kind: 'gpt', i, P, x, y, col, shape: 'dot', bevel: bev, tip: name + ': corner ' + (i + 1) + (bev ? ' (bevelled ' + num(mm(bv.r), 3) + ' ' + UNIT_LABEL + ')' : '') + ' — drag to move it (Ctrl snaps); right-click to bevel or delete it' });
+          });
+          { const [x, y] = P.w(q.cx, q.cy); out.push({ key: it.id + '|gc', id: it.id, kind: 'gcen', P, x, y, col, shape: 'diamond', tip: name + ': centre — drag to move the shape (Ctrl snaps the centre to points)' }); }
+          if (sel) C.forEach((a, i) => {
+            const b = C[(i + 1) % C.length], [x, y] = P.w((a[0] + b[0]) / 2, (a[1] + b[1]) / 2);
+            out.push({ key: it.id + '|gm|' + i, id: it.id, kind: 'gmid', i, P, x, y, col, shape: 'ring', tip: name + ': click to add a corner here, or drag one out' });
+          });
+          continue;
+        }
         if (P.side) {
           n.pts.forEach((p, i) => {
             if (inRunIndex(n, i)) return;
@@ -4098,17 +4414,28 @@
     function topSnapTargets(h) {
       const sc = state.scene, pts = [{ p: [0, 0] }], circles = [], moving = new Set();
       if (h.pkey) { if (state.sel.has(h.pkey)) for (const k of state.sel) moving.add(k); else moving.add(h.pkey); }
-      const own = (hd) => hd.id === h.id && (h.kind !== 'pt' || hd.kind !== 'pt' || moving.has(hd.pkey));
+      const isPt = (k) => k === 'pt' || k === 'gpt';
+      const own = (hd) => hd.id === h.id && (!isPt(h.kind) || !isPt(hd.kind) || moving.has(hd.pkey) || h.kind !== hd.kind);
       for (const hd of topHandles(true)) {
-        if (own(hd) || hd.kind === 'rot' || hd.kind === 'fillet') continue;
+        if (own(hd) || hd.kind === 'rot' || hd.kind === 'fillet' || hd.kind === 'gmid') continue;
         pts.push({ p: [hd.x, hd.y] });
         const r = hd.kind === 'radius' || hd.kind === 'thr' ? hd.r0 : hd.kind === 'cog' ? Math.hypot(hd.x - hd.P.C[0], hd.y - hd.P.C[1]) : null;
         if (r != null && r > 1e-9 && !circles.some(c => Math.abs(c.r - r) < 1e-9 && Math.hypot(c.C[0] - hd.P.C[0], c.C[1] - hd.P.C[1]) < 1e-9)) circles.push({ C: hd.P.C, r });
         if (hd.kind === 'clone') pts.push({ p: [hd.x, hd.y] });
       }
-      // middles of the edges of objects on their side
+      // middles of the edges of objects on their side, and of geometric objects
       for (const it of lastTop) {
         const n = sc.nodes[it.id], P = topPlace(sc, it.id);
+        if (n.type === 'geo') {
+          if (P.side || (h.id === it.id && h.kind !== 'gpt')) continue;
+          const C = geoCorners(n, true);
+          C.forEach((a, i) => {
+            const j = (i + 1) % C.length, b = C[j];
+            if (moving.has(it.id + '|q|' + i) || moving.has(it.id + '|q|' + j)) return;
+            pts.push({ p: P.w((a[0] + b[0]) / 2, (a[1] + b[1]) / 2), mid: true });
+          });
+          continue;
+        }
         if (!P.side) continue;
         const np = n.pts.length;
         for (let i = 0; i < np; i++) {
@@ -4166,7 +4493,7 @@
       const h = drag.h, st = gridStep() / 2, rs = (v) => snap ? Math.round(v / st) * st : v;
       const P = h.P, rel = P.inv(X - P.C[0], Y - P.C[1]);          // the pointer in the object's own frame
       const along = (phi) => { const u = phi - P.a; return rel[0] * Math.cos(u) + rel[1] * Math.sin(u); };
-      drag.snapShow = null;
+      drag.snapShow = null; drag.offW = null; drag.rotText = null;
       // a radius along the handle's line: snapped to the others, or to the grid
       const radial = (r, phi) => {
         if (!snap) return Math.max(0, r);
@@ -4177,6 +4504,38 @@
       state.scene = clone(drag.snap);
       const n = state.scene.nodes[h.id];
       if (!n) return;
+      if (h.kind === 'grot') {
+        // round its centre: the change of the pointer's direction from the centre
+        const q = n.params, q0 = drag.snap.nodes[h.id].params, d0 = Math.atan2(drag.from[1] - h.cy, drag.from[0] - h.cx), d1 = Math.atan2(Y - h.cy, X - h.cx);
+        let dd = ((d1 - d0) * 180 / Math.PI + 540) % 360 - 180;
+        if (snap) { if (state.rotMode === 'relative') dd = snapAng(dd); else dd = snapAng((q0.rz || 0) + dd) - (q0.rz || 0); }
+        q.rz = (((q0.rz || 0) + dd + 540) % 360) - 180;
+        drag.rotText = state.rotMode === 'relative' ? 'turned ' + num(dd * ANG_SCALE, 3) + ANG_LABEL : 'rotation ' + num(q.rz * ANG_SCALE, 3) + ANG_LABEL + ' (Δ ' + num(dd * ANG_SCALE, 3) + ANG_LABEL + ')';
+        return;
+      }
+      if (h.kind === 'gpt' || h.kind === 'gcen' || h.kind === 'gmid') {
+        // a corner, the centre, or a new corner from an edge's middle: follows the pointer (Shift: across or up only;
+        // Ctrl: onto points and middles)
+        const W0 = [h.x, h.y];
+        let Wt = [W0[0] + X - drag.from[0], W0[1] + Y - drag.from[1]];
+        if (lock) { if (Math.abs(Wt[0] - W0[0]) > Math.abs(Wt[1] - W0[1])) Wt[1] = W0[1]; else Wt[0] = W0[0]; }
+        if (snap) { const s = snapPoint2(Wt, drag.targets); if (s) { Wt = s.p; drag.snapShow = { mark: s.mark, lines: s.lines }; } }
+        let dl = P.inv(Wt[0] - W0[0], Wt[1] - W0[1]);
+        if (h.kind === 'gcen') { n.params.cx += dl[0]; n.params.cy += dl[1]; }
+        else {
+          { const a = -(n.params.rz || 0) * Math.PI / 180, c = Math.cos(a), sn = Math.sin(a); dl = [dl[0] * c - dl[1] * sn, dl[0] * sn + dl[1] * c]; }   // into its own (turned) frame
+          let idx;
+          if (h.kind === 'gmid') {
+            const A = n.shape[h.i], B = n.shape[(h.i + 1) % n.shape.length];
+            n.shape.splice(h.i + 1, 0, { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 });
+            idx = [h.i + 1]; state.sel = new Set([h.id + '|q|' + (h.i + 1)]);
+          } else idx = state.sel.has(h.pkey) ? [...state.sel].filter(k => k.startsWith(h.id + '|q|')).map(k => +k.split('|')[2]) : [h.i];
+          for (const i of idx) if (n.shape[i]) { n.shape[i].x += dl[0]; n.shape[i].y += dl[1]; }
+        }
+        drag.offW = [W0, Wt];
+        drag.label = (h.kind === 'gcen' ? 'centre' : 'corner') + ' x ' + num(mm(Wt[0]), 3) + ' · y ' + num(mm(Wt[1]), 3) + ' ' + UNIT_LABEL;
+        return;
+      }
       if (h.kind === 'pt') {
         // a point of an object on its side: the move in its own frame (height along, radius across)
         const p0 = drag.snap.nodes[h.id].pts[+h.pkey.split('|')[2]], W0 = P.w(p0.z, h.m * p0.y);
@@ -4193,6 +4552,7 @@
       } else if (h.kind === 'radius') {
         const r = radial(along(h.phi), h.phi);
         moveKeys(state.scene, h.keys, r - h.r0, 0);
+        drag.offW = [[h.x, h.y], P.w(r * Math.cos(h.phi - P.a), r * Math.sin(h.phi - P.a))];
         drag.label = 'radius ' + num(mm(r), 3) + ' / Ø ' + num(mm(2 * r), 3) + ' ' + UNIT_LABEL;
       } else if (h.kind === 'thr') {
         // the whole thread in or out (its diameter), as dragging the object in the cross-section
@@ -4336,6 +4696,50 @@
       const monoG = sv('g', { 'pointer-events': 'none' }), monoPos = [], monoNeg = [];
       g.append(monoG);
       for (const id of order) {
+        if (state.scene.nodes[id].type === 'geo') {
+          // a geometric object: its own section, both sides of the axis as they are (not mirrored), drawn once
+          const loops = geoSection(id), role = roleOf(state.scene, id), col = COLORS.geo, selected = selectedAncestorOf(id);
+          for (const L of loops) for (const p of L) { ext.y0 = Math.min(ext.y0, Math.abs(p[0])); ext.y1 = Math.max(ext.y1, Math.abs(p[0])); ext.z0 = Math.min(ext.z0, p[1]); ext.z1 = Math.max(ext.z1, p[1]); }
+          const MSg = MS; MS = 1;
+          const dG = loops.map(L => 'M' + L.map(p => toScreen(p[0], p[1]).map(v => v.toFixed(1)).join(' ')).join('L') + 'Z').join('');
+          MS = MSg;
+          lastPolys[1][id] = lastPolys[-1][id] = { d: dG, col };
+          if (monoHid(id)) { if (dG) (role === 'negative' ? monoNeg : monoPos).push(dG); continue; }
+          if (!dG || MS < 0) continue;
+          g.append(sv('path', { d: dG, fill: role === 'negative' ? 'url(#aa-hatch)' : col + (role === 'intersect' ? '18' : '26'), 'fill-rule': 'evenodd',
+            stroke: role === 'negative' ? '#e03131' : col, 'stroke-width': selected ? 2.8 : 1.4, 'stroke-dasharray': role === 'negative' ? '6 3' : 'none', 'stroke-linejoin': 'round' }));
+          {
+            // its top and bottom: drag a line up or down to change the height (Ctrl: onto the height of a point)
+            const gq = state.scene.nodes[id].params, P = placeOf(state.scene, id);
+            let s0 = Infinity, s1 = -Infinity;
+            for (const L of loops) for (const p of L) { s0 = Math.min(s0, p[0]); s1 = Math.max(s1, p[0]); }
+            if (!P.side && isFinite(s0) && selectedAncestorOf(id)) {
+              // the rotation handle: beside its centre on the section's plane; turns it in the plane of the view
+              const th = state.viewAngle * Math.PI / 180, [Cx, Cy] = P.w(gq.cx, gq.cy), al = Cx * Math.cos(th) + Cy * Math.sin(th), zc = Math.min(gq.z, gq.z + gq.h) + Math.abs(gq.h) / 2;
+              const MSh = MS; MS = 1;
+              const [px, py] = toScreen(al, zc);
+              MS = MSh;
+              const rk = sv('circle', { cx: (px + 22).toFixed(1), cy: py.toFixed(1), r: 5, fill: '#fff', stroke: '#f08c00', 'stroke-width': 2.2, style: 'cursor:grab' });
+              rk.__geoRot = { id, piv: [al, zc] };
+              rk.append(sv('title', null, (state.scene.nodes[id].name || id) + ': turn it in this view\'s plane, about its centre; Ctrl snaps to 15°'));
+              g.append(sv('path', { d: 'M' + (px - 4) + ' ' + py + 'h8M' + px + ' ' + (py - 4) + 'v8', stroke: '#f08c00', 'stroke-width': 1.2, 'pointer-events': 'none' }));
+              g.append(rk);
+            }
+            if (!P.side && isFinite(s0)) {
+              const MSh = MS; MS = 1;
+              for (const [which, zz] of [['bottom', Math.min(gq.z, gq.z + gq.h)], ['top', Math.max(gq.z, gq.z + gq.h)]]) {
+                const [x0, yy] = toScreen(s0, zz), [x1] = toScreen(s1, zz), hot = drag && drag.type === 'geoh' && drag.id === id && drag.which === which;
+                if (hot) g.append(sv('line', { x1: x0, y1: yy, x2: x1, y2: yy, stroke: '#f08c00', 'stroke-width': 3, 'pointer-events': 'none' }));
+                const gl = sv('line', { x1: x0, y1: yy, x2: x1, y2: yy, stroke: 'transparent', 'stroke-width': 9, style: 'cursor:ns-resize' });
+                gl.__geoH = { id, which };
+                gl.append(sv('title', null, (state.scene.nodes[id].name || id) + ': ' + which + ' — drag up or down to change the height (Ctrl: onto a point\'s height)'));
+                g.append(gl);
+              }
+              MS = MSh;
+            }
+          }
+          continue;
+        }
         // the section at the view angle (copies in radial cloners are shown as their first copy)
         const n = state.scene.nodes[id], xf = xfOf(state.scene, id), local = outlineOf(n.pts, n.runs), poly = xf.id ? sectionOutline(n, viewTheta()) : (n.type === 'thread' ? sectionOutline(n, 0) : local).map(xf.fwd), role = roleOf(state.scene, id);
         // a copy in a radial cloner: its section has two halves, either side of the copy's own axis; both are drawn
@@ -4856,6 +5260,7 @@
         for (const k of keys) {
           const h = parseKey(k), n = sc.nodes[h.node]; if (!n) continue;
           if (h.kind === 'p') out.pts.push({ n, i: h.i });
+          else if (h.kind === 'q') continue;
           else if (!runSeen.has(h.node + '|' + h.ri)) { runSeen.add(h.node + '|' + h.ri); out.runs.push({ n, r: n.runs[h.ri] }); }
         }
       } else {
@@ -4878,7 +5283,7 @@
     // Scale/rotate act on ordinary points; threads keep their shape and move with their centre.
     function applyTransform(kind) {
       const t = transformTargets();
-      if (!t.pts.length && !t.runs.length) return;
+      if (!t.pts.length && !t.runs.length && !(kind === 'translate' && t.nodes.some(n => n.type === 'geo'))) return;
       pushUndo();
       if (kind === 'translate') {
         const dy = tf.dx / UNIT_SCALE, dz = HS() * tf.dy / UNIT_SCALE;       // Δy as heights are shown
@@ -5019,7 +5424,7 @@
         svg.setPointerCapture(e.pointerId); drag = { type: 'pan', sx: px0, sy: py0, cy: view.cy, cz: view.cz }; return;
       }
       const [sx, sy] = local(e), raw = toWorld(sx, sy), side = e.target.__side || (raw[0] < 0 ? -1 : 1);
-      MS = dragSide = side;
+      MS = dragSide = GEO_SIDE = side;
       const wy = side * raw[0], wz = raw[1];
       const key = e.target.__key || (!e.target.__key ? edgeAt(sx, sy) : null);
       const add = e.shiftKey || e.ctrlKey || e.metaKey;
@@ -5057,6 +5462,18 @@
       if (e.target.__cog) {
         const { id, what } = e.target.__cog;
         drag = { type: 'cog', id, what, snap: clone(state.scene), moved: false };
+        state.selNodes = new Set([id]); state.sel = new Set();
+        drawSection(); return;
+      }
+      if (e.target.__geoRot && e.button === 0) {
+        const { id, piv } = e.target.__geoRot;
+        drag = { type: 'georot', id, piv, a0: Math.atan2(raw[1] - piv[1], raw[0] - piv[0]), snap: clone(state.scene), moved: false };
+        state.selNodes = new Set([id]); state.sel = new Set();
+        return;
+      }
+      if (e.target.__geoH && e.button === 0) {
+        const { id, which } = e.target.__geoH;
+        drag = { type: 'geoh', id, which, from: [wy, wz], snap: clone(state.scene), moved: false };
         state.selNodes = new Set([id]); state.sel = new Set();
         drawSection(); return;
       }
@@ -5116,11 +5533,17 @@
           setCut('z', Math.min(loOf('z'), v - 0.002), v, 'hi');
           return;
         }
- {
+        if (drag.type === 'toph') {
           if (!drag.moved && Math.hypot(X - drag.from[0], Y - drag.from[1]) * view.s < 3) return;
           if (!drag.moved) { pushSnap(drag.snap); drag.moved = true; }
           dragTopHandle(X, Y, e.ctrlKey || e.metaKey, e.shiftKey);
           drag.labelAt = [sx, sy];
+          if (drag.rotText) showTag(e, [drag.rotText]);
+          else {
+            // the handle's place before and after (in the scene's plan), or the pointer's
+            const A = drag.offW ? drag.offW[0] : drag.from, B = drag.offW ? drag.offW[1] : [X, Y], [a0, b0] = toScreen(A[0], A[1]), [a1, b1] = toScreen(B[0], B[1]);
+            showOff(e, [A[0], A[1], 0], [B[0], B[1], 0], Math.atan2(b0 - b1, a1 - a0) * 180 / Math.PI);
+          }
           markEdited(); drawSection(); recalc({ fast: true });
           return;
         }
@@ -5150,6 +5573,33 @@
         return;
       }
       if (drag.type === 'pan') { view.cy = drag.cy - (sx - drag.sx) / view.s; view.cz = drag.cz + (sy - drag.sy) / view.s; drawSection(); return; }
+      if (drag.type === 'georot') {
+        const rw = toWorld(sx, sy), a1 = Math.atan2(rw[1] - drag.piv[1], rw[0] - drag.piv[0]);
+        let dd = ((a1 - drag.a0) * 180 / Math.PI + 540) % 360 - 180;
+        if (!drag.moved && Math.abs(dd) < 1) return;
+        if (!drag.moved) { pushSnap(drag.snap); drag.moved = true; }
+        if ((e.ctrlKey || e.metaKey) && state.rotMode === 'relative') dd = snapAng(dd);
+        state.scene = clone(drag.snap);
+        const q = state.scene.nodes[drag.id].params, th = state.viewAngle * Math.PI / 180;
+        // a turn from the plane's direction toward up is about (along × up)
+        geoTurn(q, [Math.sin(th), -Math.cos(th), 0], dd * Math.PI / 180);
+        if ((e.ctrlKey || e.metaKey) && state.rotMode !== 'relative') { q.rx = snapAng(q.rx); q.ry = snapAng(q.ry); q.rz = snapAng(q.rz); }
+        showTag(e, [state.rotMode === 'relative' ? 'turned ' + num(dd * ANG_SCALE, 3) + ANG_LABEL : 'x ' + num(q.rx * ANG_SCALE, 3) + ' · y ' + num(q.ry * ANG_SCALE, 3) + ' · height ' + num(q.rz * ANG_SCALE, 3) + ANG_LABEL, 'about ' + (state.rotMode === 'relative' ? 'its centre' : 'x, y and the height axis')]);
+        markEdited(); drawSection(); recalc({ fast: true });
+        return;
+      }
+      if (drag.type === 'geoh') {
+        if (!drag.moved && Math.abs(wz - drag.from[1]) * view.s < 2) return;
+        if (!drag.moved) { pushSnap(drag.snap); drag.moved = true; }
+        state.scene = clone(drag.snap);
+        const q0 = drag.snap.nodes[drag.id].params, q = state.scene.nodes[drag.id].params, lo = Math.min(q0.z, q0.z + q0.h), hi = Math.max(q0.z, q0.z + q0.h), eps = 0.01 / MM;
+        const z = e.ctrlKey || e.metaKey ? snapBandZ(wz, snapThr()) : wz;
+        if (drag.which === 'top') { q.z = lo; q.h = Math.max(eps, z - lo); } else { const b = Math.min(hi - eps, z); q.z = b; q.h = hi - b; }
+        const was = drag.which === 'top' ? hi : lo, now = drag.which === 'top' ? q.z + q.h : q.z;
+        showOff(e, [0, 0, was], [0, 0, now], (now - was) * FZ() >= 0 ? 90 : -90, 'height ' + num(mm(q.h), 3) + ' ' + UNIT_LABEL);
+        markEdited(); drawSection(); recalc({ fast: true });
+        return;
+      }
       if (drag.type === 'bandline') {
         const r = sceneZRange(); if (!r) return;
         const z = e.ctrlKey || e.metaKey ? snapBandZ(wz, snapThr()) : wz;      // onto the height of a point
@@ -5214,15 +5664,32 @@
       state.scene = clone(drag.snap);
       if (drag.type === 'points') moveKeysView(state.scene, [...state.sel], dy, dz);
       else for (const id of drag.leaves) moveNodeView(state.scene, id, dy, dz);
+      {
+        // the moved point (or the grabbed place) on the section's plane, before and after
+        const th = state.viewAngle * Math.PI / 180, S0 = P0 || { y: drag.from[0], z: drag.from[1] }, c = Math.cos(th) * dragSide, s = Math.sin(th) * dragSide;
+        showOff(e, [S0.y * c, S0.y * s, S0.z], [(S0.y + dy) * c, (S0.y + dy) * s, S0.z + dz], Math.atan2(FZ() * dz, dragSide * dy) * 180 / Math.PI);
+      }
       markEdited();
       drawSection(); recalc({ fast: true });
     });
     const endDrag = () => {
+      offTag.style.display = 'none';
       if (!drag) return;
       const d = drag; drag = null;
       if (d.type === 'pan') return;
       if (d.type === 'bandline' || d.type === 'sliceline') { saveSettings(); drawSection(); return; }
+      if (d.type === 'geoh' || d.type === 'georot') { if (d.moved) recalc(); else renderAll(); return; }
       if (d.type === 'angle' && d.moved) { svg.style.cursor = ''; drawSection(); return; }
+      if (d.type === 'toph' && !d.moved && d.h.kind === 'gmid') {
+        const n = state.scene.nodes[d.h.id];
+        if (n && n.shape) {
+          pushUndo();
+          const A = n.shape[d.h.i], B = n.shape[(d.h.i + 1) % n.shape.length];
+          n.shape.splice(d.h.i + 1, 0, { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 });
+          state.sel = new Set([d.h.id + '|q|' + (d.h.i + 1)]); markEdited(); recalc();
+        }
+        return;
+      }
       if (d.type === 'toph') { if (d.moved) recalc(); else renderAll(); return; }   // (points stay selected, for the right-click menu)
       if (d.type === 'topclick' || d.type === 'angle') {      // (a click on the section line selects what is under it)
         svg.style.cursor = '';
@@ -5334,6 +5801,34 @@
       openMenu(x, y);
     }
     function showPointMenu(x, y) {
+      const qk = [...state.sel].filter(k => parseKey(k).kind === 'q');
+      if (qk.length && qk.length === state.sel.size) {
+        // corners of a geometric object
+        menu.textContent = '';
+        const first = qk.map(k => { const hq = parseKey(k), nq = state.scene.nodes[hq.node]; return nq && nq.shape[hq.i] && nq.shape[hq.i].bevel; }).find(b => b && b.r > 0);
+        const rIn = el('input', { 'data-unit': 'len', type: 'number', step: '0.05', min: '0', value: num(mm(first ? first.r : 0), 3), style: 'width:60px' });
+        const sIn = el('input', { type: 'number', step: '1', min: '1', max: '64', value: String(first ? first.segs : 6), style: 'width:46px' });
+        const oIn = selectInput(bevelShapeOf(first), BEVEL_SHAPES, () => {});
+        let bevelUndo = false;
+        // each selected corner (only the corner: the edges either side keep their straight run up to it)
+        const applyBevel = (live) => {
+          const r = Math.max(0, parseFloat(rIn.value) || 0) / UNIT_SCALE, sg = Math.max(1, Math.min(64, parseInt(sIn.value, 10) || 1));
+          if (!bevelUndo) { pushUndo(); bevelUndo = true; }
+          for (const k of qk) { const hq = parseKey(k), nq = state.scene.nodes[hq.node]; if (nq && nq.shape[hq.i]) nq.shape[hq.i].bevel = r > 0 ? { r, segs: sg, ...bevelFromShape(oIn.value), pri: Date.now() } : null; }
+          markEdited(); state.liveInput = live; try { recalc(); } finally { state.liveInput = false; }
+        };
+        rIn.addEventListener('input', () => applyBevel(true)); sIn.addEventListener('input', () => applyBevel(true));
+        rIn.addEventListener('change', () => applyBevel(false)); sIn.addEventListener('change', () => applyBevel(false)); oIn.addEventListener('change', () => applyBevel(false));
+        menu.append(el('div', { style: 'font-weight:700;margin-bottom:4px' }, qk.length + ' corner' + (qk.length === 1 ? '' : 's') + ' selected'),
+          el('div', { style: 'margin:2px 0' }, 'Bevel radius (' + UNIT_LABEL + ', 0 = none) ', rIn),
+          el('div', { style: 'margin:2px 0' }, 'edges ', sIn, ' shape ', oIn), hr(),
+          row(el('button', { type: 'button', style: BTN2, onclick: () => {
+            hideMenu(); pushUndo();
+            if (!deletePoints(qk)) state.libMessage = 'A geometric object keeps at least three corners.';
+            state.sel = new Set(); markEdited(); recalc();
+          } }, 'Delete')));
+        openMenu(x, y); return;
+      }
       const keys = [...state.sel], pts = pointKeys(keys).filter(k => parseKey(k).kind === 'p');
       const edges = keys.filter(k => parseKey(k).kind === 'e'), runs = keys.filter(k => parseKey(k).kind === 'r');
       const firstBevel = pts.map(k => { const h = parseKey(k); return state.scene.nodes[h.node].pts[h.i].bevel; }).find(b => b && b.r > 0);
@@ -5505,7 +6000,7 @@
           kids: [treeLines(depth, trail), twisty(n),
             el('span', { style: 'display:inline-flex;vertical-align:-2px;margin-right:4px;color:' + (COLORS[n.type] || '#555') }, icon(nodeIcon(n), 14)), (label ? label + ' ' : '') + (n.name || id),
             n.type === 'boolean' ? el('span', { style: 'color:#888' }, ' (' + (n.op === 'difference' ? 'A − B' : n.op) + ')') : n.type === 'group' ? el('span', { style: 'color:#888' }, ' (group, ' + n.children.length + ')')
-              : n.type === 'cloner' ? el('span', { style: 'color:#888' }, ' (×' + n.params.count + ', ' + n.params.orient + ')') : null] });
+              : n.type === 'cloner' ? el('span', { style: 'color:#888' }, ' (×' + n.params.count + ', ' + n.params.orient + (n.params.keepOrient ? ', fixed' : '') + ')') : null] });
         if (folded.has(id)) return;
         if (n.type === 'boolean') n.children.forEach((c, s) => {
           const tr = [...trail, s < n.children.length - 1];
@@ -5573,12 +6068,33 @@
         return box;
       }
       if (n.type === 'group') return box;
+      if (n.type === 'geo') {
+        const q = n.params;
+        const setG = (mut) => {
+          if (!state.undoLock || !editBase || editBase.id !== n.id) { pushUndo(); editBase = { id: n.id, q: clone(n.params) }; }
+          else Object.assign(n.params, clone(editBase.q));
+          mut(n.params); markEdited(); recalc();
+        };
+        box.append(sect('Geometric', pgrid(2,
+          ['Bottom y offset' + U, numInput(() => hDisp(lowEnd(q.z, q.h), zBase()), v => setG(t => { t.z = fromLowEnd(hInv(v, zBase()), t.h); }))],
+          ['Height' + U, numInput(() => mm(q.h), v => setG(t => { t.h = Math.max(0.01 / UNIT_SCALE, v / UNIT_SCALE); }), { min: 0.01 })],
+          ['Centre x' + U, numInput(() => mm(q.cx), v => setG(t => { t.cx = v / UNIT_SCALE; }))],
+          ['Centre y' + U, numInput(() => mm(q.cy), v => setG(t => { t.cy = v / UNIT_SCALE; }))]),
+          state.rotMode === 'relative'
+            ? pgrid(3, ...[['x', [1, 0, 0]], ['y', [0, 1, 0]], ['height', [0, 0, 1]]].map(([lab, ax]) => ['Turn about ' + lab + ' by (' + ANG_LABEL.trim() + ')',
+              numInput(() => 0, v => { if (v) setG(t => geoTurn(t, ax, v / ANG_SCALE * Math.PI / 180)); }, { step: ANG_SCALE === 1 ? '15' : '0.25', digits: 4, width: 70, title: 'Turn it about the scene\'s ' + lab + ' axis, through its centre, by this much' })]))
+            : pgrid(3, ...[['x', 'rx'], ['y', 'ry'], ['height', 'rz']].map(([lab, k]) => ['Rotation about ' + lab + ' (' + ANG_LABEL.trim() + ')',
+              numInput(() => (q[k] || 0) * ANG_SCALE, v => setG(t => { t[k] = v / ANG_SCALE; }), { step: ANG_SCALE === 1 ? '15' : '0.25', digits: 4, width: 70 })])),
+          el('div', { style: 'color:#666;font-size:11px;margin-top:3px' }, n.shape.length + ' corners. From above: drag a corner or the centre (Ctrl snaps); click the middle of an edge to add a corner; right-click a corner to delete it.')));
+        return box;
+      }
       if (n.type === 'cloner') {
         const q = n.params;
         const setC = (k, v) => { pushUndo(); q[k] = v; markEdited(); recalc(); };
         box.append(sect('Copies', pgrid(2,
           ['Copies', numInput(() => q.count, v => setC('count', Math.max(1, Math.min(360, Math.round(v)))), { step: '1', min: 1, max: 360, digits: 0, width: 80 })],
           ['Orientation', selectInput(q.orient, [['axial', 'axial (parallel to the axis)'], ['radial', 'radial (pointing outward)']], v => setC('orient', v))],
+          ['Copies turn', selectInput(q.keepOrient ? 'keep' : 'turn', [['turn', 'with their place round the axis'], ['keep', 'not (keep the first copy\'s orientation)']], v => setC('keepOrient', v === 'keep'))],
           ['Angle offset (' + ANG_LABEL.trim() + ')', numInput(() => q.angle * ANG_SCALE, v => setC('angle', v / ANG_SCALE), { step: ANG_SCALE === 1 ? '1' : '0.01', digits: 4, width: 80 })],
           ['Spread (' + ANG_LABEL.trim() + ')', numInput(() => q.spread * ANG_SCALE, v => setC('spread', Math.max(0, Math.min(360, v / ANG_SCALE))), { step: ANG_SCALE === 1 ? '5' : '0.05', min: 0, max: 360 * ANG_SCALE, digits: 4, width: 80 })])),
           sect('Placement', pgrid(2,
@@ -5768,11 +6284,12 @@
         panels.objects.body.append(bare(treeBlock()));
         const nSel = state.selNodes.size;
         appendKids(panels.objects.tools,
-          hbtn('circle', 'Circular', () => addObject('circle', addView()), { title: 'Add a circular ring', color: COLORS.circle }),
+          hbtn('circle', 'Radial', () => addObject('circle', addView()), { title: 'Add a radial (round) ring', color: COLORS.circle }),
           hbtn('ngon', 'N-sided', () => addObject('ngon', addView()), { title: 'Add an n-sided ring', color: COLORS.ngon }),
           hbtn('cog', 'Cog', () => addObject('cog', addView()), { title: 'Add a cog (spur gear with involute teeth)', color: COLORS.cog }),
           hbtn('thread', 'Thread', () => addObject('thread', addView()), { title: 'Add a threaded ring, with standard sizes', color: COLORS.thread }),
-          hbtn('cloner', 'Cloner', () => wrapSelection('cloner'), { title: nSel ? 'Put the selected objects in a radial cloner' : 'Add an empty radial cloner' }),
+          hbtn('geo', 'Geometric', () => addObject('geo', null, geoSpawnPoint()), { title: 'Add a geometric object: a flat shape seen from above, stood up between two heights', color: COLORS.geo }),
+          hbtn('cloner', 'Symmetry', () => wrapSelection('cloner'), { title: nSel ? 'Put the selected objects in a symmetry (copies round the axis)' : 'Add an empty symmetry (copies round the axis)' }),
           hbtn('group', 'Group', () => wrapSelection('group'), { title: nSel ? 'Group the selected objects' : 'Add an empty group' }),
           hbtn('boolean', 'Boolean', () => wrapSelection('boolean'), { title: 'Add a boolean: with one object selected it becomes A; with two, A and B' }),
           el('span', { style: 'width:1px;height:16px;background:#ced4da;margin:0 2px' }),
@@ -6660,7 +7177,7 @@
       return best && best.k;
     }
     canvas.addEventListener('pointerdown', (e) => {
-      if (e.button === 1) { e.preventDefault(); resetCamera(); return; }
+      if (e.button === 1) e.preventDefault();
       const r0 = canvas.getBoundingClientRect(), hk = e.button === 0 ? handleAt(e.clientX - r0.left, e.clientY - r0.top) : null;
       if (hk) {
         // slide the cut along its axis
@@ -6843,7 +7360,7 @@
       drawSection(); draw3d();
     };
     const slicersLinked = () => { linkSBox.checked = !!state.linkSlicers; if (state.linkSlicers) bandFrom3d(); drawSection(); draw3d(); };
-    return { root, render, destroy, showSplash, flipped, slicersLinked };
+    return { root, render, destroy, showSplash, flipped, slicersLinked, geoSpawned };
   }
 
   // ---- Boot: the editor fills the page; the last scene comes back, otherwise the start screen ----
