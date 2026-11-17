@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.28.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.28.2. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = "3.28.1";
+  const APP_VERSION = "3.28.2";
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -3513,6 +3513,15 @@
         if (sc.nodes[id].type !== 'geo' || sc.nodes[id].shape.some((_, i) => movingKey(id + '|q|' + i) || movingKey(id + '|qe|' + i))) continue;
         const gw = geoWorld(sc, id); if (!gw) continue;
         for (const L of sliceLoops(gw.V, gw.T, state.viewAngle * Math.PI / 180)) for (const q of L) targets.push({ y: Math.abs(q[0]), z: q[1], dirs: [] });
+      }
+      // geometric objects' corners as seen here (at their tops and bottoms), its own among them: all but what is being
+      // moved (a corner's other end still counts), to line up with, level or upright (on the side being worked on)
+      for (const id of leafOrder(sc)) {
+        if (sc.nodes[id].type !== 'geo' || !state.scene.nodes[id] || nodeFlag(sc, id, 'hide2d')) continue;
+        for (const c of geoSidePts(id).pts) {
+          if (movingKey(c.key) && (!GEO_RING || (GEO_RING > 0) === c.top)) continue;
+          targets.push({ y: GEO_SIDE * c.along, z: c.z, dirs: [] });
+        }
       }
       return { P0: prim ? { y: prim.y, z: prim.z } : null, tangents: prim ? unitDirs(prim, neighboursOf(sc, primaryKey)) : [], targets, base: zBase(sc) };
     }

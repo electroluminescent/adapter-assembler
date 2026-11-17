@@ -35,6 +35,7 @@ A browser tool for designing threaded adapters, rings and gears, and exporting t
     * Corners and edges lying over each other there move together (Alt: just the one); a double click on an edge adds a corner on each edge it covers, so both sides stay alike.
   * Turned about any of the three axes, with snapping.
   * Ctrl snaps its centre and corners to points, the grid, the axis and the slicer lines and heights.
+    * In the radius/height view a corner also lines up level or upright with any other corner, its own included.
 
 - #### **Outlines**
 
