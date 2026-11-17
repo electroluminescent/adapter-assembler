@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.26.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.26.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.26.0';
+  const APP_VERSION = '3.26.1';
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -1620,6 +1620,25 @@
   }
   // turn a geometric object about a direction in the scene (through its centre) by a (radians)
   function geoTurn(q, ax, a) { Object.assign(q, eulerOf(matMul(axisRot(ax, a), geoRot(q)))); }
+  // Keep a geometric object's centre at the middle of its corners (the middle of the box round them), leaving the
+  // shape where it is in the scene: its corners shift one way in its own frame, its centre the other way (turned).
+  function geoRecentre(n) {
+    if (!n || n.type !== 'geo' || !n.shape || !n.shape.length) return;
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (const p of n.shape) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); }
+    const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+    if (Math.abs(mx) < 1e-12 && Math.abs(my) < 1e-12) return;
+    for (const p of n.shape) { p.x -= mx; p.y -= my; }
+    const q = n.params, M = geoRot(q);
+    q.cx += M[0][0] * mx + M[0][1] * my; q.cy += M[1][0] * mx + M[1][1] * my; q.z += M[2][0] * mx + M[2][1] * my;
+  }
+  // n evenly spaced new corners on edge i of a geometric object (after corner i); their keys
+  function geoInsert(n, i, count) {
+    const A = n.shape[i], B = n.shape[(i + 1) % n.shape.length], add = [];
+    for (let k = 1; k <= count; k++) add.push({ x: A.x + (B.x - A.x) * k / (count + 1), y: A.y + (B.y - A.y) * k / (count + 1) });
+    n.shape.splice(i + 1, 0, ...add);
+    return add.map((_, k) => n.id + '|q|' + (i + 1 + k));
+  }
   const geoTilted = (q) => Math.abs(q.rx || 0) > 1e-9 || Math.abs(q.ry || 0) > 1e-9;
   const snapAng = (v, st = 15) => Math.round(v / st) * st;
   // which way the radius/height view's drags on a geometric object go: the side of the axis it was grabbed on
@@ -2263,7 +2282,7 @@
     const groupsDone = new Set(), runSel = new Map();
     for (const key of pointKeys(keys, scene)) {
       const h = parseKey(key), node = scene.nodes[h.node];
-      if (!node || h.kind === 'q') continue;           // (a geometric object's corners move from above)
+      if (!node || h.kind === 'q' || h.kind === 'qe') continue;           // (a geometric object's corners move from above)
       if (h.kind === 'p') {
         const p = node.pts[h.i]; if (!p) continue;
         p.y = Math.max(0, p.y + dy); p.z += dz;
@@ -2323,6 +2342,7 @@
       const idx = [...new Set(byGeo[id])].sort((a, b) => b - a);
       if (node.shape.length - idx.length < 3) { refused = true; continue; }
       for (const i of idx) node.shape.splice(i, 1);
+      geoRecentre(node);
     }
     for (const id in byNode) {
       const node = state.scene.nodes[id];
@@ -2735,23 +2755,28 @@
     const set = (k, v) => { if (k === 'flip') { setFlip(v); return; } state[k] = v; saveSettings(); recalc(); };
     // units: everything shown and typed follows them (files stay in millimetres)
     const setUnit = (k, v) => { state[k] = v; applyUnits(); saveSettings(); remountEditor(); };
-    return el('div', null,
-      el('div', null,
+    // grouped, two columns where there is room
+    const group = (title, ...kids) => el('div', { style: 'min-width:0' },
+      el('div', { style: 'font:700 10px/1.4 sans-serif;letter-spacing:.05em;text-transform:uppercase;color:#868e96;margin:2px 0 3px' }, title), ...kids);
+    return el('div', { style: 'display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 18px;align-items:start' },
+      group('Units and display',
         selectRow('Lengths', state.lenUnit, [['mm', 'metric (mm)'], ['in', 'imperial (in)']], v => setUnit('lenUnit', v)),
         selectRow('Angles', state.angUnit, [['deg', 'degrees (°)'], ['rad', 'radians']], v => setUnit('angUnit', v)),
         selectRow('Quality', state.quality, [['high', 'high'], ['low', 'low (no animations, less detail)']], v => setUnit('quality', v))),
-      checkRow('Invert y axis', () => state.flip, v => set('flip', v)),
-      el('div', null, selectRow('Heights', state.heightFrom, [['bottom', 'bottom up (0 at the lowest point)'], ['top', 'top down (0 at the top)']], v => { state.heightFrom = v; saveSettings(); renderAll(); })),
-      el('div', null, selectRow('Rotation', state.rotMode || 'absolute', [['absolute', 'absolute (fields and Ctrl-snapping give the angle)'], ['relative', 'relative (fields and Ctrl-snapping give the change)']], v => { state.rotMode = v; saveSettings(); renderAll(); })),
-      el('div', null, selectRow('Move readout', state.offsetMode || 'polar', [['polar', 'distance and angle'], ['radial', 'vector, radial (Δr, Δθ, Δh)'], ['xyz', 'vector, orthogonal (Δx, Δy, Δz)']], v => { state.offsetMode = v; saveSettings(); renderAll(); })),
-      checkRow('Linked slicers (the 2D height band and the 3D height slicer are one; the 2D cross-section is cut where the blue slicer is)', () => !!state.linkSlicers, v => setLinkSlicers(v)),
-      checkRow('Linked cross-section views (radius/height and overhead line up when switching; height band set in both)', () => state.linkViews !== false, v => { state.linkViews = v; saveSettings(); renderAll(); }),
-      checkRow('Auto-simplify (cross-section drawn monomorphic at 50% zoom or less)', () => !!state.autoSimplify, v => { state.autoSimplify = v; saveSettings(); renderAll(); }),
-      el('div', null,
+      group('Heights',
+        checkRow('Invert y axis', () => state.flip, v => set('flip', v)),
+        el('div', null, selectRow('Heights', state.heightFrom, [['bottom', 'bottom up (0 at the lowest point)'], ['top', 'top down (0 at the top)']], v => { state.heightFrom = v; saveSettings(); renderAll(); }))),
+      group('Editing',
+        el('div', null, selectRow('Rotation', state.rotMode || 'absolute', [['absolute', 'absolute (the angle)'], ['relative', 'relative (the change)']], v => { state.rotMode = v; saveSettings(); renderAll(); })),
+        el('div', null, selectRow('Move readout', state.offsetMode || 'polar', [['polar', 'distance, angle'], ['radial', 'radial (Δr Δθ Δh)'], ['xyz', 'orthogonal (Δx Δy Δz)']], v => { state.offsetMode = v; saveSettings(); renderAll(); }))),
+      group('Views',
+        checkRow('Linked slicers', () => !!state.linkSlicers, v => setLinkSlicers(v), 'The 2D height band and the 3D height slicer are one; the 2D cross-section is cut where the blue slicer is'),
+        checkRow('Linked cross-section views', () => state.linkViews !== false, v => { state.linkViews = v; saveSettings(); renderAll(); }, 'Radius/height and overhead line up when switching; the height band is set in both'),
+        checkRow('Auto-simplify', () => !!state.autoSimplify, v => { state.autoSimplify = v; saveSettings(); renderAll(); }, 'The cross-section is drawn monomorphic at 50% zoom or less (the Monomorphic button turns that off)')),
+      group('Export',
         numRow('Circular precision (edges)', state.precision, v => set('precision', Math.max(8, Math.min(300, Math.round(v)))), { step: '1', min: 8, max: 300, digits: 0, width: 64 }),
         selectRow('Faces', state.faces, [['ngons', 'N-gons'], ['quads', 'Quads'], ['tris', 'Triangles']], v => set('faces', v)),
-        selectRow('Format', state.format, [['stl', 'STL'], ['obj', 'OBJ']], v => set('format', v))),
-      null);
+        selectRow('Format', state.format, [['stl', 'STL'], ['obj', 'OBJ']], v => set('format', v))));
   }
 
   function statusText() {
@@ -2835,7 +2860,10 @@
     zoomTag.addEventListener('click', () => { fit(); drawSection(); });
     // the pane shows either the cross-section (radius / height) or the part from above
     const modeBtn = (m, ic, label, title) => { const b = hbtn(ic, label, () => setSecMode(m), { title }); b.__mode = m; return b; };
-    const monoBtn = hbtn('mono', 'Monomorphic', () => { state.mono = !state.mono; saveSettings(); syncModeBtns(); drawSection(); },
+    const monoBtn = hbtn('mono', 'Monomorphic', () => {
+      if (monoOn()) { state.mono = false; if (autoMono()) monoAutoOff = true; } else state.mono = true;
+      saveSettings(); syncModeBtns(); drawSection();
+    },
       { title: 'Draw everything not selected as one grey shape, without handles' });
     const modeBar = el('div', { style: 'display:inline-flex;gap:2px' },
       modeBtn('section', 'sideview', 'Radius/height', 'Cross-section: radius across, height up'),
@@ -3244,7 +3272,7 @@
       const { w, h } = size();
       const R = Math.max(Math.abs(y0), Math.abs(y1), 1e-6);    // both sides of the axis
       view = { cy: 0, cz: FZ() * (z0 + z1) / 2, s: Math.min(w / (2 * R * 1.15), h / ((z1 - z0) * 1.2 || 1)) };
-      fitScale = view.s; view.fit = view.s;
+      fitScale = view.s; view.fit = view.s; fitScales[topMode() ? 'top' : 'section'] = view.s;
     }
     // The cross-section shows both sides of the axis: the section at the view angle on the right, and the one
     // opposite it (view angle + 180°) mirrored on the left, which works just the same. MS is the side being drawn
@@ -3655,7 +3683,17 @@
     }
 
     // ---- Monomorphic (or auto-simplified when zoomed out to 50 % or less): what is not selected is one grey shape ----
-    const monoOn = () => !!(state.mono || (state.autoSimplify && view && view.fit > 0 && view.s / view.fit <= 0.5 + 1e-9));
+    // (auto-simplify: at half the fitted zoom or less, measured against this view's own fit; the button turns it off
+    // again until the view is zoomed back in past half)
+    const fitScales = { section: 0, top: 0 };
+    let monoAutoOff = false;
+    const autoMono = () => {
+      const f = fitScales[topMode() ? 'top' : 'section'] || (view && view.fit) || 0;
+      const zoomedOut = !!(state.autoSimplify && view && f > 0 && view.s / f <= 0.5 + 1e-9);
+      if (!zoomedOut) monoAutoOff = false;
+      return zoomedOut && !monoAutoOff;
+    };
+    const monoOn = () => !!(state.mono || autoMono());
     const monoHid = (id) => monoOn() && !selectedAncestorOf(id);
     // one shape from these outlines: their edges first, then their fills over them (hiding the edges between them);
     // the subtracted ones are holes (the grid shows through), edged only where they cut the shape
@@ -4049,7 +4087,7 @@
       syncModeBtns(); drawSection();
     }
     function syncModeBtns() {
-      for (const b of [...modeBar.children, monoBtn]) { const on = b === monoBtn ? !!state.mono : (b.__mode === 'top') === topMode(); b.style.background = on ? '#ddf4ff' : '#fff'; b.style.borderColor = on ? '#54aeff' : '#ced4da'; }
+      for (const b of [...modeBar.children, monoBtn]) { const on = b === monoBtn ? monoOn() : (b.__mode === 'top') === topMode(); b.style.background = on ? '#ddf4ff' : '#fff'; b.style.borderColor = on ? '#54aeff' : '#ced4da'; }
     }
     // where new objects go: the cross-section's view, whichever is showing
     const secView = () => topMode() ? otherView(view, false) : view;
@@ -4158,7 +4196,25 @@
       }
       return c;
     };
+    // an edge of a geometric object under the pointer (screen), as { id, i, W: the nearest place on it }
+    function geoEdgeAt(sx, sy) {
+      const sc = state.scene;
+      for (let k = lastTop.length - 1; k >= 0; k--) {
+        const id = lastTop[k].id, n = sc.nodes[id];
+        if (n.type !== 'geo' || monoHid(id) || geoTilted(n.params)) continue;
+        const P = topPlace(sc, id); if (P.side) continue;
+        const C = geoCorners(n, true).map(([x, y]) => P.w(x, y));
+        for (let i = 0; i < C.length; i++) {
+          const a = C[i], b = C[(i + 1) % C.length], [ax, ay] = toScreen(a[0], a[1]), [bx, by] = toScreen(b[0], b[1]);
+          const L2 = (bx - ax) ** 2 + (by - ay) ** 2, t = L2 ? Math.max(0, Math.min(1, ((sx - ax) * (bx - ax) + (sy - ay) * (by - ay)) / L2)) : 0;
+          if (Math.hypot(sx - ax - (bx - ax) * t, sy - ay - (by - ay) * t) < 6) return { id, i, P, W: [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t] };
+        }
+      }
+      return null;
+    }
     function topNodeAt(x, y) {
+      // (what is selected first: so a selected object can be grabbed where others overlap it)
+      for (let i = lastTop.length - 1; i >= 0; i--) if (selectedAncestorOf(lastTop[i].id)) for (const s of lastTop[i].shapes) if (inPoly2(x, y, s.outer) && !(s.inner && inPoly2(x, y, s.inner))) return lastTop[i].id;
       for (let i = lastTop.length - 1; i >= 0; i--) for (const s of lastTop[i].shapes) if (inPoly2(x, y, s.outer) && !(s.inner && inPoly2(x, y, s.inner))) return lastTop[i].id;
       return null;
     }
@@ -4177,7 +4233,7 @@
       const { w, h } = size();
       view = { cy: (x0 + x1) / 2, cz: (y0 + y1) / 2, s: Math.min((w - AX_L) / ((x1 - x0) * 1.2 || 1), (h - AX_B) / ((y1 - y0) * 1.2 || 1)) };
       view.cy -= AX_L / 2 / view.s; view.cz -= AX_B / 2 / view.s;     // centred in the space between the axis strips
-      fitScale = view.s; view.fit = view.s;
+      fitScale = view.s; view.fit = view.s; fitScales[topMode() ? 'top' : 'section'] = view.s;
     }
     function drawTop(g) {
       grid(g, 0, true);
@@ -4242,6 +4298,14 @@
         g.append(sk);
       }
       label(g, hx + 10, hy - 8, ['section ' + num(state.viewAngle * ANG_SCALE, ANG_SCALE === 1 ? 1 : 4) + ANG_LABEL]);
+      // selected edges of geometric objects
+      for (const k of state.sel) {
+        const hq = parseKey(k); if (hq.kind !== 'qe') continue;
+        const n = state.scene.nodes[hq.node]; if (!n || !n.shape || geoTilted(n.params)) continue;
+        const P = topPlace(state.scene, hq.node), C = geoCorners(n, true), a = P.w(...C[hq.i]), b = P.w(...C[(hq.i + 1) % C.length]);
+        const [x1, y1] = toScreen(a[0], a[1]), [x2, y2] = toScreen(b[0], b[1]);
+        g.append(sv('line', { x1, y1, x2, y2, stroke: '#e03131', 'stroke-width': 3.5, 'stroke-linecap': 'round', 'pointer-events': 'none' }));
+      }
       // handles: drag them to edit from above
       for (const hd of topHandles()) {
         const [x, y] = toScreen(hd.x, hd.y), on = (drag && drag.h && drag.h.key === hd.key) || (hd.pkey && state.sel.has(hd.pkey));
@@ -4298,13 +4362,10 @@
           const C = geoCorners(n, true), sel = !!selectedAncestorOf(it.id) || [...state.sel].some(k => k.startsWith(it.id + '|q|'));
           C.forEach(([x0, y0], i) => {
             const [x, y] = P.w(x0, y0), key = it.id + '|q|' + i, bv = n.shape[i].bevel, bev = !!(bv && bv.r > 0);
-            out.push({ key, pkey: key, id: it.id, kind: 'gpt', i, P, x, y, col, shape: 'dot', bevel: bev, tip: name + ': corner ' + (i + 1) + (bev ? ' (bevelled ' + num(mm(bv.r), 3) + ' ' + UNIT_LABEL + ')' : '') + ' — drag to move it (Ctrl snaps); right-click to bevel or delete it' });
+            out.push({ key, pkey: key, id: it.id, kind: 'gpt', i, P, x, y, col, shape: 'dot', bevel: bev, tip: name + ': corner ' + (i + 1) + (bev ? ' (bevelled ' + num(mm(bv.r), 3) + ' ' + UNIT_LABEL + ')' : '') + ' — drag to move it (Ctrl snaps); right-click to bevel or delete it. Drag an edge to move it; right-click an edge to add corners.' });
           });
           { const [x, y] = P.w(q.cx, q.cy); out.push({ key: it.id + '|gc', id: it.id, kind: 'gcen', P, x, y, col, shape: 'diamond', tip: name + ': centre — drag to move the shape (Ctrl snaps the centre to points)' }); }
-          if (sel) C.forEach((a, i) => {
-            const b = C[(i + 1) % C.length], [x, y] = P.w((a[0] + b[0]) / 2, (a[1] + b[1]) / 2);
-            out.push({ key: it.id + '|gm|' + i, id: it.id, kind: 'gmid', i, P, x, y, col, shape: 'ring', tip: name + ': click to add a corner here, or drag one out' });
-          });
+          void sel;
           continue;
         }
         if (P.side) {
@@ -4513,7 +4574,7 @@
         drag.rotText = state.rotMode === 'relative' ? 'turned ' + num(dd * ANG_SCALE, 3) + ANG_LABEL : 'rotation ' + num(q.rz * ANG_SCALE, 3) + ANG_LABEL + ' (Δ ' + num(dd * ANG_SCALE, 3) + ANG_LABEL + ')';
         return;
       }
-      if (h.kind === 'gpt' || h.kind === 'gcen' || h.kind === 'gmid') {
+      if (h.kind === 'gpt' || h.kind === 'gcen' || h.kind === 'gmid' || h.kind === 'gedge') {
         // a corner, the centre, or a new corner from an edge's middle: follows the pointer (Shift: across or up only;
         // Ctrl: onto points and middles)
         const W0 = [h.x, h.y];
@@ -4529,11 +4590,13 @@
             const A = n.shape[h.i], B = n.shape[(h.i + 1) % n.shape.length];
             n.shape.splice(h.i + 1, 0, { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 });
             idx = [h.i + 1]; state.sel = new Set([h.id + '|q|' + (h.i + 1)]);
-          } else idx = state.sel.has(h.pkey) ? [...state.sel].filter(k => k.startsWith(h.id + '|q|')).map(k => +k.split('|')[2]) : [h.i];
+          } else if (h.kind === 'gedge') idx = [h.i, (h.i + 1) % n.shape.length];
+          else idx = state.sel.has(h.pkey) ? [...state.sel].filter(k => k.startsWith(h.id + '|q|')).map(k => +k.split('|')[2]) : [h.i];
           for (const i of idx) if (n.shape[i]) { n.shape[i].x += dl[0]; n.shape[i].y += dl[1]; }
+          geoRecentre(n);
         }
         drag.offW = [W0, Wt];
-        drag.label = (h.kind === 'gcen' ? 'centre' : 'corner') + ' x ' + num(mm(Wt[0]), 3) + ' · y ' + num(mm(Wt[1]), 3) + ' ' + UNIT_LABEL;
+        drag.label = (h.kind === 'gcen' ? 'centre' : h.kind === 'gedge' ? 'edge' : 'corner') + ' x ' + num(mm(Wt[0]), 3) + ' · y ' + num(mm(Wt[1]), 3) + ' ' + UNIT_LABEL;
         return;
       }
       if (h.kind === 'pt') {
@@ -4717,12 +4780,13 @@
               // the rotation handle: beside its centre on the section's plane; turns it in the plane of the view
               const th = state.viewAngle * Math.PI / 180, [Cx, Cy] = P.w(gq.cx, gq.cy), al = Cx * Math.cos(th) + Cy * Math.sin(th), zc = Math.min(gq.z, gq.z + gq.h) + Math.abs(gq.h) / 2;
               const MSh = MS; MS = 1;
-              const [px, py] = toScreen(al, zc);
+              const [px, py] = toScreen(al, zc), [ex] = toScreen(s1, zc);
               MS = MSh;
-              const rk = sv('circle', { cx: (px + 22).toFixed(1), cy: py.toFixed(1), r: 5, fill: '#fff', stroke: '#f08c00', 'stroke-width': 2.2, style: 'cursor:grab' });
+              const rk = sv('circle', { cx: (ex + 18).toFixed(1), cy: py.toFixed(1), r: 5, fill: '#fff', stroke: '#f08c00', 'stroke-width': 2.2, style: 'cursor:grab' });
               rk.__geoRot = { id, piv: [al, zc] };
               rk.append(sv('title', null, (state.scene.nodes[id].name || id) + ': turn it in this view\'s plane, about its centre; Ctrl snaps to 15°'));
               g.append(sv('path', { d: 'M' + (px - 4) + ' ' + py + 'h8M' + px + ' ' + (py - 4) + 'v8', stroke: '#f08c00', 'stroke-width': 1.2, 'pointer-events': 'none' }));
+              g.append(sv('line', { x1: ex, y1: py, x2: ex + 13, y2: py, stroke: '#f08c00', 'stroke-width': 1, 'stroke-dasharray': '2 2', 'pointer-events': 'none' }));
               g.append(rk);
             }
             if (!P.side && isFinite(s0)) {
@@ -5260,7 +5324,7 @@
         for (const k of keys) {
           const h = parseKey(k), n = sc.nodes[h.node]; if (!n) continue;
           if (h.kind === 'p') out.pts.push({ n, i: h.i });
-          else if (h.kind === 'q') continue;
+          else if (h.kind === 'q' || h.kind === 'qe') continue;
           else if (!runSeen.has(h.node + '|' + h.ri)) { runSeen.add(h.node + '|' + h.ri); out.runs.push({ n, r: n.runs[h.ri] }); }
         }
       } else {
@@ -5386,6 +5450,12 @@
           if (!state.sel.has(th0.pkey)) { state.sel = new Set([th0.pkey]); state.selNodes = new Set([th0.id]); }
           drawSection(); showPointMenu(e.clientX, e.clientY); return;
         }
+        const ge = th0 ? null : geoEdgeAt(sx, sy);
+        if (e.button === 2 && ge) {
+          const k = ge.id + '|qe|' + ge.i;
+          if (!state.sel.has(k)) { state.sel = new Set([k]); state.selNodes = new Set([ge.id]); }
+          drawSection(); showPointMenu(e.clientX, e.clientY); return;
+        }
         if (e.button === 2 && hit) {
           if (!selectedAncestorOf(hit)) { state.selNodes = new Set([hit]); state.sel = new Set(); renderAll(); }
           showObjectMenu(e.clientX, e.clientY); return;
@@ -5403,6 +5473,27 @@
             state.selNodes = new Set([h.id]);
           } else if (!add) { state.selNodes = new Set([h.id]); state.sel = new Set(); }
           drag.targets = topSnapTargets(h);      // what Ctrl can snap to, as things stand before the drag
+          drawSection(); return;
+        }
+        const hitN = hit && state.scene.nodes[hit];
+        if (!ge && e.button === 0 && !add && hitN && hitN.type === 'geo' && !e.target.__secLine && !e.target.__sliceKnob) {
+          // a geometric object's body: select it and drag it (by its centre, which Ctrl snaps)
+          const P = topPlace(state.scene, hit);
+          if (!P.side) {
+            const [cx, cy] = P.w(hitN.params.cx, hitN.params.cy), h = { kind: 'gcen', id: hit, P, x: cx, y: cy, key: hit + '|gc' };
+            state.selNodes = new Set([hit]); state.sel = new Set();
+            drag = { type: 'toph', h, from: [X, Y], snap: clone(state.scene), moved: false };
+            drag.targets = topSnapTargets(h);
+            drawSection(); return;
+          }
+        }
+        if (ge && e.button === 0) {
+          // an edge of a geometric object: select it; drag it to move its two corners
+          const k = ge.id + '|qe|' + ge.i, h = { kind: 'gedge', id: ge.id, i: ge.i, P: ge.P, x: ge.W[0], y: ge.W[1], key: k };
+          if (add) { if (state.sel.has(k)) state.sel.delete(k); else state.sel.add(k); } else state.sel = new Set([k]);
+          state.selNodes = new Set([ge.id]);
+          drag = { type: 'toph', h, from: [X, Y], snap: clone(state.scene), moved: false };
+          drag.targets = topSnapTargets(h);
           drawSection(); return;
         }
         if (e.target.__secLine) { const [ox, oy] = toScreen(0, 0); drag = { type: 'angle', a0: state.viewAngle, sl: Math.atan2(oy - sy, sx - ox) * 180 / Math.PI, acc: 0, hit, add, sx, sy, moved: false }; svg.style.cursor = 'grabbing'; return; }
@@ -5519,7 +5610,7 @@
         if (!drag) {
           const th = e.target.__topH || null, hn = th ? th.id : topNodeAt(X, Y);
           if (hn !== hoverNode || hoverEdge || th !== hoverTopH) { hoverNode = hn; hoverEdge = null; hoverTopH = th; drawHover(); }
-          svg.style.cursor = e.target.__secLine ? 'grab' : hn ? 'pointer' : '';
+          svg.style.cursor = !th && geoEdgeAt(sx, sy) ? 'move' : e.target.__secLine ? 'grab' : hn ? 'pointer' : '';
           return;
         }
         if (drag.type === 'pan') { view.cy = drag.cy - (sx - drag.sx) / view.s; view.cz = drag.cz + (sy - drag.sy) / view.s; drawSection(); return; }
@@ -5686,6 +5777,7 @@
           pushUndo();
           const A = n.shape[d.h.i], B = n.shape[(d.h.i + 1) % n.shape.length];
           n.shape.splice(d.h.i + 1, 0, { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 });
+          geoRecentre(n);
           state.sel = new Set([d.h.id + '|q|' + (d.h.i + 1)]); markEdited(); recalc();
         }
         return;
@@ -5709,6 +5801,14 @@
             MS = s;
             const lo = s > 0 ? y0 : -y1, hi = s > 0 ? y1 : -y0;
             for (const id of leafOrder(state.scene)) for (const hd of handlesOf(id)) if (hd.y >= lo && hd.y <= hi && hd.z >= z0 && hd.z <= z1) state.sel.add(hd.key);
+            // (a geometric object has no points here: the box takes the object, where it touches its section)
+            if (s > 0) for (const id of leafOrder(state.scene)) {
+              if (state.scene.nodes[id].type !== 'geo') continue;
+              const loops = geoSection(id);
+              if (loops.some(L => L.some(p => p[0] >= y0 && p[0] <= y1 && p[1] >= z0 && p[1] <= z1)) || inLoops((y0 + y1) / 2, (z0 + z1) / 2, loops)) {
+                if (!d.add) state.selNodes = new Set(); state.selNodes.add(id); d.add = true;
+              }
+            }
           }
           MS = MSb;
         } else if (d.hit) {
@@ -5801,6 +5901,21 @@
       openMenu(x, y);
     }
     function showPointMenu(x, y) {
+      const qe = [...state.sel].filter(k => parseKey(k).kind === 'qe');
+      if (qe.length && qe.length === state.sel.size) {
+        // edges of a geometric object: corners added on them, evenly spaced
+        menu.textContent = '';
+        const nIn = el('input', { type: 'number', min: '1', max: '200', step: '1', value: '1', style: 'width:52px' });
+        menu.append(el('div', { style: 'font-weight:700;margin-bottom:4px' }, qe.length + ' edge' + (qe.length === 1 ? '' : 's') + ' selected'),
+          row(el('button', { type: 'button', style: BTN2, onclick: () => {
+            const c = Math.max(1, Math.min(200, parseInt(nIn.value, 10) || 1)), added = [];
+            pushUndo();
+            qe.map(parseKey).sort((a, b) => a.node === b.node ? b.i - a.i : 0).forEach(hq => { const n = state.scene.nodes[hq.node]; if (n && n.shape) added.push(...geoInsert(n, hq.i, c)); });
+            for (const id of new Set(qe.map(k => parseKey(k).node))) geoRecentre(state.scene.nodes[id]);
+            state.sel = new Set(added.slice(-c)); markEdited(); hideMenu(); recalc();
+          } }, 'Insert'), nIn, 'point(s) on ' + (qe.length === 1 ? 'this edge' : 'each edge')));
+        openMenu(x, y); return;
+      }
       const qk = [...state.sel].filter(k => parseKey(k).kind === 'q');
       if (qk.length && qk.length === state.sel.size) {
         // corners of a geometric object
@@ -6085,7 +6200,7 @@
               numInput(() => 0, v => { if (v) setG(t => geoTurn(t, ax, v / ANG_SCALE * Math.PI / 180)); }, { step: ANG_SCALE === 1 ? '15' : '0.25', digits: 4, width: 70, title: 'Turn it about the scene\'s ' + lab + ' axis, through its centre, by this much' })]))
             : pgrid(3, ...[['x', 'rx'], ['y', 'ry'], ['height', 'rz']].map(([lab, k]) => ['Rotation about ' + lab + ' (' + ANG_LABEL.trim() + ')',
               numInput(() => (q[k] || 0) * ANG_SCALE, v => setG(t => { t[k] = v / ANG_SCALE; }), { step: ANG_SCALE === 1 ? '15' : '0.25', digits: 4, width: 70 })])),
-          el('div', { style: 'color:#666;font-size:11px;margin-top:3px' }, n.shape.length + ' corners. From above: drag a corner or the centre (Ctrl snaps); click the middle of an edge to add a corner; right-click a corner to delete it.')));
+          el('div', { style: 'color:#666;font-size:11px;margin-top:3px' }, n.shape.length + ' corners. From above: drag it, a corner or an edge to move them (Ctrl snaps); right-click an edge to add corners, a corner to bevel or delete it. Its centre stays the middle of its corners.')));
         return box;
       }
       if (n.type === 'cloner') {

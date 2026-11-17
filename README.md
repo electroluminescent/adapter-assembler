@@ -27,7 +27,8 @@ A browser tool for designing threaded adapters, rings and gears, and exporting t
 - #### **Geometric objects**
 
   * Any flat shape seen from above, stood up between two heights.
-  * Corners added, moved, bevelled and deleted; placed by its centre.
+  * Corners, edges and the whole shape dragged; corners added on edges, bevelled and deleted.
+  * Placed by its centre, which stays the middle of its corners.
   * Turned about any of the three axes, with snapping.
 
 - #### **Outlines**
