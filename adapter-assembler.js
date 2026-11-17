@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.28.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.28.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = "3.28.0";
+  const APP_VERSION = "3.28.1";
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -1101,9 +1101,19 @@
   }
   // a geometric object as a closed, outward-facing mesh (scene units)
   function geoMesh(node) {
-    const q = node.params;
-    // its bottom and its top (the same corners, each top where its corner leans to), matched corner for corner
-    let B = geoCorners(node, false, true, -1), U = geoCorners(node, false, true, 1);
+    const q = node.params, sh = node.shape || [];
+    // its bottom and its top (the same corners, each top where its corner leans to), matched corner for corner, each
+    // point with its own height offset (dt, db: a corner's top and bottom up from the object's top and bottom; a
+    // bevelled corner's points take their corner's)
+    const ring = (r, key) => {
+      const P = geoCorners(node, false, true, r), O = geoCorners(node, true, true, r);
+      return P.map(p => {
+        let k = 0, d = Infinity;
+        O.forEach((o, i) => { const e = Math.hypot(o[0] - p[0], o[1] - p[1]); if (e < d) { d = e; k = i; } });
+        return [p[0], p[1], sh[k] ? +sh[k][key] || 0 : 0];
+      });
+    };
+    let B = ring(-1, 'db'), U = ring(1, 'dt');
     const keep = B.map((p, i) => { const b = B[(i + 1) % B.length], u = U[i], w = U[(i + 1) % U.length]; return Math.hypot(p[0] - b[0], p[1] - b[1]) > 1e-9 || Math.hypot(u[0] - w[0], u[1] - w[1]) > 1e-9; });
     B = B.filter((_, i) => keep[i]); U = U.filter((_, i) => keep[i]);
     if (B.length < 3) throw new Error((node.name || 'a geometric object') + ' needs at least three corners');
@@ -1111,8 +1121,8 @@
     // built round its centre (half its height either side), turned, then placed
     const n = B.length, hh = Math.abs(q.h) / 2, zc = Math.min(q.z, q.z + q.h) + hh, M = geoRot(q), V = [], T = [];
     const put = (x, y, z) => V.push(M[0][0] * x + M[0][1] * y + M[0][2] * z + q.cx, M[1][0] * x + M[1][1] * y + M[1][2] * z + q.cy, M[2][0] * x + M[2][1] * y + M[2][2] * z + zc);
-    for (const [x, y] of B) put(x, y, -hh);
-    for (const [x, y] of U) put(x, y, hh);
+    for (const [x, y, o] of B) put(x, y, -hh + o);
+    for (const [x, y, o] of U) put(x, y, hh + o);
     for (let i = 0; i < n; i++) { const j = (i + 1) % n; T.push(i, j, n + j, i, n + j, n + i); }
     for (const [a, b, c] of earClip(U)) T.push(n + a, n + b, n + c);
     for (const [a, b, c] of earClip(B)) T.push(c, b, a);
@@ -1667,8 +1677,11 @@
   // n evenly spaced new corners on edge i of a geometric object (after corner i); their keys
   // a corner part way from A to B (leaning part way between theirs)
   function geoMidCorner(A, B, t) {
-    const p = { x: A.x + (B.x - A.x) * t, y: A.y + (B.y - A.y) * t }, tx = (A.tx || 0) + ((B.tx || 0) - (A.tx || 0)) * t, ty = (A.ty || 0) + ((B.ty || 0) - (A.ty || 0)) * t;
+    const p = { x: A.x + (B.x - A.x) * t, y: A.y + (B.y - A.y) * t }, at = (k) => (+A[k] || 0) + ((+B[k] || 0) - (+A[k] || 0)) * t;
+    const tx = at('tx'), ty = at('ty'), dt = at('dt'), db = at('db');
     if (Math.abs(tx) > 1e-12 || Math.abs(ty) > 1e-12) { p.tx = tx; p.ty = ty; }
+    if (Math.abs(dt) > 1e-12) p.dt = dt;
+    if (Math.abs(db) > 1e-12) p.db = db;
     return p;
   }
   // whether any corner leans (its top not over its bottom)
@@ -1755,20 +1768,18 @@
         const th = state.viewAngle * Math.PI / 180, d = placeOf(sc, id).inv(dY * GEO_SIDE * Math.cos(th), dY * GEO_SIDE * Math.sin(th)), M = geoRot(n.params);
         const lx = M[0][0] * d[0] + M[1][0] * d[1] + M[2][0] * dZ, ly = M[0][1] * d[0] + M[1][1] * d[1] + M[2][1] * dZ, idx = new Set();
         for (const k of by[id]) { const h = parseKey(k); if (h.kind === 'q') idx.add(h.i); else if (h.kind === 'qe') { idx.add(h.i); idx.add((h.i + 1) % n.shape.length); } }
-        // grabbed by its top or bottom: only that end moves across (the corner leans); up or down moves that end's height
-        // (when it is not turned off level)
-        const R = GEO_RING;
+        // grabbed by its top or bottom: only that end of each corner moves, across (the corner leans) and up or down (its
+        // own height there: the top or bottom is no longer flat, new faces follow); never below its other end
+        const R = GEO_RING, lz = M[0][2] * d[0] + M[1][2] * d[1] + M[2][2] * dZ, hh = Math.abs(n.params.h), eps = 0.01 / MM;
         for (const i of idx) {
           const p = n.shape[i]; if (!p) continue;
           if (!R) { p.x += lx; p.y += ly; continue; }
           p.x += lx / 2; p.y += ly / 2; p.tx = (p.tx || 0) + R * lx; p.ty = (p.ty || 0) + R * ly;
           if (Math.abs(p.tx) < 1e-12 && Math.abs(p.ty) < 1e-12) { delete p.tx; delete p.ty; }
-        }
-        if (R && dZ && !geoTilted(n.params)) {
-          const q = n.params, eps = 0.01 / MM;
-          let lo = Math.min(q.z, q.z + q.h), hi = Math.max(q.z, q.z + q.h);
-          if (R > 0) hi = Math.max(lo + eps, hi + dZ); else lo = Math.min(hi - eps, lo + dZ);
-          q.z = lo; q.h = hi - lo;
+          const k = R > 0 ? 'dt' : 'db', other = R > 0 ? +p.db || 0 : +p.dt || 0;
+          let v = (+p[k] || 0) + lz;
+          v = R > 0 ? Math.max(v, other - hh + eps) : Math.min(v, other + hh - eps);
+          if (Math.abs(v) < 1e-12) delete p[k]; else p[k] = v;
         }
         geoRecentre(n);
         continue;
@@ -3773,7 +3784,7 @@
       const at = (x, y, z) => { const w = f([q.cx + M[0][0] * x + M[0][1] * y + M[0][2] * z, q.cy + M[1][0] * x + M[1][1] * y + M[1][2] * z, zc + M[2][0] * x + M[2][1] * y + M[2][2] * z]); return [w[0] * c + w[1] * s, w[2]]; };
       const pts = [], edges = [], N = n.shape.length;
       for (const top of [false, true]) {
-        const zz = top ? hh : -hh, P = geoCorners(n, true, true, top ? 1 : -1).map(([x, y]) => at(x, y, zz));
+        const zz = top ? hh : -hh, P = geoCorners(n, true, true, top ? 1 : -1).map(([x, y], i) => at(x, y, zz + (+n.shape[i][top ? 'dt' : 'db'] || 0)));
         P.forEach((v, i) => { pts.push({ i, top, key: id + '|q|' + i, along: v[0], z: v[1] }); edges.push({ i, top, key: id + '|qe|' + i, a: v, b: P[(i + 1) % N] }); });
       }
       return { pts, edges };
@@ -5791,8 +5802,9 @@
         if (!state.sel.has(key)) { if (!add) state.sel = new Set(); state.sel.add(key); }
         else if (add) toggleOff = true;
         // a geometric object's corner or edge that others lie exactly over here (front and back, seen square-on): those
-        // are taken too, so the shape stays alike on both sides
-        if (!toggleOff && e.target.__gtop != null || (!toggleOff && e.target.__gpt)) {
+        // are taken too, so the shape stays alike on both sides (Alt: just the one)
+        if (e.altKey && !add && (e.target.__gtop != null || e.target.__gpt)) state.sel = new Set([key]);
+        if (!toggleOff && !e.altKey && (e.target.__gtop != null || e.target.__gpt)) {
           const hq = parseKey(key), top = e.target.__gpt ? e.target.__gpt.top : e.target.__gtop, GP = geoSidePts(hq.node), tol = 3 / view.s, near = (u, v) => Math.hypot(u[0] - v[0], u[1] - v[1]) < tol;
           if (hq.kind === 'q') { const me = GP.pts.find(c => c.top === top && c.i === hq.i); if (me) for (const c of GP.pts) if (c.top === top && near([c.along, c.z], [me.along, me.z])) state.sel.add(c.key); }
           else if (hq.kind === 'qe') { const me = GP.edges.find(E => E.top === top && E.i === hq.i); if (me) for (const E of GP.edges) if (E.top === top && ((near(E.a, me.a) && near(E.b, me.b)) || (near(E.a, me.b) && near(E.b, me.a)))) state.sel.add(E.key); }
