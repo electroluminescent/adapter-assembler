@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.26.3. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.27.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = "3.26.3";
+  const APP_VERSION = "3.27.0";
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -46,6 +46,7 @@
     autoSimplify: true,
     heightFrom: 'bottom',  // heights shown from the lowest point up ('bottom') or from the top down ('top'), as the part is shown
     linkSlicers: false,
+    orbitSnap: 15,         // Ctrl while orbiting (the compass, the 3D view, the section knob) snaps to this many degrees
     rotMode: 'absolute',   // rotation fields and snapping: the angle itself ('absolute') or the change ('relative')
     offsetMode: 'polar',   // what a drag shows by the pointer: 'polar' (distance, angle), 'radial' (Δr, Δθ, Δh), 'xyz'    // the 2D height band is the 3D height slicer, and the 2D cross-section is cut where the blue slicer is
     linkViews: true,       // radius/height and overhead line up with each other when switching (off: each keeps its own view)
@@ -75,7 +76,7 @@
 
 
   // Settings remembered in this browser.
-  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'quality', 'collapsed', 'secMode', 'mono', 'autoSimplify', 'rotMode', 'offsetMode', 'heightFrom', 'linkViews', 'linkSlicers', 'settingsRev', 'treeFolded', 'cutsLo', 'cutHandles', 'topCut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts', 'cutLo'];
+  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'quality', 'collapsed', 'secMode', 'mono', 'autoSimplify', 'rotMode', 'orbitSnap', 'offsetMode', 'heightFrom', 'linkViews', 'linkSlicers', 'settingsRev', 'treeFolded', 'cutsLo', 'cutHandles', 'topCut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts', 'cutLo'];
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     for (const k of SAVED_SETTINGS) if (k in saved && typeof saved[k] === typeof state[k]) state[k] = saved[k];
@@ -1293,7 +1294,7 @@
     pending = false; inflight = true;
     const job = ++state.job, fast = wantFast;
     const data = { job, opts: jobOpts(fast) };
-    if (state.scene) { data.scene = { nodes: state.scene.nodes, root: state.scene.root }; data.holes = state.holes; data.settings = jobSettings(); }
+    if (state.scene) { data.scene = sceneFor3d(state.scene); data.holes = state.holes; data.settings = jobSettings(); }
     state.jobFast = fast;
     post(data);
   }
@@ -1404,6 +1405,8 @@
   }
   function download() {
     if (state.busy || !state.result || !state.result.buffer) return;
+    // (with objects hidden from the 3D view, the file is built from all of them)
+    if (state.scene && Object.values(state.scene.nodes).some(n => n && n.hide3d)) { exportScene({ nodes: state.scene.nodes, root: state.scene.root }, partName() + (!state.helical ? '-rings' : '')); return; }
     saveFile(state.result.buffer, state.result.ext || 'stl', partName() + (state.scene && !state.helical ? '-rings' : ''));
   }
 
@@ -1459,6 +1462,22 @@
     if (old.parent === t.parent && t.slot != null && old.slot < t.slot) t.slot--;
     place(sc, id, t);
     return true;
+  }
+  // Per-object switches from the object list, inherited by what is inside: hide2d (not drawn in the cross-section
+  // views), hide3d (left out of the 3D view; exports still have it), locked (cannot be picked in the views).
+  function nodeFlag(sc, id, k) {
+    for (let cur = id, guard = 0; cur != null && guard < 64; guard++) {
+      const n = sc.nodes[cur]; if (!n) return false; if (n[k]) return true;
+      const pr = findParent(sc, cur); if (!pr || pr.parent === null) return false; cur = pr.parent;
+    }
+    return false;
+  }
+  // the scene the 3D view is built from: without what is hidden there (a boolean keeps the slot, empty)
+  function sceneFor3d(sc) {
+    if (!Object.values(sc.nodes).some(n => n && n.hide3d)) return { nodes: sc.nodes, root: sc.root };
+    const hid = (id) => !!(sc.nodes[id] && sc.nodes[id].hide3d), nodes = {};
+    for (const [id, n] of Object.entries(sc.nodes)) nodes[id] = n && n.children ? { ...n, children: n.type === 'boolean' ? n.children.map(c => c != null && hid(c) ? null : c) : n.children.filter(c => c == null || !hid(c)) } : n;
+    return { nodes, root: sc.root.filter(id => !hid(id)) };
   }
   function leafOrder(sc) {
     const out = [];
@@ -1713,7 +1732,20 @@
   function moveKeysView(sc, keys, dY, dZ) {
     const by = {};
     for (const k of keys) { const id = parseKey(k).node; (by[id] = by[id] || []).push(k); }
-    for (const id in by) { const d = xfOf(sc, id).inv(dY, dZ); moveKeys(sc, by[id], d.y, d.z); }
+    for (const id in by) {
+      const n = sc.nodes[id];
+      if (n && n.type === 'geo') {
+        // corners (and both ends of edges): the move along the section's plane and up or down, in its own (turned)
+        // frame; the part across its height is left out (that is the height lines' work)
+        const th = state.viewAngle * Math.PI / 180, d = placeOf(sc, id).inv(dY * GEO_SIDE * Math.cos(th), dY * GEO_SIDE * Math.sin(th)), M = geoRot(n.params);
+        const lx = M[0][0] * d[0] + M[1][0] * d[1] + M[2][0] * dZ, ly = M[0][1] * d[0] + M[1][1] * d[1] + M[2][1] * dZ, idx = new Set();
+        for (const k of by[id]) { const h = parseKey(k); if (h.kind === 'q') idx.add(h.i); else if (h.kind === 'qe') { idx.add(h.i); idx.add((h.i + 1) % n.shape.length); } }
+        for (const i of idx) if (n.shape[i]) { n.shape[i].x += lx; n.shape[i].y += ly; }
+        geoRecentre(n);
+        continue;
+      }
+      const d = xfOf(sc, id).inv(dY, dZ); moveKeys(sc, by[id], d.y, d.z);
+    }
   }
   function moveNodeView(sc, id, dY, dZ) {
     const n = sc.nodes[id];
@@ -2478,6 +2510,10 @@
     ungroup: '<rect x="2" y="2" width="5.5" height="5.5" rx="1"/><rect x="8.5" y="8.5" width="5.5" height="5.5" rx="1"/>',
     list: '<path d="M6 4h7.5M6 8h7.5M6 12h7.5M2.5 4h.5M2.5 8h.5M2.5 12h.5"/>',
     add: '<path d="M8 3v10M3 8h10"/>',
+    eye: '<path d="M1.5 8s2.4-4.3 6.5-4.3S14.5 8 14.5 8s-2.4 4.3-6.5 4.3S1.5 8 1.5 8z"/><circle cx="8" cy="8" r="1.9"/>',
+    eyeoff: '<path d="M1.5 8s2.4-4.3 6.5-4.3S14.5 8 14.5 8s-2.4 4.3-6.5 4.3S1.5 8 1.5 8z" stroke-opacity=".45"/><path d="M2.5 13.5 13.5 2.5"/>',
+    pick: '<path d="M4 2.2l8.2 6.1-3.7.7 2.1 4-1.7.9-2.1-4L4 12.6z"/>',
+    pickoff: '<path d="M4 2.2l8.2 6.1-3.7.7 2.1 4-1.7.9-2.1-4L4 12.6z" stroke-opacity=".45"/><path d="M2.5 13.5 13.5 2.5"/>',
     json: '<path d="M6 2.5c-1.5 0-2 .7-2 2v1.5c0 1-.5 2-1.5 2 1 0 1.5 1 1.5 2v1.5c0 1.3.5 2 2 2M10 2.5c1.5 0 2 .7 2 2v1.5c0 1 .5 2 1.5 2-1 0-1.5 1-1.5 2v1.5c0 1.3-.5 2-2 2"/>',
   };
   function icon(name, size) {
@@ -2783,6 +2819,7 @@
       group('Views',
         checkRow('Linked slicers', () => !!state.linkSlicers, v => setLinkSlicers(v), 'The 2D height band and the 3D height slicer are one; the 2D cross-section is cut where the blue slicer is'),
         checkRow('Linked cross-section views', () => state.linkViews !== false, v => { state.linkViews = v; saveSettings(); renderAll(); }, 'Radius/height and overhead line up when switching; the height band is set in both'),
+        numRow('Orbit snap with Ctrl (°)', state.orbitSnap, v => { state.orbitSnap = Math.max(0.5, Math.min(180, v)); saveSettings(); }, { step: '0.5', min: 0.5, max: 180, digits: 1, width: 56 }),
         checkRow('Auto-simplify', () => !!state.autoSimplify, v => { state.autoSimplify = v; saveSettings(); renderAll(); }, 'The cross-section is drawn monomorphic at 50% zoom or less (the Monomorphic button turns that off)')),
       group('Export',
         numRow('Circular precision (edges)', state.precision, v => set('precision', Math.max(8, Math.min(300, Math.round(v)))), { step: '1', min: 8, max: 300, digits: 0, width: 64 }),
@@ -2888,7 +2925,8 @@
     const loading = el('div', { style: 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#666;background:#fbfbfc' }, 'Start a project with New / open…');
     const overlay = el('div', { style: 'position:absolute;inset:0;pointer-events:none;overflow:hidden' });
     // 1-D compass under the cross-section: the angle of the section around the axis (drag to turn)
-    const compass1 = el('canvas', { style: 'position:absolute;left:50%;transform:translateX(-50%);bottom:' + (44 + 4) + 'px;width:300px;height:26px;cursor:ew-resize;touch-action:none;z-index:2;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,.18)', title: 'Section angle: drag to turn the part (the 3D view turns with it)' });
+    const compass1 = el('canvas', { style: 'position:absolute;left:50%;transform:translateX(-50%);bottom:' + (44 + 4) + 'px;width:600px;height:26px;cursor:ew-resize;touch-action:none;z-index:2;' +
+      '-webkit-mask-image:linear-gradient(to right,transparent 0,#000 15%,#000 85%,transparent 100%);mask-image:linear-gradient(to right,transparent 0,#000 15%,#000 85%,transparent 100%)', title: 'Section angle: drag to turn the part (the 3D view turns with it)' });
     // the band of heights shown from above: a slider at the right of the pane. In the radius/height view it slices
     // nothing; it is there to set where the view from above will look down from. Flipped, the slider turns over too
     // (its top is what is shown on top).
@@ -3281,6 +3319,8 @@
     // turned over about its own x axis when the y axis is inverted, which mirrors its angles, so the turn mirrors too
     // (the same section then faces the viewer either way).
     function yawOf(deg) { return (state.flip ? -deg - 90 : deg - 90) * Math.PI / 180; }
+    // Ctrl while orbiting: the step, in degrees (project settings)
+    const orbitStep = () => { const v = +state.orbitSnap; return isFinite(v) && v >= 0.5 ? Math.min(180, v) : 15; };
     function degOf(yw) { const a = yw * 180 / Math.PI; return state.flip ? -a - 90 : a + 90; }
     function fit() {
       if (topMode()) { fitTop(); return; }
@@ -3377,7 +3417,7 @@
       // edges of selected objects win over others nearby
       let best = null;
       const order = frontOrder(), front = new Set(order.filter(id => selectedAncestorOf(id) || [...state.sel].some(k => parseKey(k).node === id)));
-      for (const id of order) for (const e of edgesOf(id)) {
+      for (const id of order) if (canPick(id)) for (const e of edgesOf(id)) {
         const r = segDistPx(sx, sy, e.a, e.b), score = r.d - (front.has(id) ? 4 : 0);
         if (r.d < 6 && r.t > 0.05 && r.t < 0.95 && (!best || score < best.score)) best = { key: e.key, score };
       }
@@ -3430,7 +3470,7 @@
       // the axis (and the part's bottom), and other geometric objects' sections' corners
       targets.push({ y: 0, z: zBase(sc), dirs: [] });
       for (const id of leafOrder(sc)) {
-        if (sc.nodes[id].type !== 'geo' || movingKey(id + '|q|0')) continue;
+        if (sc.nodes[id].type !== 'geo' || sc.nodes[id].shape.some((_, i) => movingKey(id + '|q|' + i) || movingKey(id + '|qe|' + i))) continue;
         const gw = geoWorld(sc, id); if (!gw) continue;
         for (const L of sliceLoops(gw.V, gw.T, state.viewAngle * Math.PI / 180)) for (const q of L) targets.push({ y: Math.abs(q[0]), z: q[1], dirs: [] });
       }
@@ -3509,15 +3549,18 @@
       }
       return inside;
     }
+    const canPick = (id) => !nodeFlag(state.scene, id, 'locked');
     function frontOrder() {
-      const all = leafOrder(state.scene), sel = all.filter(id => selectedAncestorOf(id) || [...state.sel].some(k => parseKey(k).node === id));
+      const all = leafOrder(state.scene).filter(id => !nodeFlag(state.scene, id, 'hide2d')), sel = all.filter(id => selectedAncestorOf(id) || [...state.sel].some(k => parseKey(k).node === id));
       return all.filter(id => !sel.includes(id)).concat(sel);
     }
     function nodeAt(y, z) {
       const sc = state.scene, order = frontOrder(), th = viewTheta();
       for (let i = order.length - 1; i >= 0; i--) {
         const id = order[i], n = sc.nodes[id], xf = xfOf(sc, id);
+        if (!canPick(id)) continue;
         if (n.type === 'geo') { if (inLoops(MS * y, z, geoSection(id)) || inLoops(MS * y, z, geoProjection(id))) return id; continue; }
+        if (sliceView()) continue;
         if (pointInPoly(y, z, viewOutline(sc, id))) return id;
         if (xf.id && pointInPoly(y, z, sectionOutline(n, th))) return id;
         // anywhere in a thread's teeth (root to crest, along its length)
@@ -3693,7 +3736,20 @@
       offTag.style.left = (sx + 16 + w > W ? sx - w - 12 : sx + 16) + 'px'; offTag.style.top = (sy + 18) + 'px';
     }
     // a geometric object's section in the radius/height view: loops of (place along the section, height)
-    function geoSection(id) { const gw = geoWorld(state.scene, id); return gw ? sliceLoops(gw.V, gw.T, state.viewAngle * Math.PI / 180) : []; }
+    // A geometric object's corners (each at its bottom and its top) and its edges, seen square-on to the section's
+    // plane: (place along the plane, height), its first copy, keyed as from above
+    function geoSidePts(id) {
+      const n = state.scene.nodes[id], q = n.params, M = geoRot(q), hh = Math.abs(q.h) / 2, zc = Math.min(q.z, q.z + q.h) + hh;
+      const f = geoCopies(state.scene, id)[0].f, th = state.viewAngle * Math.PI / 180, c = Math.cos(th), s = Math.sin(th);
+      const at = (x, y, z) => { const w = f([q.cx + M[0][0] * x + M[0][1] * y + M[0][2] * z, q.cy + M[1][0] * x + M[1][1] * y + M[1][2] * z, zc + M[2][0] * x + M[2][1] * y + M[2][2] * z]); return [w[0] * c + w[1] * s, w[2]]; };
+      const pts = [], edges = [], N = n.shape.length;
+      for (const top of [false, true]) {
+        const zz = top ? hh : -hh, P = n.shape.map(p => at(p.x, p.y, zz));
+        P.forEach((v, i) => { pts.push({ i, top, key: id + '|q|' + i, along: v[0], z: v[1] }); edges.push({ i, top, key: id + '|qe|' + i, a: v, b: P[(i + 1) % N] }); });
+      }
+      return { pts, edges };
+    }
+    function geoSection(id) { const gw = geoWorld(state.scene, id); return gw ? sliceLoops(gw.V, gw.T, state.viewAngle * Math.PI / 180, sliceOff()) : []; }
     // its outline seen square-on to the section's plane (each copy's), wherever it is: (place along the plane, height)
     function geoProjection(id) {
       const gw = geoWorld(state.scene, id); if (!gw || !gw.per) return [];
@@ -4248,7 +4304,7 @@
       const sc = state.scene;
       for (let k = lastTop.length - 1; k >= 0; k--) {
         const id = lastTop[k].id, n = sc.nodes[id];
-        if (n.type !== 'geo' || monoHid(id) || geoTilted(n.params)) continue;
+        if (n.type !== 'geo' || monoHid(id) || geoTilted(n.params) || !canPick(id)) continue;
         const P = topPlace(sc, id); if (P.side) continue;
         const C = geoCorners(n, true).map(([x, y]) => P.w(x, y));
         for (let i = 0; i < C.length; i++) {
@@ -4261,8 +4317,8 @@
     }
     function topNodeAt(x, y) {
       // (what is selected first: so a selected object can be grabbed where others overlap it)
-      for (let i = lastTop.length - 1; i >= 0; i--) if (selectedAncestorOf(lastTop[i].id)) for (const s of lastTop[i].shapes) if (inPoly2(x, y, s.outer) && !(s.inner && inPoly2(x, y, s.inner))) return lastTop[i].id;
-      for (let i = lastTop.length - 1; i >= 0; i--) for (const s of lastTop[i].shapes) if (inPoly2(x, y, s.outer) && !(s.inner && inPoly2(x, y, s.inner))) return lastTop[i].id;
+      for (let i = lastTop.length - 1; i >= 0; i--) if (selectedAncestorOf(lastTop[i].id) && canPick(lastTop[i].id)) for (const s of lastTop[i].shapes) if (inPoly2(x, y, s.outer) && !(s.inner && inPoly2(x, y, s.inner))) return lastTop[i].id;
+      for (let i = lastTop.length - 1; i >= 0; i--) if (canPick(lastTop[i].id)) for (const s of lastTop[i].shapes) if (inPoly2(x, y, s.outer) && !(s.inner && inPoly2(x, y, s.inner))) return lastTop[i].id;
       return null;
     }
     function topItems() {
@@ -4391,7 +4447,7 @@
     function topHandles(all = false) {
       const sc = state.scene, out = [], th = state.viewAngle * Math.PI / 180, pad = 9 / view.s;
       for (const it of lastTop) {
-        if (!all && monoHid(it.id)) continue;      // (no handles on the monomorphic shape; still something to snap to)
+        if (!all && (monoHid(it.id) || !canPick(it.id))) continue;      // (no handles on the monomorphic shape or what is locked; still something to snap to)
         const n = sc.nodes[it.id], col = COLORS[n.type] || '#1f6feb', name = n.name || n.id, P = topPlace(sc, it.id), q = n.params || {};
         if (n.type === 'geo') {
           // its corners, its centre, and (selected) the middles of its edges, to add a corner
@@ -4802,9 +4858,6 @@
           const dd = loops.map(L => 'M' + L.map(p => toScreen(p[0], p[1]).map(v => v.toFixed(1)).join(' ')).join('L') + 'Z').join('');
           g.append(sv('path', { d: dd, fill: '#1c7ed60d', 'fill-rule': 'evenodd', stroke: '#1c7ed6', 'stroke-width': 1.2, 'stroke-dasharray': '5 3', 'stroke-linejoin': 'round', 'pointer-events': 'none' }));
         }
-        const note = sv('text', { x: AX_L + 8, y: 64, 'font-size': 11, fill: '#1c7ed6', 'pointer-events': 'none' });
-        note.textContent = 'dashed: the part ' + num(mm(Math.abs(off)), 3) + ' ' + UNIT_LABEL + ' off the axis (blue slicer)' + (loops ? loops.length ? '' : ' — nothing of the part there' : ' — waiting for the 3D model');
-        g.append(note);
       }
       if (off && monoOn()) {
         const loops = meshSection(state.viewAngle * Math.PI / 180, off);
@@ -4816,14 +4869,11 @@
         const note = sv('text', { x: AX_L + 8, y: 64, 'font-size': 11, fill: '#1c7ed6', 'pointer-events': 'none' });
         note.textContent = 'slice ' + num(mm(Math.abs(off)), 3) + ' ' + UNIT_LABEL + ' off the axis (blue slicer)' + (loops ? loops.length ? '' : ' — nothing of the part here' : ' — waiting for the 3D model');
         g.append(note);
-        for (const [k, tb] of threadBoxes) { tb.box.remove(); threadBoxes.delete(k); }
-        drawCursor();
-        zoomTag.textContent = (view.fit || fitScale) > 0 ? Math.round(view.s / (view.fit || fitScale) * 100) + '%' : '';
-        renderSelBox();
-        MS = MS0; return;
       }
+      // (there, of the objects only the geometric ones are drawn over it, to work on: they are cut where the slice is)
+      const cutOnly = !!(off && monoOn());
       // selected objects are drawn last (on top), so their points and edges can be picked over others
-      const order = frontOrder(), ext = { y0: Infinity, y1: -Infinity, z0: Infinity, z1: -Infinity };
+      const order = cutOnly ? frontOrder().filter(id => state.scene.nodes[id].type === 'geo') : frontOrder(), ext = { y0: Infinity, y1: -Infinity, z0: Infinity, z1: -Infinity };
       lastPolys = { 1: {}, '-1': {} };
       // monomorphic: everything not selected drawn as one grey shape, without handles
       for (const sideK of [-1, 1]) {
@@ -4859,7 +4909,7 @@
             const gq = state.scene.nodes[id].params, P = placeOf(state.scene, id);
             let s0 = Infinity, s1 = -Infinity;
             for (const L of loops.length ? loops : proj) for (const p of L) { s0 = Math.min(s0, p[0]); s1 = Math.max(s1, p[0]); }
-            if (!P.side && isFinite(s0) && selectedAncestorOf(id)) {
+            if (!P.side && isFinite(s0) && selectedAncestorOf(id) && canPick(id)) {
               // the rotation handle: beside its centre on the section's plane; turns it in the plane of the view
               const th = state.viewAngle * Math.PI / 180, [Cx, Cy] = P.w(gq.cx, gq.cy), al = Cx * Math.cos(th) + Cy * Math.sin(th), zc = Math.min(gq.z, gq.z + gq.h) + Math.abs(gq.h) / 2;
               const MSh = MS; MS = 1;
@@ -4872,7 +4922,7 @@
               g.append(sv('line', { x1: ex, y1: py, x2: ex + 13, y2: py, stroke: '#f08c00', 'stroke-width': 1, 'stroke-dasharray': '2 2', 'pointer-events': 'none' }));
               g.append(rk);
             }
-            if (!P.side && isFinite(s0)) {
+            if (!P.side && isFinite(s0) && canPick(id)) {
               const MSh = MS; MS = 1;
               for (const [which, zz] of [['bottom', Math.min(gq.z, gq.z + gq.h)], ['top', Math.max(gq.z, gq.z + gq.h)]]) {
                 const [x0, yy] = toScreen(s0, zz), [x1] = toScreen(s1, zz), hot = drag && drag.type === 'geoh' && drag.id === id && drag.which === which;
@@ -4881,6 +4931,28 @@
                 gl.__geoH = { id, which };
                 gl.append(sv('title', null, (state.scene.nodes[id].name || id) + ': ' + which + ' — drag up or down to change the height (Ctrl: onto a point\'s height)'));
                 g.append(gl);
+              }
+              MS = MSh;
+            }
+            // its corners and edges, seen square-on to the plane (each corner at its bottom and its top): corners to
+            // pick and drag along the plane, edges to pick (right-click: add points on them)
+            if (!P.side && selected && canPick(id)) {
+              const GP = geoSidePts(id), MSh = MS; MS = 1;
+              for (const E of GP.edges) {
+                const [x1, y1] = toScreen(E.a[0], E.a[1]), [x2, y2] = toScreen(E.b[0], E.b[1]), on = state.sel.has(E.key);
+                if (on) g.append(sv('line', { x1, y1, x2, y2, stroke: '#e03131', 'stroke-width': 3.5, 'stroke-linecap': 'round', 'pointer-events': 'none' }));
+                const hl = sv('line', { x1, y1, x2, y2, stroke: 'transparent', 'stroke-width': 8, style: 'cursor:pointer' });
+                hl.__key = E.key; hl.__side = 1;
+                hl.append(sv('title', null, (state.scene.nodes[id].name || id) + ': edge ' + (E.i + 1) + ' (right-click to add points on it)'));
+                g.append(hl);
+              }
+              const qn = state.scene.nodes[id];
+              for (const C of GP.pts) {
+                const [x, y] = toScreen(C.along, C.z), on = state.sel.has(C.key), bv = qn.shape[C.i] && qn.shape[C.i].bevel > 0;
+                const c = sv('circle', { cx: x.toFixed(1), cy: y.toFixed(1), r: on ? 5.5 : 4, fill: on ? '#e03131' : col, stroke: bv ? '#fab005' : '#fff', 'stroke-width': bv ? 2.2 : 1.4, style: 'cursor:move' });
+                c.__key = C.key; c.__side = C.along < 0 ? -1 : 1; c.__gpt = { along: C.along, z: C.z };
+                c.append(sv('title', null, (qn.name || id) + ': corner ' + (C.i + 1) + ' (' + (C.top ? 'top' : 'bottom') + ')'));
+                g.append(c);
               }
               MS = MSh;
             }
@@ -4943,7 +5015,8 @@
         }
       }
       // radial cloners in the selection: the copies' axis, with a handle for its distance from the main axis
-      for (const id of MS > 0 ? Object.keys(state.scene.nodes) : []) {
+      for (const id of MS > 0 && !cutOnly ? Object.keys(state.scene.nodes) : []) {
+        if (!canPick(id) || nodeFlag(state.scene, id, 'hide2d')) continue;
         const hp = clonerHandle(id); if (!hp) continue;
         const [x1, y1] = toScreen(hp.a.y, hp.a.z), [x2, y2] = toScreen(hp.b.y, hp.b.z), [hx, hy] = toScreen(hp.at.y, hp.at.z);
         const hot = drag && drag.type === 'cloner' && drag.id === id;
@@ -4967,7 +5040,7 @@
       }
       // handles that would cover each other are fanned out around their common point (with a thin leader), so each can be grabbed
       const hds = [];
-      for (const id of order) if (!monoHid(id)) for (const hd of handlesOf(id)) { const [x, y] = toScreen(hd.y, hd.z); hds.push({ id, hd, x, y, dx: 0, dy: 0 }); }
+      for (const id of order) if (!monoHid(id) && canPick(id)) for (const hd of handlesOf(id)) { const [x, y] = toScreen(hd.y, hd.z); hds.push({ id, hd, x, y, dx: 0, dy: 0 }); }
       const grid2 = new Map(), cell = (x, y) => Math.floor(x / 6) + ',' + Math.floor(y / 6);
       hds.forEach((h, i) => { const c = cell(h.x, h.y); if (!grid2.has(c)) grid2.set(c, []); grid2.get(c).push(i); });
       const seen = new Set();
@@ -5005,7 +5078,7 @@
       // (drag across to change the addendum, the module or the dedendum)
       for (const id of order) {
         const n = state.scene.nodes[id];
-        if (n.type !== 'cog' || monoHid(id)) continue;
+        if (n.type !== 'cog' || monoHid(id) || !canPick(id)) continue;
         const xf = xfOf(state.scene, id);
         for (const ch of cogHandles(n)) {
           const at = xf.fwd({ y: ch.r, z: ch.z }), [x, y] = toScreen(at.y, at.z), hot = drag && drag.type === 'cog' && drag.id === id && drag.what === ch.what;
@@ -5077,7 +5150,8 @@
       drawCursor();
       drawHover();
       zoomTag.textContent = (view.fit || fitScale) > 0 ? Math.round(view.s / (view.fit || fitScale) * 100) + '%' : '';
-      syncThreadBoxes();
+      if (cutOnly) for (const [k, tb] of threadBoxes) { tb.box.remove(); threadBoxes.delete(k); }
+      else syncThreadBoxes();
       renderSelBox();
       MS = MS0;
     }
@@ -5373,7 +5447,7 @@
     }
     function syncThreadBoxes() {
       const seen = new Set(), { w, h } = size();
-      if (state.scene && state.threadCallouts && !topMode()) for (const id of leafOrder(state.scene)) {
+      if (state.scene && state.threadCallouts && !topMode()) for (const id of frontOrder().filter(canPick)) {
         const n = state.scene.nodes[id];
         (n.runs || []).forEach((r, ri) => {
           const key = id + '|' + ri;
@@ -5593,9 +5667,15 @@
         svg.setPointerCapture(e.pointerId);
         drag = { type: 'bandline', which: w }; return;
       }
-      if (sliceView()) {       // a slice off the axis is to look at: any drag moves the view
-        const [px0, py0] = local(e);
-        svg.setPointerCapture(e.pointerId); drag = { type: 'pan', sx: px0, sy: py0, cy: view.cy, cz: view.cz }; return;
+      if (sliceView()) {
+        // a slice off the axis is to look at, but for geometric objects (theirs is cut where it is): any other drag
+        // moves the view
+        const [px0, py0] = local(e), r0 = toWorld(px0, py0), sd = e.target.__side || (r0[0] < 0 ? -1 : 1), t = e.target;
+        const tk = t.__key ? parseKey(t.__key) : null, onGeo = (tk && (tk.kind === 'q' || tk.kind === 'qe')) || t.__geoH || t.__geoRot;
+        MS = sd; const hit = onGeo ? null : nodeAt(sd * r0[0], r0[1]); MS = 1;
+        if (!onGeo && !(hit && state.scene.nodes[hit].type === 'geo')) {
+          svg.setPointerCapture(e.pointerId); drag = { type: 'pan', sx: px0, sy: py0, cy: view.cy, cz: view.cz }; return;
+        }
       }
       const [sx, sy] = local(e), raw = toWorld(sx, sy), side = e.target.__side || (raw[0] < 0 ? -1 : 1);
       MS = dragSide = GEO_SIDE = side;
@@ -5671,6 +5751,13 @@
           primary = Math.hypot(a.y - wy, a.z - wz) <= Math.hypot(b.y - wy, b.z - wz) ? h.node + '|p|' + h.i : h.node + '|p|' + ((h.i + 1) % n.pts.length);
         }
         drag = { type: 'points', from: [wy, wz], snap: snapScene, moved: false, toggleOff, key, info: prepareSnap(snapScene, primary, moving) };
+        // a geometric object's corner leads with itself; its edge, with the end nearest to the pointer
+        if (!drag.info.P0 && e.target.__gpt) drag.info.P0 = { y: side * e.target.__gpt.along, z: e.target.__gpt.z };
+        else if (!drag.info.P0 && parseKey(key).kind === 'qe' && e.target.__key) {
+          const hq = parseKey(key), E = geoSidePts(hq.node).edges.filter(x => x.i === hq.i).map(x => [x.a, x.b]).flat();
+          let bp = null; for (const v of E) if (!bp || Math.hypot(side * v[0] - wy, v[1] - wz) < Math.hypot(side * bp[0] - wy, bp[1] - wz)) bp = v;
+          if (bp) drag.info.P0 = { y: side * bp[0], z: bp[1] };
+        }
       } else {
         const hit = nodeAt(wy, wz);
         if (hit && selectedAncestorOf(hit)) {
@@ -5733,7 +5820,7 @@
           const [ox, oy] = toScreen(0, 0), sNow = Math.atan2(oy - sy, sx - ox) * 180 / Math.PI;
           drag.acc += ((sNow - drag.sl + 540) % 360) - 180; drag.sl = sNow;
           let deg = drag.a0 - FZ() * drag.acc;
-          if (e.ctrlKey || e.metaKey) deg = Math.round(deg / 15) * 15;
+          if (e.ctrlKey || e.metaKey) deg = Math.round(deg / orbitStep()) * orbitStep();
           setViewAngle(deg, false); drawSection();
         }
         return;
@@ -5895,9 +5982,9 @@
           for (const s of [1, -1]) {
             MS = s;
             const lo = s > 0 ? y0 : -y1, hi = s > 0 ? y1 : -y0;
-            for (const id of leafOrder(state.scene)) for (const hd of handlesOf(id)) if (hd.y >= lo && hd.y <= hi && hd.z >= z0 && hd.z <= z1) state.sel.add(hd.key);
+            for (const id of frontOrder().filter(canPick)) for (const hd of handlesOf(id)) if (hd.y >= lo && hd.y <= hi && hd.z >= z0 && hd.z <= z1) state.sel.add(hd.key);
             // (a geometric object has no points here: the box takes the object, where it touches its section)
-            if (s > 0) for (const id of leafOrder(state.scene)) {
+            if (s > 0) for (const id of frontOrder().filter(canPick)) {
               if (state.scene.nodes[id].type !== 'geo') continue;
               const loops = geoSection(id).concat(geoProjection(id));
               if (loops.some(L => L.some(p => p[0] >= y0 && p[0] <= y1 && p[1] >= z0 && p[1] <= z1)) || inLoops((y0 + y1) / 2, (z0 + z1) / 2, loops)) {
@@ -6199,6 +6286,28 @@
         t.addEventListener('dblclick', (e) => e.stopPropagation());
         return t;
       };
+      // the switches on the right of each row: drawn in the cross-section views, drawn in 3D, can be picked in the views
+      // (a switch turned off on a group or symmetry holds for everything inside; inside, it shows faded)
+      const COLS = [['hide2d', 'eye', 'eyeoff', 'Shown in the cross-section views (radius/height and overhead)'], ['hide3d', 'eye', 'eyeoff', 'Shown in the 3D view (exports always have it)'], ['locked', 'pick', 'pickoff', 'Can be picked and changed in the views (the list still selects it)']];
+      const flagCells = (id) => {
+        const n = sc.nodes[id], pr = findParent(sc, id), par = pr && pr.parent != null ? pr.parent : null;
+        return el('span', { style: 'position:absolute;right:2px;top:0;bottom:0;display:flex;align-items:center;gap:2px;background:inherit' },
+          ...COLS.map(([k, on, off, tip]) => {
+            const own = !!n[k], inh = !own && par != null && nodeFlag(sc, par, k), offNow = own || inh;
+            const b = el('span', { style: 'display:inline-flex;width:18px;justify-content:center;cursor:pointer;color:' + (offNow ? '#adb5bd' : '#495057') + ';opacity:' + (inh ? 0.5 : 1),
+              title: tip + (own ? ' — off (click to turn on)' : inh ? ' — off, from what holds it' : ' — on (click to turn off)'), 'data-flag': k }, icon(offNow ? off : on, 13));
+            b.addEventListener('click', (e) => {
+              e.stopPropagation();
+              pushUndo();
+              if (n[k]) delete n[k]; else n[k] = true;
+              if (k === 'locked' && n[k]) state.sel = new Set([...state.sel].filter(x => !subtreeIds(sc, id).has(parseKey(x).node)));
+              state.edited = true;
+              if (k === 'hide3d') recalc(); else renderAll();
+            });
+            b.addEventListener('dblclick', (e) => e.stopPropagation());
+            return b;
+          }));
+      };
       const nodeRow = (id, depth, label, drop, trail = []) => {
         const n = sc.nodes[id], selected = state.selNodes.has(id);
         // dropping onto a group adds to it; onto a boolean fills its first empty slot; onto anything else inserts before it
@@ -6206,11 +6315,11 @@
         if (n.type === 'group' || n.type === 'cloner') target = { parent: id, slot: null };
         else if (n.type === 'boolean') { const s = n.children.indexOf(null); target = s >= 0 ? { parent: id, slot: s } : drop; }
         mkRow({ id, drop: target, title: 'Drag onto a group, a boolean slot or the scene to move it',
-          style: 'position:relative;padding:1px 4px;margin-left:' + depth * 14 + 'px;border-radius:4px;cursor:pointer;user-select:none;transition:background-color .15s,outline-color .15s;' + (selected ? 'background:#ddf4ff;outline:1px solid #54aeff' : folded.has(id) && holdsSel(id) ? 'background:#eef8ff;outline:1px dashed #a5d8ff' : ''),
+          style: 'position:relative;padding:1px 64px 1px 4px;margin-left:' + depth * 14 + 'px;border-radius:4px;cursor:pointer;user-select:none;background-color:#fff;transition:background-color .15s,outline-color .15s;' + (selected ? 'background:#ddf4ff;outline:1px solid #54aeff' : folded.has(id) && holdsSel(id) ? 'background:#eef8ff;outline:1px dashed #a5d8ff' : ''),
           kids: [treeLines(depth, trail), twisty(n),
             el('span', { style: 'display:inline-flex;vertical-align:-2px;margin-right:4px;color:' + (COLORS[n.type] || '#555') }, icon(nodeIcon(n), 14)), (label ? label + ' ' : '') + (n.name || id),
             n.type === 'boolean' ? el('span', { style: 'color:#888' }, ' (' + (n.op === 'difference' ? 'A − B' : n.op) + ')') : n.type === 'group' ? el('span', { style: 'color:#888' }, ' (group, ' + n.children.length + ')')
-              : n.type === 'cloner' ? el('span', { style: 'color:#888' }, ' (×' + n.params.count + ', ' + n.params.orient + (n.params.keepOrient ? ', fixed' : '') + ')') : null] });
+              : n.type === 'cloner' ? el('span', { style: 'color:#888' }, ' (×' + n.params.count + ', ' + n.params.orient + (n.params.keepOrient ? ', fixed' : '') + ')') : null, flagCells(id)] });
         if (folded.has(id)) return;
         if (n.type === 'boolean') n.children.forEach((c, s) => {
           const tr = [...trail, s < n.children.length - 1];
@@ -6223,7 +6332,9 @@
           if (!n.children.length) mkRow({ drop: { parent: id, slot: null }, style: 'position:relative;padding:1px 4px;margin-left:' + (depth + 1) * 14 + 'px;color:#999;font-style:italic;border-radius:4px', kids: [treeLines(depth + 1, [...trail, false]), 'empty — drop objects here'] });
         }
       };
-      mkRow({ drop: { parent: null, slot: null }, style: 'color:#666;padding:1px 4px;border-radius:4px', kids: ['Scene'], title: 'Drop here to move to the top level (hold Ctrl to copy)' });
+      mkRow({ drop: { parent: null, slot: null }, style: 'position:relative;color:#666;padding:1px 64px 1px 4px;border-radius:4px', title: 'Drop here to move to the top level (hold Ctrl to copy)',
+        kids: ['Scene', el('span', { style: 'position:absolute;right:2px;top:0;bottom:0;display:flex;align-items:center;gap:2px;font:700 9px/1 sans-serif;color:#868e96' },
+          ...[['2D', COLS[0][3]], ['3D', COLS[1][3]], ['pick', COLS[2][3]]].map(([t, tip]) => el('span', { style: 'display:inline-flex;width:18px;justify-content:center', title: tip }, t)))] });
       sc.root.forEach((id, i) => nodeRow(id, 1, null, { parent: null, slot: i }, [i < sc.root.length - 1]));
       return el('div', { style: BOX },
         el('div', { style: H }, 'Objects'),
@@ -7403,7 +7514,7 @@
         cutDrag = { k: hk, x0: e.clientX, y0: e.clientY, v0: hk.length > 1 ? loOf(hk[0]) : hiOf(hk) };
         canvas.setPointerCapture(e.pointerId); canvas.style.cursor = 'move'; draw3d(); return;
       }
-      orbit = { x: e.clientX, y: e.clientY, x0: e.clientX, yaw0: yaw, panBtn: e.button !== 0 };
+      orbit = { x: e.clientX, y: e.clientY, x0: e.clientX, yaw0: yaw, pitch: pitchA, panBtn: e.button !== 0 };
       canvas.setPointerCapture(e.pointerId); canvas.style.cursor = 'grabbing';
     });
     canvas.addEventListener('pointermove', (e) => {
@@ -7437,7 +7548,7 @@
         return;
       }
       const dx = e.clientX - orbit.x, dy = e.clientY - orbit.y;
-      if (orbit.panBtn || e.ctrlKey || e.metaKey) {
+      if (orbit.panBtn) {
         if (camBasis) {
           const k = dist * 2 * Math.tan(0.35) / Math.max(1, canvas.clientHeight), { x, y } = camBasis;
           for (let c = 0; c < 3; c++) pan[c] += (-dx * x[c] + dy * y[c]) * k;
@@ -7446,8 +7557,12 @@
       } else {
         const dead = canvas.clientWidth * 0.05, tx = e.clientX - orbit.x0;
         const ny = orbit.yaw0 - Math.sign(tx) * Math.max(0, Math.abs(tx) - dead) * 0.008;
-        pitchA = Math.max(-1.5, Math.min(1.5, pitchA + dy * 0.008));
-        if (ny !== yaw) { setViewAngle(degOf(ny), true); orbit.x = e.clientX; orbit.y = e.clientY; return; }
+        // Ctrl: the turn and the tilt in steps (the unsnapped tilt kept underneath)
+        const snapO = e.ctrlKey || e.metaKey, st = orbitStep() * Math.PI / 180;
+        orbit.pitch = Math.max(-1.5, Math.min(1.5, orbit.pitch + dy * 0.008));
+        pitchA = snapO ? Math.max(-1.5, Math.min(1.5, Math.round(orbit.pitch / st) * st)) : orbit.pitch;
+        const nd = snapO ? Math.round(degOf(ny) / orbitStep()) * orbitStep() : degOf(ny);
+        if (Math.abs(nd - degOf(yaw)) > 1e-9) { setViewAngle(nd, true); orbit.x = e.clientX; orbit.y = e.clientY; return; }
       }
       orbit.x = e.clientX; orbit.y = e.clientY; draw3d();
     });
@@ -7525,11 +7640,13 @@
       const dpr = window.devicePixelRatio || 1, A = state.viewAngle;
       // 1-D: a scrolling heading tape
       {
-        const W1 = 300, H1 = 26, c = compass1, x = c.getContext('2d');
+        // (twice the old tape, as room allows; it fades out toward both ends)
+        const W1 = Math.max(200, Math.min(600, Math.round((left.clientWidth || 700) - 100))), H1 = 26, c = compass1, x = c.getContext('2d');
+        if (c.style.width !== W1 + 'px') c.style.width = W1 + 'px';
         if (c.width !== W1 * dpr || c.height !== H1 * dpr) { c.width = W1 * dpr; c.height = H1 * dpr; }
         x.setTransform(dpr, 0, 0, dpr, 0, 0); x.clearRect(0, 0, W1, H1);
         x.fillStyle = 'rgba(255,255,255,.94)'; x.fillRect(0, 0, W1, H1);
-        x.strokeStyle = '#ced4da'; x.strokeRect(0.5, 0.5, W1 - 1, H1 - 1);
+        x.strokeStyle = '#ced4da'; x.beginPath(); x.moveTo(0, 0.5); x.lineTo(W1, 0.5); x.moveTo(0, H1 - 0.5); x.lineTo(W1, H1 - 0.5); x.stroke();
         const PXD = 2.2, cx = W1 / 2;
         x.font = '10px sans-serif'; x.textAlign = 'center'; x.fillStyle = '#495057';
         for (let d = Math.floor((A - cx / PXD) / 5) * 5; d <= A + cx / PXD; d += 5) {
@@ -7542,16 +7659,21 @@
       }
     }
     {
-      let d1 = null;
-      compass1.addEventListener('pointerdown', (e) => { d1 = e.clientX; compass1.setPointerCapture(e.pointerId); e.stopPropagation(); });
-      compass1.addEventListener('pointermove', (e) => { if (d1 == null) return; setViewAngle(state.viewAngle - (e.clientX - d1) / 2.2); d1 = e.clientX; });
+      // (the angle follows the pointer unsnapped underneath, so Ctrl steps without losing the drag)
+      let d1 = null, raw = 0;
+      compass1.addEventListener('pointerdown', (e) => { d1 = e.clientX; raw = state.viewAngle; compass1.setPointerCapture(e.pointerId); e.stopPropagation(); });
+      compass1.addEventListener('pointermove', (e) => {
+        if (d1 == null) return;
+        raw -= (e.clientX - d1) / 2.2; d1 = e.clientX;
+        setViewAngle(e.ctrlKey || e.metaKey ? Math.round(raw / orbitStep()) * orbitStep() : raw);
+      });
       compass1.addEventListener('pointerup', () => { d1 = null; });
-      compass1.addEventListener('dblclick', (e) => { e.stopPropagation(); setViewAngle(Math.round(state.viewAngle / 15) * 15); });
+      compass1.addEventListener('dblclick', (e) => { e.stopPropagation(); setViewAngle(Math.round(state.viewAngle / orbitStep()) * orbitStep()); });
     }
     drawCompasses();
     flipBox.addEventListener('change', () => setFlip(flipBox.checked));
 
-    const ro = new ResizeObserver(() => { if (root.isConnected) { measure(); if (state.scene && !view) fit(); drawSection(); draw3d(); } });
+    const ro = new ResizeObserver(() => { if (root.isConnected) { measure(); if (state.scene && !view) fit(); drawSection(); draw3d(); drawCompasses(); } });
     ro.observe(left); ro.observe(view3d);
     // property columns fold to one when the side bar gets narrow
     const roSide = new ResizeObserver(() => { const c = rightBar.clientWidth && rightBar.clientWidth < 560 ? 1 : 2; if (c !== pgridMaxCols && root.isConnected) renderSide(); else fitHeads(); });

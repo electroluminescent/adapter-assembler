@@ -30,6 +30,7 @@ A browser tool for designing threaded adapters, rings and gears, and exporting t
   * Corners, edges and the whole shape dragged; corners added on edges, bevelled and deleted.
   * Placed by its centre, which stays the centroid of its shape.
   * In the radius/height view: its outline dashed, its section where the plane cuts it solid.
+    * Its corners and edges can be picked there too: corners dragged, points added on edges.
   * Turned about any of the three axes, with snapping.
   * Ctrl snaps its centre and corners to points, the grid, the axis and the slicer lines and heights.
 
@@ -73,8 +74,9 @@ A browser tool for designing threaded adapters, rings and gears, and exporting t
 
   * The 2D height band and the 3D height slicer act as one.
   * The cross-section is cut where the blue slicer is, on or off the axis.
-    * Monomorphic on: the part's section there, grey, to look at.
+    * Monomorphic on: the part's section there, grey, to look at; geometric objects stay editable.
     * Monomorphic off: the objects stay editable, with that section dashed under them.
+    * Geometric objects are cut where the blue slicer is.
     * The blue slicer keeps its place when the part changes size.
 
 - #### **Monomorphic drawing**
@@ -109,6 +111,8 @@ A browser tool for designing threaded adapters, rings and gears, and exporting t
 - #### **Objects list**
 
   * A foldable tree with drag-and-drop regrouping.
+  * Switches on each row: shown in 2D, shown in 3D, can be picked; inherited by what a group holds.
+    * Exports always include objects hidden in 3D.
 
 - #### **Undo and redo**
 
@@ -132,6 +136,8 @@ A browser tool for designing threaded adapters, rings and gears, and exporting t
 - #### **Navigation**
 
   * Orbit, pan and zoom; the section angle turns with the view.
+  * Ctrl while orbiting (3D view, compass, section knob) snaps to a step set in the project settings (15° by default).
+  * The section compass fades out toward its ends.
   * Fit buttons for each view, and Frame all for both.
 
 ## Output and storage
