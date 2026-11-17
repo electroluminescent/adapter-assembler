@@ -31,6 +31,8 @@ A browser tool for designing threaded adapters, rings and gears, and exporting t
   * Placed by its centre, which stays the centroid of its shape.
   * In the radius/height view: its outline dashed, its section where the plane cuts it solid.
     * Its corners and edges can be picked there too: corners dragged, points added on edges.
+    * A corner's top or bottom dragged across makes it lean (askew); up or down moves that end's height.
+    * Corners and edges lying over each other there move together; a double click on an edge adds a corner on each edge it covers, so both sides stay alike.
   * Turned about any of the three axes, with snapping.
   * Ctrl snaps its centre and corners to points, the grid, the axis and the slicer lines and heights.
 
