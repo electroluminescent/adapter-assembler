@@ -31,6 +31,7 @@ A browser tool for designing threaded adapters, rings and gears, and exporting t
   * Placed by its centre, which stays the centroid of its shape.
   * In the radius/height view: its outline dashed, its section where the plane cuts it solid.
   * Turned about any of the three axes, with snapping.
+  * Ctrl snaps its centre and corners to points, the grid, the axis and the slicer lines and heights.
 
 - #### **Outlines**
 
@@ -74,6 +75,7 @@ A browser tool for designing threaded adapters, rings and gears, and exporting t
   * The cross-section is cut where the blue slicer is, on or off the axis.
     * Monomorphic on: the part's section there, grey, to look at.
     * Monomorphic off: the objects stay editable, with that section dashed under them.
+    * The blue slicer keeps its place when the part changes size.
 
 - #### **Monomorphic drawing**
 

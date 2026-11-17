@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.26.2. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.26.3. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = "3.26.2";
+  const APP_VERSION = "3.26.3";
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -2920,6 +2920,22 @@
     };
     const tbF = (t) => (state.flip ? 1 - t : t);     // height in the scene's range ↔ place up the slider
     // Ctrl: a height of the band goes to the nearest point's height, when one is within reach
+    // a height (Ctrl): onto a point's height, a slicer's (the band's lines), another geometric object's top or bottom,
+    // or else the grid (heights from the part's bottom)
+    function snapHeight(z, self) {
+      const reach = snapThr(), c = [];
+      for (const id of leafOrder(state.scene)) {
+        const n = state.scene.nodes[id];
+        if (n.type === 'geo') { if (id !== self) c.push(n.params.z, n.params.z + n.params.h); continue; }
+        for (const hd of handlesOf(id)) c.push(hd.z);
+      }
+      { const bz = bandZs(); if (bz) c.push(...bz); }
+      let best = null;
+      for (const v of c) { const d = Math.abs(v - z); if (d < reach && (best == null || d < Math.abs(best - z))) best = v; }
+      if (best != null) return best;
+      const st = gridStep() / 2, base = zBase(state.scene);
+      return base + Math.round((z - base) / st) * st;
+    }
     function snapBandZ(z, reach) {
       let best = null;
       for (const id of leafOrder(state.scene)) for (const hd of handlesOf(id)) { const dd = Math.abs(hd.z - z); if (dd < reach && (!best || dd < best.d)) best = { z: hd.z, d: dd }; }
@@ -3411,6 +3427,13 @@
           targets.push({ y: m.y, z: m.z, dirs: unitDirs(m, [e.a]), mid: true });
         }
       }
+      // the axis (and the part's bottom), and other geometric objects' sections' corners
+      targets.push({ y: 0, z: zBase(sc), dirs: [] });
+      for (const id of leafOrder(sc)) {
+        if (sc.nodes[id].type !== 'geo' || movingKey(id + '|q|0')) continue;
+        const gw = geoWorld(sc, id); if (!gw) continue;
+        for (const L of sliceLoops(gw.V, gw.T, state.viewAngle * Math.PI / 180)) for (const q of L) targets.push({ y: Math.abs(q[0]), z: q[1], dirs: [] });
+      }
       return { P0: prim ? { y: prim.y, z: prim.z } : null, tangents: prim ? unitDirs(prim, neighboursOf(sc, primaryKey)) : [], targets, base: zBase(sc) };
     }
     const sameDir = (a, b) => Math.abs(a[0] * b[1] - a[1] * b[0]) < 1e-6;
@@ -3432,7 +3455,9 @@
         for (const d of dirs) lines.push({ p: T, d });
       }
       // the heights the view from above shows (the band's lines)
-      { const bz = LINK() ? bandZs() : null; if (bz) for (const z of bz) lines.push({ p: { y: 0, z }, d: [1, 0] }); }
+      { const bz = bandZs(); if (bz) for (const z of bz) lines.push({ p: { y: 0, z }, d: [1, 0] }); }
+      // and the axis
+      lines.push({ p: { y: 0, z: info.base || 0 }, d: [0, 1] });
       // the grid: the nearest vertical and horizontal grid lines (heights measured from the lowest point)
       {
         const st = gridStep(), base = info.base || 0;
@@ -4527,7 +4552,10 @@
           for (const m of [1, -1]) pts.push({ p: P.w((a.z + b.z) / 2, m * (a.y + b.y) / 2), mid: true });
         }
       }
-      return { pts, circles };
+      // the slicer lines (across the view, in its turned frame): the section's line through the axis, and the blue
+      // slicer's line when it is linked and off the axis
+      const levels = [0]; { const o = state.linkSlicers ? sliceOff() : 0; if (o) levels.push(o); }
+      return { pts, circles, levels };
     }
     const snapThr = () => 10 / view.s;
     // a length along a ray from C (direction u) near r: the best snap, or null
@@ -4549,8 +4577,9 @@
       }
       return best;
     }
-    // a point near p: the best snap { p, mark, lines }, or null
-    function snapPoint2(p, T) {
+    // a point near p: the best snap { p, mark, lines }, or null (grid: with nothing near, across and up each onto the
+    // grid, in the view's own (turned) frame, as it is drawn)
+    function snapPoint2(p, T, grid) {
       const thr = snapThr();
       let best = null;
       for (const t of T.pts) { const d = Math.hypot(t.p[0] - p[0], t.p[1] - p[1]); if (d < thr && (!best || d < best.d)) best = { d, p: t.p }; }
@@ -4565,11 +4594,13 @@
         if (Math.abs(ft[0] - fp[0]) < thr && (!bx || Math.abs(ft[0] - fp[0]) < Math.abs(bx[0] - fp[0]))) bx = ft;
         if (Math.abs(ft[1] - fp[1]) < thr && (!by || Math.abs(ft[1] - fp[1]) < Math.abs(by[1] - fp[1]))) by = ft;
       }
-      if (!bx && !by) return null;
-      const out = [bx ? bx[0] : fp[0], by ? by[1] : fp[1]], lines = [];
+      for (const b of T.levels || []) if (Math.abs(b - fp[1]) < thr && (!by || Math.abs(b - fp[1]) < Math.abs(by[1] - fp[1]))) by = [fp[0], b];
+      if (!bx && !by && !grid) return null;
+      const g = (v) => grid ? Math.round(v / grid) * grid : v;
+      const out = [bx ? bx[0] : g(fp[0]), by ? by[1] : g(fp[1])], lines = [];
       if (bx) lines.push([Wd(bx), Wd(out)]);
       if (by) lines.push([Wd(by), Wd(out)]);
-      return { p: Wd(out), lines };
+      return { p: Wd(out), lines, mark: !bx && !by ? Wd(out) : undefined };
     }
     // drag a handle from above to (X, Y)
     function dragTopHandle(X, Y, snap, lock) {
@@ -4602,7 +4633,14 @@
         const W0 = [h.x, h.y];
         let Wt = [W0[0] + X - drag.from[0], W0[1] + Y - drag.from[1]];
         if (lock) { if (Math.abs(Wt[0] - W0[0]) > Math.abs(Wt[1] - W0[1])) Wt[1] = W0[1]; else Wt[0] = W0[0]; }
-        if (snap) { const s = snapPoint2(Wt, drag.targets); if (s) { Wt = s.p; drag.snapShow = { mark: s.mark, lines: s.lines }; } }
+        if (snap) {
+          // onto points, lines level or upright with them (the axis among them), or the grid; Shift keeps the lock
+          const s = snapPoint2(Wt, drag.targets, gridStep() / 2);
+          if (s) {
+            if (lock) { if (Wt[1] === W0[1]) Wt = [s.p[0], W0[1]]; else Wt = [W0[0], s.p[1]]; } else Wt = s.p;
+            drag.snapShow = { mark: s.mark, lines: s.lines };
+          }
+        }
         let dl = P.inv(Wt[0] - W0[0], Wt[1] - W0[1]);
         if (h.kind === 'gcen') { n.params.cx += dl[0]; n.params.cy += dl[1]; }
         else {
@@ -4805,7 +4843,15 @@
           if (monoHid(id)) { if (dG) (role === 'negative' ? monoNeg : monoPos).push(dG); continue; }
           if (MS < 0) continue;
           // all of it, seen square-on to the plane, dashed (and a faint fill, to pick it by); where the plane cuts it, solid
-          if (dP) g.append(sv('path', { d: dP, fill: col + '0a', 'fill-rule': 'nonzero', stroke: role === 'negative' ? '#e03131' : col, 'stroke-width': selected ? 1.8 : 1, 'stroke-dasharray': '5 3', 'stroke-linejoin': 'round', opacity: 0.8, 'pointer-events': 'none' }));
+          // (the dashed lines stop where the section is: masked out by it, a little wider than its own line)
+          let mask = null;
+          if (dP && dG) {
+            const mid = 'aa-gm-' + String(id).replace(/[^\w-]/g, '_'), mk = sv('mask', { id: mid, maskUnits: 'userSpaceOnUse', x: -1e5, y: -1e5, width: 2e5, height: 2e5 });
+            mk.append(sv('rect', { x: -1e5, y: -1e5, width: 2e5, height: 2e5, fill: '#fff' }));
+            mk.append(sv('path', { d: dG, fill: '#000', 'fill-rule': 'evenodd', stroke: '#000', 'stroke-width': selected ? 5 : 4, 'stroke-linejoin': 'round' }));
+            g.append(mk); mask = 'url(#' + mid + ')';
+          }
+          if (dP) g.append(sv('path', { ...(mask ? { mask } : {}), d: dP, fill: col + '0a', 'fill-rule': 'nonzero', stroke: role === 'negative' ? '#e03131' : col, 'stroke-width': selected ? 1.8 : 1, 'stroke-dasharray': '5 3', 'stroke-linejoin': 'round', opacity: 0.8, 'pointer-events': 'none' }));
           if (dG) g.append(sv('path', { d: dG, fill: role === 'negative' ? 'url(#aa-hatch)' : col + (role === 'intersect' ? '18' : '26'), 'fill-rule': 'evenodd',
             stroke: role === 'negative' ? '#e03131' : col, 'stroke-width': selected ? 2.8 : 1.4, 'stroke-dasharray': role === 'negative' ? '6 3' : 'none', 'stroke-linejoin': 'round' }));
           {
@@ -5632,8 +5678,13 @@
           const snapScene = clone(state.scene), leaves = leavesUnder(snapScene, topSelected(snapScene));
           let prim = null, pd = Infinity;
           for (const hd of handlesOf(hit, snapScene)) { const d = Math.hypot(hd.y - wy, hd.z - wz); if (d < pd) { pd = d; prim = hd.key; } }
-          drag = { type: 'nodes', leaves: [...leaves], hit, add, from: [wy, wz], snap: snapScene, moved: false,
-            info: prepareSnap(snapScene, prim, k => leaves.has(parseKey(k).node)) };
+          const info = prepareSnap(snapScene, prim, k => leaves.has(parseKey(k).node));
+          if (!info.P0 && snapScene.nodes[hit].type === 'geo') {
+            // a geometric object leads with its centre (on the section's plane)
+            const gq = snapScene.nodes[hit].params, th = state.viewAngle * Math.PI / 180, [Cx, Cy] = placeOf(snapScene, hit).w(gq.cx, gq.cy);
+            info.P0 = { y: side * (Cx * Math.cos(th) + Cy * Math.sin(th)), z: Math.min(gq.z, gq.z + gq.h) + Math.abs(gq.h) / 2 };
+          }
+          drag = { type: 'nodes', leaves: [...leaves], hit, add, from: [wy, wz], snap: snapScene, moved: false, info };
         } else drag = { type: 'box', sx, sy, cx: sx, cy: sy, hit, add, moved: false };
       }
       drawSection();
@@ -5721,7 +5772,7 @@
         if (!drag.moved) { pushSnap(drag.snap); drag.moved = true; }
         state.scene = clone(drag.snap);
         const q0 = drag.snap.nodes[drag.id].params, q = state.scene.nodes[drag.id].params, lo = Math.min(q0.z, q0.z + q0.h), hi = Math.max(q0.z, q0.z + q0.h), eps = 0.01 / MM;
-        const z = e.ctrlKey || e.metaKey ? snapBandZ(wz, snapThr()) : wz;
+        const z = e.ctrlKey || e.metaKey ? snapHeight(wz, drag.id) : wz;
         if (drag.which === 'top') { q.z = lo; q.h = Math.max(eps, z - lo); } else { const b = Math.min(hi - eps, z); q.z = b; q.h = hi - b; }
         const was = drag.which === 'top' ? hi : lo, now = drag.which === 'top' ? q.z + q.h : q.z;
         showOff(e, [0, 0, was], [0, 0, now], (now - was) * FZ() >= 0 ? 90 : -90, 'height ' + num(mm(q.h), 3) + ' ' + UNIT_LABEL);
@@ -5787,6 +5838,13 @@
       if ((e.ctrlKey || e.metaKey) && P0) {
         const s = snapTo(info, { y: P0.y + dy, z: P0.z + dz }, lock);
         if (s) { dy = s.pos.y - P0.y; dz = s.pos.z - P0.z; drag.guides.push(...s.guides); drag.mark = s.pos; drag.markMid = !!s.mid; if (lock) drag.guides[0].to = s.pos; }
+        else if (drag.type === 'nodes' && state.scene.nodes[drag.hit] && state.scene.nodes[drag.hit].type === 'geo') {
+          // a geometric object's centre: onto the grid (heights from the part's bottom), the lock kept
+          const st = gridStep() / 2, base = info.base || 0, G = { y: Math.round((P0.y + dy) / st) * st, z: base + Math.round((P0.z + dz - base) / st) * st };
+          if (!lock || Math.abs(lock.d[1]) < 1e-9) dy = G.y - P0.y;
+          if (!lock || Math.abs(lock.d[0]) < 1e-9) dz = G.z - P0.z;
+          drag.mark = { y: P0.y + dy, z: P0.z + dz };
+        }
       }
       if (P0) drag.cur = { y: P0.y + dy, z: P0.z + dz };
       state.scene = clone(drag.snap);
@@ -6619,6 +6677,9 @@
       if (!gl || !result || !result.preview || result === shown) return;
       shown = result;
       const firstMesh = !triCount;
+      // the linked blue slicer, off the axis, stays where it is (it is kept as a share of the part's reach, which this
+      // changes), so what was snapped onto it stays on it
+      const off0 = bbox && state.linkSlicers ? sliceOff() : 0;
       const t = result.preview.tris, l = result.preview.lines;
       meshTris = t; meshShift = result.preview.shift || null; meshFlip = !!result.preview.flip; meshSolid = result.preview.solid || null; cutEdgeCache = null;
       gl.bindBuffer(gl.ARRAY_BUFFER, triBuf); gl.bufferData(gl.ARRAY_BUFFER, t, gl.STATIC_DRAW); triCount = t.length / 6;
@@ -6634,6 +6695,10 @@
       const nr = Math.hypot(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]) / 2 || 1;
       if (firstMesh || Math.abs(nr - radius) / nr > 0.25) { dist = nr * 2.2; pan = [0, 0, 0]; }
       center = [0, 1, 2].map(c => (mn[c] + mx[c]) / 2); radius = nr; bbox = { mn, mx };
+      if (off0) {
+        const f = cutFrame(), v = f && f.ext.z > 1e-9 ? (state.flip ? 1 : -1) * off0 * MM / f.ext.z : null;
+        if (v != null && v > LO_END.z + 0.002 && v < 0.998) { state.cuts = { ...state.cuts, z: v }; drawSection(); }
+      }
       draw3d();
     }
     // pixels per mm on the plane through the view's centre (the same for perspective and orthographic)
