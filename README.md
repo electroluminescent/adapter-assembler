@@ -28,7 +28,8 @@ A browser tool for designing threaded adapters, rings and gears, and exporting t
 
   * Any flat shape seen from above, stood up between two heights.
   * Corners, edges and the whole shape dragged; corners added on edges, bevelled and deleted.
-  * Placed by its centre, which stays the middle of its corners.
+  * Placed by its centre, which stays the centroid of its shape.
+  * In the radius/height view: its outline dashed, its section where the plane cuts it solid.
   * Turned about any of the three axes, with snapping.
 
 - #### **Outlines**
@@ -71,6 +72,8 @@ A browser tool for designing threaded adapters, rings and gears, and exporting t
 
   * The 2D height band and the 3D height slicer act as one.
   * The cross-section is cut where the blue slicer is, on or off the axis.
+    * Monomorphic on: the part's section there, grey, to look at.
+    * Monomorphic off: the objects stay editable, with that section dashed under them.
 
 - #### **Monomorphic drawing**
 

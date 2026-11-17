@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.26.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.26.2. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = '3.26.1';
+  const APP_VERSION = "3.26.2";
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -1571,7 +1571,7 @@
       foot.push({ side: c.side, zr: [a, b], poly: c.side || geoTilted(n.params) ? hull2(pts) : corners.map(([x, y]) => c.f([x, y, 0]).slice(0, 2)) });
       z0 = Math.min(z0, a); z1 = Math.max(z1, b);
     }
-    const out = { V, T, foot, z0, z1 };
+    const out = { V, T, foot, z0, z1, per: m.V.length / 3 };
     if (geoCache.size > 200) geoCache.clear();
     geoCache.set(key, out);
     return out;
@@ -1620,14 +1620,22 @@
   }
   // turn a geometric object about a direction in the scene (through its centre) by a (radians)
   function geoTurn(q, ax, a) { Object.assign(q, eulerOf(matMul(axisRot(ax, a), geoRot(q)))); }
-  // Keep a geometric object's centre at the middle of its corners (the middle of the box round them), leaving the
+  // Keep a geometric object's centre at the middle of its shape (the centroid of its area), leaving the
   // shape where it is in the scene: its corners shift one way in its own frame, its centre the other way (turned).
   function geoRecentre(n) {
     if (!n || n.type !== 'geo' || !n.shape || !n.shape.length) return;
-    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-    for (const p of n.shape) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); }
-    const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
-    if (Math.abs(mx) < 1e-12 && Math.abs(my) < 1e-12) return;
+    // the middle is the shape's centroid (centre of its area); a shape with no area: the average of its corners
+    const S = n.shape, N = S.length;
+    let A = 0, ax = 0, ay = 0, vx = 0, vy = 0;
+    for (let i = 0; i < N; i++) {
+      const a = S[i], b = S[(i + 1) % N], c = a.x * b.y - b.x * a.y;
+      A += c; ax += (a.x + b.x) * c; ay += (a.y + b.y) * c; vx += a.x / N; vy += a.y / N;
+    }
+    let x0 = Infinity, x1 = -Infinity;
+    for (const p of S) { x0 = Math.min(x0, p.x, p.y); x1 = Math.max(x1, p.x, p.y); }
+    const big = Math.abs(A) / 2 > 1e-9 * Math.max(1e-6, (x1 - x0) * (x1 - x0));
+    const mx = big ? ax / (3 * A) : vx, my = big ? ay / (3 * A) : vy;
+    if (Math.abs(mx) < 1e-10 && Math.abs(my) < 1e-10) return;
     for (const p of n.shape) { p.x -= mx; p.y -= my; }
     const q = n.params, M = geoRot(q);
     q.cx += M[0][0] * mx + M[0][1] * my; q.cy += M[1][0] * mx + M[1][1] * my; q.z += M[2][0] * mx + M[2][1] * my;
@@ -1918,6 +1926,7 @@
     return g.every((p, i) => near(p.y, P[i].y) && near(p.z, P[i].z)) ? f : null;
   }
   function rationalize(n) {
+    if (n && n.type === 'geo') { geoRecentre(n); return; }
     if (!n || !n.params || !(n.type === 'thread' || n.type === 'circle' || n.type === 'ngon' || n.type === 'cog')) return;
     const f = fitParams(n);
     if (f) { Object.assign(n.params, f); n.custom = false; tagPts(n.pts); } else n.custom = true;
@@ -2213,7 +2222,9 @@
       if (!n.children && n.type !== 'holes' && !Array.isArray(n.pts)) return false;
       if (n.type === 'geo' && (!Array.isArray(n.shape) || n.shape.length < 3 || !n.params)) return false;
     }
-    return sc.root.every(id => sc.nodes[id]);
+    if (!sc.root.every(id => sc.nodes[id])) return false;
+    for (const n of Object.values(sc.nodes)) if (n.type === 'geo') geoRecentre(n);   // shapes from older versions too
+    return true;
   }
   // Load a JSON file: a scene replaces the current scene (Undo brings the old one back);
   // saved models are added to My saved models.
@@ -3481,7 +3492,7 @@
       const sc = state.scene, order = frontOrder(), th = viewTheta();
       for (let i = order.length - 1; i >= 0; i--) {
         const id = order[i], n = sc.nodes[id], xf = xfOf(sc, id);
-        if (n.type === 'geo') { if (inLoops(MS * y, z, geoSection(id))) return id; continue; }
+        if (n.type === 'geo') { if (inLoops(MS * y, z, geoSection(id)) || inLoops(MS * y, z, geoProjection(id))) return id; continue; }
         if (pointInPoly(y, z, viewOutline(sc, id))) return id;
         if (xf.id && pointInPoly(y, z, sectionOutline(n, th))) return id;
         // anywhere in a thread's teeth (root to crest, along its length)
@@ -3528,7 +3539,7 @@
     }
     function gridIn(g, base, top) {
       const { w, h } = size();
-      const [ya, zA] = toWorld(0, h), [yb, zB] = toWorld(w, 0), za = Math.min(zA, zB), zb = Math.max(zA, zB), offS = !top && sliceOff();
+      const [ya, zA] = toWorld(0, h), [yb, zB] = toWorld(w, 0), za = Math.min(zA, zB), zb = Math.max(zA, zB), offS = !top && sliceView();
       const pxu = view.s / UNIT_SCALE; let i = GRID_STEPS.findIndex(s => s * pxu >= 55); if (i < 0) i = GRID_STEPS.length - 1;
       const main = GRID_STEPS[i] / UNIT_SCALE, fine = i > 0 ? GRID_STEPS[i - 1] / UNIT_SCALE : main, finePx = i > 0 ? fine * view.s : 0;
       const clamp01 = (x) => Math.max(0, Math.min(1, x));
@@ -3658,6 +3669,17 @@
     }
     // a geometric object's section in the radius/height view: loops of (place along the section, height)
     function geoSection(id) { const gw = geoWorld(state.scene, id); return gw ? sliceLoops(gw.V, gw.T, state.viewAngle * Math.PI / 180) : []; }
+    // its outline seen square-on to the section's plane (each copy's), wherever it is: (place along the plane, height)
+    function geoProjection(id) {
+      const gw = geoWorld(state.scene, id); if (!gw || !gw.per) return [];
+      const th = state.viewAngle * Math.PI / 180, c = Math.cos(th), sn = Math.sin(th), out = [];
+      for (let b = 0; b < gw.V.length / 3; b += gw.per) {
+        const pts = [];
+        for (let i = b; i < b + gw.per; i++) pts.push([gw.V[i * 3] * c + gw.V[i * 3 + 1] * sn, gw.V[i * 3 + 2]]);
+        const h = hull2(pts); if (h.length > 2) out.push(h);
+      }
+      return out;
+    }
     const inLoops = (x, y, loops) => {
       let c = false;
       for (const L of loops) for (let i = 0, j = L.length - 1; i < L.length; j = i++) { const A = L[i], B = L[j]; if ((A[1] > y) !== (B[1] > y) && x < (B[0] - A[0]) * (y - A[1]) / (B[1] - A[1]) + A[0]) c = !c; }
@@ -4733,8 +4755,20 @@
       // their shapes through the axis), so what is drawn is the finished part's own section there, from the 3D model:
       // threads, cogs, n-sided rings and subtractions are all as they really are at that place. To look at; the
       // objects are edited at the axis.
+      // With Monomorphic off, the objects are drawn (and edited) as usual at the axis, with the part's section at the
+      // blue slicer outlined under them.
       const off = sliceOff();
-      if (off) {
+      if (off && !monoOn()) {
+        const loops = meshSection(state.viewAngle * Math.PI / 180, off);
+        if (loops && loops.length) {
+          const dd = loops.map(L => 'M' + L.map(p => toScreen(p[0], p[1]).map(v => v.toFixed(1)).join(' ')).join('L') + 'Z').join('');
+          g.append(sv('path', { d: dd, fill: '#1c7ed60d', 'fill-rule': 'evenodd', stroke: '#1c7ed6', 'stroke-width': 1.2, 'stroke-dasharray': '5 3', 'stroke-linejoin': 'round', 'pointer-events': 'none' }));
+        }
+        const note = sv('text', { x: AX_L + 8, y: 64, 'font-size': 11, fill: '#1c7ed6', 'pointer-events': 'none' });
+        note.textContent = 'dashed: the part ' + num(mm(Math.abs(off)), 3) + ' ' + UNIT_LABEL + ' off the axis (blue slicer)' + (loops ? loops.length ? '' : ' — nothing of the part there' : ' — waiting for the 3D model');
+        g.append(note);
+      }
+      if (off && monoOn()) {
         const loops = meshSection(state.viewAngle * Math.PI / 180, off);
         if (loops && loops.length) {
           const dd = loops.map(L => 'M' + L.map(p => toScreen(p[0], p[1]).map(v => v.toFixed(1)).join(' ')).join('L') + 'Z').join('');
@@ -4761,21 +4795,24 @@
       for (const id of order) {
         if (state.scene.nodes[id].type === 'geo') {
           // a geometric object: its own section, both sides of the axis as they are (not mirrored), drawn once
-          const loops = geoSection(id), role = roleOf(state.scene, id), col = COLORS.geo, selected = selectedAncestorOf(id);
-          for (const L of loops) for (const p of L) { ext.y0 = Math.min(ext.y0, Math.abs(p[0])); ext.y1 = Math.max(ext.y1, Math.abs(p[0])); ext.z0 = Math.min(ext.z0, p[1]); ext.z1 = Math.max(ext.z1, p[1]); }
+          const loops = geoSection(id), proj = geoProjection(id), role = roleOf(state.scene, id), col = COLORS.geo, selected = selectedAncestorOf(id);
+          for (const L of loops.concat(proj)) for (const p of L) { ext.y0 = Math.min(ext.y0, Math.abs(p[0])); ext.y1 = Math.max(ext.y1, Math.abs(p[0])); ext.z0 = Math.min(ext.z0, p[1]); ext.z1 = Math.max(ext.z1, p[1]); }
           const MSg = MS; MS = 1;
           const dG = loops.map(L => 'M' + L.map(p => toScreen(p[0], p[1]).map(v => v.toFixed(1)).join(' ')).join('L') + 'Z').join('');
+          const dP = proj.map(L => 'M' + L.map(p => toScreen(p[0], p[1]).map(v => v.toFixed(1)).join(' ')).join('L') + 'Z').join('');
           MS = MSg;
-          lastPolys[1][id] = lastPolys[-1][id] = { d: dG, col };
+          lastPolys[1][id] = lastPolys[-1][id] = { d: dG || dP, col };
           if (monoHid(id)) { if (dG) (role === 'negative' ? monoNeg : monoPos).push(dG); continue; }
-          if (!dG || MS < 0) continue;
-          g.append(sv('path', { d: dG, fill: role === 'negative' ? 'url(#aa-hatch)' : col + (role === 'intersect' ? '18' : '26'), 'fill-rule': 'evenodd',
+          if (MS < 0) continue;
+          // all of it, seen square-on to the plane, dashed (and a faint fill, to pick it by); where the plane cuts it, solid
+          if (dP) g.append(sv('path', { d: dP, fill: col + '0a', 'fill-rule': 'nonzero', stroke: role === 'negative' ? '#e03131' : col, 'stroke-width': selected ? 1.8 : 1, 'stroke-dasharray': '5 3', 'stroke-linejoin': 'round', opacity: 0.8, 'pointer-events': 'none' }));
+          if (dG) g.append(sv('path', { d: dG, fill: role === 'negative' ? 'url(#aa-hatch)' : col + (role === 'intersect' ? '18' : '26'), 'fill-rule': 'evenodd',
             stroke: role === 'negative' ? '#e03131' : col, 'stroke-width': selected ? 2.8 : 1.4, 'stroke-dasharray': role === 'negative' ? '6 3' : 'none', 'stroke-linejoin': 'round' }));
           {
             // its top and bottom: drag a line up or down to change the height (Ctrl: onto the height of a point)
             const gq = state.scene.nodes[id].params, P = placeOf(state.scene, id);
             let s0 = Infinity, s1 = -Infinity;
-            for (const L of loops) for (const p of L) { s0 = Math.min(s0, p[0]); s1 = Math.max(s1, p[0]); }
+            for (const L of loops.length ? loops : proj) for (const p of L) { s0 = Math.min(s0, p[0]); s1 = Math.max(s1, p[0]); }
             if (!P.side && isFinite(s0) && selectedAncestorOf(id)) {
               // the rotation handle: beside its centre on the section's plane; turns it in the plane of the view
               const th = state.viewAngle * Math.PI / 180, [Cx, Cy] = P.w(gq.cx, gq.cy), al = Cx * Math.cos(th) + Cy * Math.sin(th), zc = Math.min(gq.z, gq.z + gq.h) + Math.abs(gq.h) / 2;
@@ -5085,7 +5122,7 @@
     }
     let wrapKey = '', wrapTimer = 0;
     function drawWrap(settled) {
-      if (topMode() || sliceOff()) {
+      if (topMode() || sliceView()) {
         // nothing behind the view from above
         clearTimeout(wrapTimer);
         if (wrapKey !== 'top') { const c = wrapCanvas.getContext('2d'); c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, wrapCanvas.width, wrapCanvas.height); wrapCanvas.style.transform = ''; wrapKey = 'top'; }
@@ -5510,7 +5547,7 @@
         svg.setPointerCapture(e.pointerId);
         drag = { type: 'bandline', which: w }; return;
       }
-      if (sliceOff()) {       // a slice off the axis is to look at: any drag moves the view
+      if (sliceView()) {       // a slice off the axis is to look at: any drag moves the view
         const [px0, py0] = local(e);
         svg.setPointerCapture(e.pointerId); drag = { type: 'pan', sx: px0, sy: py0, cy: view.cy, cz: view.cz }; return;
       }
@@ -5654,7 +5691,7 @@
       MS = side;
       const wy = side * raw[0], wz = raw[1];
       cursorW = { y: wy, z: wz, side };
-      const offP = sliceOff();
+      const offP = sliceView();
       coord.textContent = (offP ? 'x: ' + fmt(wy, 3) + ' along the slice · radius ' + fmt(Math.hypot(wy, offP), 3) : 'x: radius ' + fmt(wy, 3) + ' / Ø ' + fmt(2 * wy, 3)) + ' · y: height ' + num(hDisp(wz, sceneBase), 3) + ' ' + UNIT_LABEL;
       if (!drag && offP) { drawCursor(); if (hoverEdge || hoverNode) { hoverEdge = null; hoverNode = null; svg.style.cursor = ''; } return; }
       if (!drag) {
@@ -5804,7 +5841,7 @@
             // (a geometric object has no points here: the box takes the object, where it touches its section)
             if (s > 0) for (const id of leafOrder(state.scene)) {
               if (state.scene.nodes[id].type !== 'geo') continue;
-              const loops = geoSection(id);
+              const loops = geoSection(id).concat(geoProjection(id));
               if (loops.some(L => L.some(p => p[0] >= y0 && p[0] <= y1 && p[1] >= z0 && p[1] <= z1)) || inLoops((y0 + y1) / 2, (z0 + z1) / 2, loops)) {
                 if (!d.add) state.selNodes = new Set(); state.selNodes.add(id); d.add = true;
               }
@@ -6638,6 +6675,8 @@
     }
     // The cross-section is cut where the blue slicer is: its distance from the axis along the section's normal, in
     // scene units (0: through the axis, as when the slicers are not linked or the blue one cuts nothing).
+    // the radius/height view shows the slice off the axis only (to look at) when Monomorphic is on
+    function sliceView() { return monoOn() ? sliceOff() : 0; }
     function sliceOff() {
       if (!state.linkSlicers) return 0;
       const f = cutFrame(), v = hiOf('z');
