@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.28.2. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.29.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = "3.28.2";
+  const APP_VERSION = "3.29.0";
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -24,7 +24,7 @@
     optimize: true,        // weld coincident points / split T-junctions before export
     precision: 100,        // edges around a full circle
     faces: 'ngons',        // OBJ faces / wireframe: 'ngons' (flat regions as one polygon), 'quads' or 'tris'
-    format: 'stl',         // 'stl' | 'obj'
+    format: 'stl',         // 'stl' | 'obj' | 'step'
     wire: false,           // 3D view: wireframe
     ssao: true,            // 3D view: ambient occlusion
     lenUnit: 'mm',         // displayed lengths: 'mm' or 'in'
@@ -336,7 +336,10 @@
 
     // File: binary STL (always triangles) or OBJ (triangles, quads or n-gons).
     let buffer, ext;
-    if (opts.format === 'obj') {
+    if (opts.format === 'step') {
+      buffer = new TextEncoder().encode(stepFile(uniq, tris, nrm, count, opts, openEdges === 0 && nonManifoldEdges === 0)).buffer;
+      ext = 'step';
+    } else if (opts.format === 'obj') {
       const out = ['# Adapter Assembler, units: ' + opts.unitLabel + ', ' + (opts.faces === 'ngons' ? 'n-gons' : opts.faces === 'quads' ? 'quads' : 'triangles')];
       for (const P of uniq) out.push('v ' + P[0].toFixed(6) + ' ' + P[1].toFixed(6) + ' ' + P[2].toFixed(6));
       for (const f of faces) out.push('f ' + f.map(i => i + 1).join(' '));
@@ -385,6 +388,117 @@
   //     single outline; whatever cannot be split cleanly stays triangles. Points on an outline are
   //     all kept, so faces still meet edge to edge (no T-junctions).
   // ---------------------------------------------------------------------------
+  // A STEP file (ISO 10303-21, AP214) of the mesh as a B-rep solid: each flat region of triangles one planar face (with
+  // its holes), straight edges shared between faces, in millimetres. (Not closed: a surface model of an open shell.)
+  function stepFile(uniq, tris, nrm, count, opts, closed) {
+    const k = opts.unitLabel === 'in' ? 25.4 : 1, nU = uniq.length, owner = new Map();
+    for (let t = 0; t < count; t++) for (let j = 0; j < 3; j++) owner.set(tris[t * 3 + j] * nU + tris[t * 3 + (j + 1) % 3], t);
+    // flat regions: neighbours across an edge on the same plane
+    const tolP = Math.max(opts.tolerance || 0, 1e-7) * 2, region = new Int32Array(count).fill(-1), regions = [];
+    const dOf = (t) => { const P = uniq[tris[t * 3]]; return nrm[t * 3] * P[0] + nrm[t * 3 + 1] * P[1] + nrm[t * 3 + 2] * P[2]; };
+    for (let t0 = 0; t0 < count; t0++) {
+      if (region[t0] >= 0) continue;
+      const r = regions.length, n0 = [nrm[t0 * 3], nrm[t0 * 3 + 1], nrm[t0 * 3 + 2]], d0 = dOf(t0), list = [t0], st = [t0];
+      region[t0] = r;
+      while (st.length) {
+        const t = st.pop();
+        for (let j = 0; j < 3; j++) {
+          const a = tris[t * 3 + j], b = tris[t * 3 + (j + 1) % 3], o = owner.get(b * nU + a);
+          if (o == null || region[o] >= 0) continue;
+          if (n0[0] * nrm[o * 3] + n0[1] * nrm[o * 3 + 1] + n0[2] * nrm[o * 3 + 2] < 1 - 1e-9) continue;
+          let off = 0; for (let q = 0; q < 3; q++) { const P = uniq[tris[o * 3 + q]]; off = Math.max(off, Math.abs(n0[0] * P[0] + n0[1] * P[1] + n0[2] * P[2] - d0)); }
+          if (off > tolP) continue;
+          region[o] = r; list.push(o); st.push(o);
+        }
+      }
+      regions.push({ n: n0, list });
+    }
+    // which regions meet at each point (a point on a straight edge between just two faces can be left out)
+    const at = Array.from({ length: nU }, () => new Set());
+    for (let t = 0; t < count; t++) for (let j = 0; j < 3; j++) at[tris[t * 3 + j]].add(region[t]);
+    // each region's outlines: closed loops of directed edges
+    const loopsOf = (R, r) => {
+      const next = new Map();
+      for (const t of R.list) for (let j = 0; j < 3; j++) {
+        const a = tris[t * 3 + j], b = tris[t * 3 + (j + 1) % 3], o = owner.get(b * nU + a);
+        if (o != null && region[o] === r) continue;
+        if (!next.has(a)) next.set(a, []);
+        next.get(a).push(b);
+      }
+      const loops = [];
+      for (const [a0, outs] of next) while (outs.length) {
+        const L = [a0]; let b = outs.pop(), guard = 0;
+        while (b !== a0 && guard++ < 1e6) { L.push(b); const nx = next.get(b); if (!nx || !nx.length) break; b = nx.pop(); }
+        if (b === a0 && L.length >= 3) loops.push(L);
+      }
+      // points in the middle of a straight run between the same two faces
+      return loops.map(L => {
+        const keep = L.filter((v, i) => {
+          if (at[v].size !== 2) return true;
+          const A = uniq[L[(i + L.length - 1) % L.length]], P = uniq[v], B = uniq[L[(i + 1) % L.length]];
+          const u = [P[0] - A[0], P[1] - A[1], P[2] - A[2]], w = [B[0] - P[0], B[1] - P[1], B[2] - P[2]];
+          const cx = u[1] * w[2] - u[2] * w[1], cy = u[2] * w[0] - u[0] * w[2], cz = u[0] * w[1] - u[1] * w[0];
+          return Math.hypot(cx, cy, cz) > 1e-9 * Math.hypot(...u) * Math.hypot(...w) || (u[0] * w[0] + u[1] * w[1] + u[2] * w[2]) < 0;
+        });
+        return keep.length >= 3 ? keep : L;
+      });
+    };
+    // entities
+    const E = [], add = (s) => { E.push(s); return '#' + E.length; };
+    const num = (x) => { let s = (Math.abs(x) < 1e-12 ? 0 : +x.toFixed(9)).toString(); if (/e/i.test(s)) { const [m, e] = s.split(/e/i); s = (m.includes('.') ? m : m + '.') + 'E' + e; } else if (!s.includes('.')) s += '.'; return s; };
+    const pt = (P) => add("CARTESIAN_POINT('',(" + num(P[0] * k) + ',' + num(P[1] * k) + ',' + num(P[2] * k) + '))');
+    const dir = (v) => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return add("DIRECTION('',(" + num(v[0] / l) + ',' + num(v[1] / l) + ',' + num(v[2] / l) + '))'); };
+    const ctx = add("APPLICATION_CONTEXT('core data for automotive mechanical design processes')");
+    add("APPLICATION_PROTOCOL_DEFINITION('international standard','automotive_design',2000," + ctx + ')');
+    const pctx = add("PRODUCT_CONTEXT(''," + ctx + ",'mechanical')"), dctx = add("PRODUCT_DEFINITION_CONTEXT('part definition'," + ctx + ",'design')");
+    const name = String(opts.name || 'adapter').replace(/'/g, '');
+    const prod = add("PRODUCT('" + name + "','" + name + "',''," + '(' + pctx + '))');
+    add("PRODUCT_RELATED_PRODUCT_CATEGORY('part',$,(" + prod + '))');
+    const pdf = add("PRODUCT_DEFINITION_FORMATION('',''," + prod + ')'), pd = add("PRODUCT_DEFINITION('design',''," + pdf + ',' + dctx + ')');
+    const pds = add("PRODUCT_DEFINITION_SHAPE(''," + "''," + pd + ')');
+    const lu = add('(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.))'), au = add('(NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.))'), su = add('(NAMED_UNIT(*)SI_UNIT($,.STERADIAN.)SOLID_ANGLE_UNIT())');
+    const unc = add('UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(' + num(Math.max(1e-6, tolP * k)) + '),' + lu + ",'distance_accuracy_value','confusion accuracy')");
+    const gctx = add('(GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((' + unc + '))GLOBAL_UNIT_ASSIGNED_CONTEXT((' + lu + ',' + au + ',' + su + "))REPRESENTATION_CONTEXT('Context #1','3D Context with UNIT and UNCERTAINTY'))");
+    const vtx = new Map(), edges = new Map();
+    const vertex = (i) => { if (!vtx.has(i)) vtx.set(i, add("VERTEX_POINT(''," + pt(uniq[i]) + ')')); return vtx.get(i); };
+    const edge = (a, b) => {
+      const key = Math.min(a, b) * nU + Math.max(a, b);
+      if (!edges.has(key)) {
+        const A = uniq[a], B = uniq[b], v = [B[0] - A[0], B[1] - A[1], B[2] - A[2]];
+        const line = add("LINE(''," + pt(A) + ',' + add("VECTOR(''," + dir(v) + ',' + num(Math.hypot(v[0], v[1], v[2]) * k) + ')') + ')');
+        edges.set(key, { a, id: add("EDGE_CURVE(''," + vertex(a) + ',' + vertex(b) + ',' + line + ',.T.)') });
+      }
+      const e = edges.get(key);
+      return add("ORIENTED_EDGE('',*,*," + e.id + ',' + (e.a === a ? '.T.' : '.F.') + ')');
+    };
+    const faces = [];
+    regions.forEach((R, r) => {
+      const loops = loopsOf(R, r); if (!loops.length) return;
+      // the outer outline: the largest (area in the face's plane)
+      const n = R.n, area = (L) => { let x = 0, y = 0, z = 0; for (let i = 0; i < L.length; i++) { const P = uniq[L[i]], Q = uniq[L[(i + 1) % L.length]]; x += P[1] * Q[2] - P[2] * Q[1]; y += P[2] * Q[0] - P[0] * Q[2]; z += P[0] * Q[1] - P[1] * Q[0]; } return (x * n[0] + y * n[1] + z * n[2]) / 2; };
+      let oi = 0; loops.forEach((L, i) => { if (area(L) > area(loops[oi])) oi = i; });
+      const bounds = loops.map((L, i) => add((i === oi ? 'FACE_OUTER_BOUND' : 'FACE_BOUND') + "(''," + add("EDGE_LOOP('',(" + L.map((v, j) => edge(v, L[(j + 1) % L.length])).join(',') + '))') + ',.T.)'));
+      const P0 = uniq[loops[oi][0]], P1 = uniq[loops[oi][1]], u = [P1[0] - P0[0], P1[1] - P0[1], P1[2] - P0[2]], dn = u[0] * n[0] + u[1] * n[1] + u[2] * n[2];
+      const ref = [u[0] - dn * n[0], u[1] - dn * n[1], u[2] - dn * n[2]];
+      const plane = add("PLANE(''," + add("AXIS2_PLACEMENT_3D(''," + pt(P0) + ',' + dir(n) + ',' + dir(Math.hypot(...ref) > 1e-12 ? ref : Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0]) + ')') + ')');
+      faces.push(add("ADVANCED_FACE('',(" + bounds.join(',') + '),' + plane + ',.T.)'));
+    });
+    const origin = add("AXIS2_PLACEMENT_3D(''," + pt([0, 0, 0]) + ',' + dir([0, 0, 1]) + ',' + dir([1, 0, 0]) + ')');
+    let rep;
+    if (closed) {
+      const solid = add("MANIFOLD_SOLID_BREP(''," + add("CLOSED_SHELL('',(" + faces.join(',') + '))') + ')');
+      rep = add("ADVANCED_BREP_SHAPE_REPRESENTATION(''," + '(' + origin + ',' + solid + '),' + gctx + ')');
+    } else {
+      const sm = add("SHELL_BASED_SURFACE_MODEL('',(" + add("OPEN_SHELL('',(" + faces.join(',') + '))') + '))');
+      rep = add("MANIFOLD_SURFACE_SHAPE_REPRESENTATION(''," + '(' + origin + ',' + sm + '),' + gctx + ')');
+    }
+    add('SHAPE_DEFINITION_REPRESENTATION(' + pds + ',' + rep + ')');
+    const stamp = new Date().toISOString().slice(0, 19);
+    return ['ISO-10303-21;', 'HEADER;', "FILE_DESCRIPTION(('Adapter Assembler'),'2;1');",
+      "FILE_NAME('" + name + ".step','" + stamp + "',(''),(''),'Adapter Assembler','Adapter Assembler','');",
+      "FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));", 'ENDSEC;', 'DATA;',
+      ...E.map((s, i) => '#' + (i + 1) + '=' + s + ';'), 'ENDSEC;', 'END-ISO-10303-21;', ''].join('\n');
+  }
   function ngonFaces(tris, uniq, nrm, count, tolerance) {
     const nU = uniq.length, owner = new Map();
     for (let t = 0; t < count; t++) for (let k = 0; k < 3; k++) owner.set(tris[t * 3 + k] * nU + tris[t * 3 + (k + 1) % 3], t);
@@ -1261,7 +1375,7 @@
   function getWorker() {
     if (worker || workerFailed) return worker;
     try {
-      const src = [processMesh, ngonFaces, bevelReach, cornerPoints, toothPattern, toothAt, runoutOf, runsOf, runoutDelta, runoutPattern, runoutCorner, runoutRadiusAt, threadProfile, expandProfile, runVertices, cogShape, cogWarp, revolve, holeMesh, geoCorners, geoRot, polyArea, earClip, geoMesh, nodeMesh, evaluateScene, soup, runJob]
+      const src = [processMesh, stepFile, ngonFaces, bevelReach, cornerPoints, toothPattern, toothAt, runoutOf, runsOf, runoutDelta, runoutPattern, runoutCorner, runoutRadiusAt, threadProfile, expandProfile, runVertices, cogShape, cogWarp, revolve, holeMesh, geoCorners, geoRot, polyArea, earClip, geoMesh, nodeMesh, evaluateScene, soup, runJob]
         .map(f => f.toString()).join('\n') +
         '\nself.onmessage = async function (e) {' +
         '  try { const r = await runJob(e.data); self.postMessage({ job: e.data.job, result: r }, [r.buffer, r.preview.tris.buffer, r.preview.lines.buffer, r.preview.bad.buffer].concat(r.preview.solid ? [r.preview.solid.V.buffer, r.preview.solid.T.buffer] : [])); }' +
@@ -1286,7 +1400,7 @@
 
   function haveInput() { return !!(state.scene && state.scene.root.length); }
   function jobOpts(fast) {
-    return { flip: state.flip, optimize: fast ? false : state.optimize, unitScale: MM, unitLabel: 'mm', tolerance: WELD_TOLERANCE_IN * MM, format: state.format, faces: state.faces };
+    return { flip: state.flip, optimize: fast ? false : state.optimize, unitScale: MM, unitLabel: 'mm', tolerance: WELD_TOLERANCE_IN * MM, format: fast && state.format === 'step' ? 'stl' : state.format, faces: state.faces };
   }
   function jobSettings() { return { precision: state.precision, helical: state.helical, manifoldUrl: W.__aaManifoldUrl || MANIFOLD_URL }; }
 
@@ -1342,7 +1456,7 @@
     post({ job, opts: jobOpts(false), scene, holes: state.holes, settings: jobSettings() });
   }
   function saveFile(buffer, ext, name) {
-    const blob = new Blob([buffer], { type: ext === 'json' ? 'application/json' : ext === 'obj' ? 'text/plain' : 'model/stl' });
+    const blob = new Blob([buffer], { type: ext === 'json' ? 'application/json' : ext === 'obj' ? 'text/plain' : ext === 'step' ? 'application/step' : 'model/stl' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = String(name).replace(/[\\/:*?"<>|]+/g, '_') + '.' + ext;
@@ -2864,7 +2978,7 @@
       group('Export',
         numRow('Circular precision (edges)', state.precision, v => set('precision', Math.max(8, Math.min(300, Math.round(v)))), { step: '1', min: 8, max: 300, digits: 0, width: 64 }),
         selectRow('Faces', state.faces, [['ngons', 'N-gons'], ['quads', 'Quads'], ['tris', 'Triangles']], v => set('faces', v)),
-        selectRow('Format', state.format, [['stl', 'STL'], ['obj', 'OBJ']], v => set('format', v))));
+        selectRow('Format', state.format, [['stl', 'STL'], ['obj', 'OBJ'], ['step', 'STEP']], v => set('format', v))));
   }
 
   function statusText() {

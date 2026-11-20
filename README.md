@@ -147,7 +147,8 @@ A browser tool for designing threaded adapters, rings and gears, and exporting t
 
 - #### **Export**
 
-  * STL or OBJ in millimetres, for the scene or one object.
+  * STL, OBJ or STEP in millimetres, for the scene or one object.
+    * STEP: a B-rep solid, each flat region one planar face (open parts as a surface model).
 
 - #### **Mesh checks**
 
