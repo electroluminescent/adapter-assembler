@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.32.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.32.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = "3.32.0";
+  const APP_VERSION = "3.32.1";
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -1356,6 +1356,8 @@
   // ---------------------------------------------------------------------------
   async function runJob(data) {
     let mesh = data.mesh, engine = 'direct', solid = null;
+    // (the Measurement view's perfect drawing: round bevels as true arcs; declared on the page and in the worker)
+    if (typeof ARC_PERFECT !== 'undefined') ARC_PERFECT = !!(data.settings && data.settings.perfect);
     if (data.scene) {
       const r = await evaluateScene(data.scene, data.holes, data.settings);
       mesh = soup(r.mesh); engine = r.engine;
@@ -1379,7 +1381,7 @@
     if (worker || workerFailed) return worker;
     try {
       const src = [processMesh, stepFile, ngonFaces, bevelReach, cornerPoints, toothPattern, toothAt, runoutOf, runsOf, runoutDelta, runoutPattern, runoutCorner, runoutRadiusAt, threadProfile, expandProfile, runVertices, cogShape, cogWarp, revolve, holeMesh, geoCorners, geoRot, polyArea, earClip, geoMesh, nodeMesh, evaluateScene, soup, runJob]
-        .map(f => f.toString()).join('\n') +
+        .map(f => f.toString()).join('\n') + '\nlet ARC_PERFECT = false;' +
         '\nself.onmessage = async function (e) {' +
         '  try { const r = await runJob(e.data); self.postMessage({ job: e.data.job, result: r }, [r.buffer, r.preview.tris.buffer, r.preview.lines.buffer, r.preview.bad.buffer].concat(r.preview.solid ? [r.preview.solid.V.buffer, r.preview.solid.T.buffer] : [])); }' +
         '  catch (err) { self.postMessage({ job: e.data.job, error: String(err && err.message || err) }); }' +
@@ -1405,7 +1407,13 @@
   function jobOpts(fast) {
     return { flip: state.flip, optimize: fast ? false : state.optimize, unitScale: MM, unitLabel: 'mm', tolerance: WELD_TOLERANCE_IN * MM, format: fast && state.format === 'step' ? 'stl' : state.format, faces: state.faces };
   }
-  function jobSettings() { return { precision: state.precision, helical: state.helical, manifoldUrl: W.__aaManifoldUrl || MANIFOLD_URL }; }
+  // (the Measurement view, drawn perfect: the part built with every circle as fine as it goes and bevels as true
+  // arcs, so its sections and its view from above are drawn true; files are always built as set)
+  const perfectNow = () => !!(state.measure && state.measurePerfect);
+  function jobSettings(forFile) {
+    const perfect = !forFile && perfectNow();
+    return { precision: perfect ? 300 : state.precision, perfect, helical: state.helical, manifoldUrl: W.__aaManifoldUrl || MANIFOLD_URL };
+  }
 
   // Live recalculation: at most one job runs at a time. Edits made while a job
   // runs are coalesced into one follow-up job, started the moment it finishes,
@@ -1427,7 +1435,7 @@
     const job = ++state.job, fast = wantFast;
     const data = { job, opts: jobOpts(fast) };
     if (state.scene) { data.scene = sceneFor3d(state.scene); data.holes = state.holes; data.settings = jobSettings(); }
-    state.jobFast = fast;
+    state.jobFast = fast; state.jobPerfect = !!(data.settings && data.settings.perfect);
     post(data);
   }
   function finish(job, result, error) {
@@ -1456,7 +1464,7 @@
       saveFile(result.buffer, result.ext, name);
       renderAll();
     });
-    post({ job, opts: jobOpts(false), scene, holes: state.holes, settings: jobSettings() });
+    post({ job, opts: jobOpts(false), scene, holes: state.holes, settings: jobSettings(true) });
   }
   function saveFile(buffer, ext, name) {
     const blob = new Blob([buffer], { type: ext === 'json' ? 'application/json' : ext === 'obj' ? 'text/plain' : ext === 'step' ? 'application/step' : 'model/stl' });
@@ -1538,7 +1546,7 @@
   function download() {
     if (state.busy || !state.result || !state.result.buffer) return;
     // (with objects hidden from the 3D view, the file is built from all of them)
-    if (state.scene && Object.values(state.scene.nodes).some(n => n && n.hide3d)) { exportScene({ nodes: state.scene.nodes, root: state.scene.root }, partName() + (!state.helical ? '-rings' : '')); return; }
+    if (state.scene && (state.jobPerfect || Object.values(state.scene.nodes).some(n => n && n.hide3d))) { exportScene({ nodes: state.scene.nodes, root: state.scene.root }, partName() + (!state.helical ? '-rings' : '')); return; }
     saveFile(state.result.buffer, state.result.ext || 'stl', partName() + (state.scene && !state.helical ? '-rings' : ''));
   }
 
@@ -3075,9 +3083,9 @@
       { title: 'Draw everything not selected as one grey shape, without handles' });
     // the Measurement view: rulers only (the part monomorphic, its points to snap to), and its drawing to export
     const measureBtn = hbtn('ruler', 'Measure', () => setMeasure(!state.measure), { title: 'Measurement view: draw rulers on the part (drag; Ctrl snaps to points), right-click for more; export the drawing as PNG or PDF' });
-    const perfectBtn = hbtn('circle', 'Perfect', () => { state.measurePerfect = !state.measurePerfect; saveSettings(); syncModeBtns(); drawSection(); },
+    const perfectBtn = hbtn('circle', 'Perfect', () => { state.measurePerfect = !state.measurePerfect; saveSettings(); syncModeBtns(); drawSection(); recalc(); },
       { title: 'Perfect drawing: round bevels and cog roundings as true curves, whatever their edge count (straight-sided shapes stay as they are)' });
-    const pinBtn = hbtn('pin', 'Pin', () => mPinSelected(), { title: 'Pin the selected measurement (or, with none selected, every unpinned one here) to this section angle' });
+    const pinBtn = hbtn('pin', 'Pin', () => mPinSelected(), { title: 'Pin the selected measurement (or, with none selected, every unpinned one here) to this section angle, or from above to the heights shown' });
     for (const b of [perfectBtn, pinBtn]) { b.style.whiteSpace = 'nowrap'; b.style.flexShrink = '0'; }
     const measureBar = el('div', { style: 'display:none;gap:2px;white-space:nowrap' }, perfectBtn, pinBtn,
       hbtn('trash', 'Clear', () => { if (!Object.keys(measures().pts).some(k => measures().pts[k].v === mView())) return; pushUndo(); mClear(true); mSel = null; mChanged(); }, { title: 'Remove the measurements in this view' }),
@@ -3119,7 +3127,21 @@
       tbRange.style.top = (1 - Math.max(tbF(lo), tbF(hi))) * 100 + '%'; tbRange.style.height = (hi - lo) * 100 + '%';
       const r = sceneZRange(), at = (t) => r ? num(hDisp(r[0] + (r[1] - r[0]) * t, zBase()), 3) + ' ' + UNIT_LABEL : '';
       tbHiL.textContent = hi < 0.999 ? at(hi) : ''; tbLoL.textContent = lo > 0.001 ? at(lo) : '';
+      // heights overhead measurements are pinned to: marks beside the slider (click one to show those heights)
+      for (const m of [...topBox.querySelectorAll('[data-pincut]')]) m.remove();
+      for (const pc of pinnedCuts()) {
+        const m = el('div', { 'data-pincut': '1', style: 'position:absolute;left:-7px;width:5px;border-left:2px solid #1864ab;border-top:2px solid #1864ab;border-bottom:2px solid #1864ab;box-sizing:border-box;cursor:pointer;top:' + (1 - Math.max(tbF(pc[0]), tbF(pc[1]))) * 100 + '%;height:' + Math.max(0.6, Math.abs(pc[1] - pc[0]) * 100) + '%', title: 'Measurements pinned to the heights ' + at(pc[0]) + '–' + at(pc[1]) + ': click to show them' });
+        m.addEventListener('pointerdown', (e) => { e.stopPropagation(); e.preventDefault(); setTopCut(pc[0], pc[1]); saveSettings(); });
+        topBox.append(m);
+      }
     }
+    // a band end drawn to the end of a pinned band when it comes within a few pixels
+    const tbMagnet = (t, which) => {
+      const px = Math.max(1, topBox.getBoundingClientRect().height), reach = 6 / px;
+      let best = t, bd = reach;
+      for (const pc of pinnedCuts()) for (const v of which === 'lo' ? [pc[0]] : which === 'hi' ? [pc[1]] : pc) { const d = Math.abs(v - t); if (d < bd) { bd = d; best = v; } }
+      return best;
+    };
     const setTopCut = (lo, hi) => {
       lo = Math.max(0, Math.min(1, lo)); hi = Math.max(0, Math.min(1, hi));
       if (hi < lo + 0.005) { if (tbDrag && tbDrag.which === 'lo') lo = hi - 0.005; else hi = lo + 0.005; }
@@ -3166,9 +3188,14 @@
       });
       k.addEventListener('pointermove', (e) => {
         if (!tbDrag) return;
-        const g0 = tbDrag, t = g0.which === 'both' ? tbAt(e) : tbSnap(e, tbAt(e));
+        const g0 = tbDrag, t0 = g0.which === 'both' ? tbAt(e) : tbSnap(e, tbAt(e)), t = e.ctrlKey || e.metaKey || g0.which === 'both' ? t0 : tbMagnet(t0, g0.which);
         if (g0.which === 'hi') setTopCut(g0.lo, t); else if (g0.which === 'lo') setTopCut(t, g0.hi);
-        else { const dt = Math.max(-g0.lo, Math.min(1 - g0.hi, t - g0.t0)); setTopCut(g0.lo + dt, g0.hi + dt); }
+        else {
+          let dt = Math.max(-g0.lo, Math.min(1 - g0.hi, t - g0.t0));
+          // (the whole band onto a pinned one when both ends come close)
+          for (const pc of pinnedCuts()) if (Math.abs(pc[0] - (g0.lo + dt)) < 0.01 && Math.abs(pc[1] - (g0.hi + dt)) < 0.01) { setTopCut(pc[0], pc[1]); return; }
+          setTopCut(g0.lo + dt, g0.hi + dt);
+        }
       });
       const end = () => { if (tbDrag) { tbDrag = null; saveSettings(); } };
       k.addEventListener('pointerup', end); k.addEventListener('pointercancel', end);
@@ -4400,7 +4427,7 @@
       syncModeBtns(); drawSection();
     }
     function syncModeBtns() {
-      if (typeof pinBtn !== 'undefined') pinBtn.style.display = state.measure && !topMode() ? 'inline-flex' : 'none';
+      if (typeof pinBtn !== 'undefined') pinBtn.style.display = state.measure ? 'inline-flex' : 'none';
       // (the readout under the view's buttons, however many rows they take)
       if (viewBar.isConnected && viewBar.offsetHeight) coord.style.top = (viewBar.offsetTop + viewBar.offsetHeight + 4) + 'px';
       for (const b of [...modeBar.children, monoBtn, measureBtn, perfectBtn]) { const on = b === monoBtn ? monoOn() : b === measureBtn ? !!state.measure : b === perfectBtn ? !!state.measurePerfect : (b.__mode === 'top') === topMode(); b.style.background = on ? '#ddf4ff' : '#fff'; b.style.borderColor = on ? '#54aeff' : '#ced4da'; }
@@ -4577,7 +4604,7 @@
         }
         lastPolys[1][it.id] = { d, col };
       }
-      const exactTop = !ARC_PERFECT && monoPos.length + monoNeg.length ? topMono(topBand()) : null;
+      const exactTop = monoPos.length + monoNeg.length ? topMono(topBand()) : null;
       if (exactTop) {
         // world → screen is a turn, a scale and a shift: one transform for the whole drawing
         const [x0, y0] = toScreen(0, 0), [x1, y1] = toScreen(1, 0), [x2, y2] = toScreen(0, 1);
@@ -5204,8 +5231,7 @@
         }
       }
       // the grey shape is the finished part's own section (both sides at once), when the 3D model is there
-      // (drawn perfect, it is made from the objects' own outlines instead, their curves true)
-      const exact = !ARC_PERFECT && (state.mono || monoPos.length) ? meshSection(state.viewAngle * Math.PI / 180) : null;
+      const exact = state.mono || monoPos.length ? meshSection(state.viewAngle * Math.PI / 180) : null;
       if (exact && monoPos.length + monoNeg.length) {
         if (MS < 0) {
           const MS0 = MS; MS = 1;
@@ -5831,7 +5857,10 @@
     }
     // (side-view measurements can be pinned to a section angle: shown only there, marked on the compass)
     function angNear(a, b) { return Math.abs((((a - b) % 360) + 540) % 360 - 180) < 0.26; }
-    const mVisible = (P) => !!P && P.v === mView() && (P.v !== 'side' || P.ang == null || angNear(P.ang, state.viewAngle));
+    // (overhead ones to the heights shown from above, the band on the slider at the right)
+    function curCut() { const c = state.topCut || { lo: 0, hi: 1 }; return [Math.max(0, Math.min(1, c.lo)), Math.max(0, Math.min(1, c.hi))]; }
+    function cutNear(a, b) { return Math.abs(a[0] - b[0]) < 0.004 && Math.abs(a[1] - b[1]) < 0.004; }
+    const mVisible = (P) => !!P && P.v === mView() && (P.v === 'side' ? P.ang == null || angNear(P.ang, state.viewAngle) : !P.cut || cutNear(P.cut, curCut()));
     const mObj = (ref) => { const M = measures(); return !ref ? null : ref.kind === 'p' ? M.pts[ref.id] : ref.kind === 's' ? M.segs[ref.id] : ref.kind === 'r' ? M.rads[ref.id] : M.angs[ref.id]; };
     // the points a measurement joins up with (through rulers and angles)
     function mGroup(ref) {
@@ -5847,6 +5876,7 @@
       return pts;
     }
     // the section angles measurements are pinned to
+    function pinnedCuts() { if (!state.scene || !state.scene.measures) return []; const out = []; for (const p of Object.values(state.scene.measures.pts || {})) if (p.v === 'top' && p.cut && !out.some(c => cutNear(c, p.cut))) out.push(p.cut); return out; }
     function pinnedAngles() { if (!state.scene || !state.scene.measures) return []; const out = []; for (const p of Object.values(state.scene.measures.pts || {})) if (p.v === 'side' && p.ang != null && !out.some(a => angNear(a, p.ang))) out.push(p.ang); return out; }
     // a section angle drawn to a pinned one when it comes close (within a few pixels of the compass tape)
     function pinMagnet(deg) { for (const a of pinnedAngles()) { const d = (((deg - a) % 360) + 540) % 360 - 180; if (Math.abs(d) < 2.5) return deg - d; } return deg; }
@@ -6123,7 +6153,7 @@
         const on = !mExporting && mSel && mSel.kind === 'a' && mSel.id === aid;
         angleMark(O, A, B, { id: aid, col: on ? SEL : ANG, call: a.call, co: a.co, ref: { kind: 'a', id: aid } });
       }
-      // where two rulers meet: the angle between them (a square mark for a right angle; nothing when straight)
+      // where two rulers meet: the angle between them (nothing when it is square: 90° or 180°)
       const at = {};
       for (const s of Object.values(M.segs)) if (mVisible(M.pts[s.a]) && mVisible(M.pts[s.b])) for (const [p, q] of [[s.a, s.b], [s.b, s.a]]) (at[p] = at[p] || []).push(q);
       for (const [pid, others] of Object.entries(at)) {
@@ -6134,11 +6164,8 @@
         while (da < -Math.PI) da += 2 * Math.PI;
         const deg = Math.abs(da) * 180 / Math.PI;
         if (deg < 0.05 || deg > 179.95) continue;
-        if (square(deg)) {
-          const r = 9, u = [Math.cos(a0), Math.sin(a0)], w2 = [Math.cos(a0 + da), Math.sin(a0 + da)];
-          g.append(sv('path', { d: 'M' + (px + u[0] * r) + ' ' + (py + u[1] * r) + 'L' + (px + (u[0] + w2[0]) * r) + ' ' + (py + (u[1] + w2[1]) * r) + 'L' + (px + w2[0] * r) + ' ' + (py + w2[1] * r), fill: 'none', stroke: ANG, 'stroke-width': 1 }));
-          continue;
-        }
+        // (square to each other, 90° or 180°: says nothing, not drawn)
+        if (square(deg)) continue;
         const r = 20;
         g.append(sv('path', { d: 'M' + (px + r * Math.cos(a0)) + ' ' + (py + r * Math.sin(a0)) + 'A' + r + ' ' + r + ' 0 0 ' + (da > 0 ? 1 : 0) + ' ' + (px + r * Math.cos(a0 + da)) + ' ' + (py + r * Math.sin(a0 + da)), fill: 'none', stroke: ANG, 'stroke-width': 1 }));
         const am = a0 + da / 2, text = [mAng(deg)], tw = textW(text), cands = [];
@@ -6357,13 +6384,13 @@
       };
       if (o) {
         const title = ref.kind === 'p' ? 'Measurement point' : ref.kind === 's' ? 'Ruler' : ref.kind === 'r' ? 'Radius' : 'Angle';
-        const grp = mGroup(ref), side = [...grp].some(p => M.pts[p] && M.pts[p].v === 'side'), pinned = [...grp].some(p => M.pts[p] && M.pts[p].ang != null);
+        const grp = mGroup(ref), side = [...grp].some(p => M.pts[p] && M.pts[p].v === 'side'), pinned = [...grp].some(p => M.pts[p] && (side ? M.pts[p].ang != null : !!M.pts[p].cut));
         menu.append(el('div', { style: 'font-weight:700;margin-bottom:4px' }, title),
           row(ref.kind === 'p' ? B('Connect to…', () => { mConnect = ref.id; drawSection(); }, 'Join it to another point (or a new one) to make a ruler') : null,
             B(o.call ? 'Label on the drawing' : 'Label as a callout', () => edit(() => { if (o.call) { delete o.call; delete o.co; } else o.call = true; })),
             B('Delete ' + title.toLowerCase(), () => edit(() => { mDelete(ref); mSel = null; }))),
-          side ? row(pinned ? B('Unpin', () => edit(() => { for (const p of grp) if (M.pts[p]) delete M.pts[p].ang; }), 'Show it at every section angle')
-            : B('Pin to ' + mAng(state.viewAngle), () => edit(() => { for (const p of grp) if (M.pts[p]) M.pts[p].ang = state.viewAngle; }), 'Show it only at this section angle (marked on the compass, which snaps to it)')) : null);
+          row(pinned ? B('Unpin', () => edit(() => { for (const p of grp) if (M.pts[p]) { delete M.pts[p].ang; delete M.pts[p].cut; } drawCompasses(); }), side ? 'Show it at every section angle' : 'Show it whatever heights are shown')
+            : B('Pin to ' + pinWhere(), () => edit(() => { mPinPts(grp); }), side ? 'Show it only at this section angle (marked on the compass, which snaps to it)' : 'Show it only with these heights shown from above (marked on the height slider, which snaps to them)')));
         // its datapoints
         const ticks = [];
         if (ref.kind === 's') {
@@ -6380,9 +6407,9 @@
       }
       const n = Object.values(M.pts).filter(p => mVisible(p)).length;
       menu.append(el('div', { style: 'font-weight:700;margin-bottom:4px' }, 'Measurements'),
-        mView() === 'side' && n ? row(
-          B('Pin all shown to ' + mAng(state.viewAngle), () => edit(() => { for (const p of Object.values(M.pts)) if (mVisible(p)) p.ang = state.viewAngle; }), 'Pin every measurement shown here to this section angle (marked on the compass, which snaps to it)'),
-          Object.values(M.pts).some(p => mVisible(p) && p.ang != null) ? B('Unpin all shown', () => edit(() => { for (const p of Object.values(M.pts)) if (mVisible(p)) delete p.ang; }), 'Show the measurements shown here at every section angle') : null) : null,
+        n ? row(
+          B('Pin all shown to ' + pinWhere(), () => edit(() => { mPinPts(Object.keys(M.pts).filter(k => mVisible(M.pts[k]))); }), mView() === 'side' ? 'Pin every measurement shown here to this section angle (marked on the compass, which snaps to it)' : 'Pin every measurement shown here to the heights shown (marked on the height slider, which snaps to them)'),
+          Object.values(M.pts).some(p => mVisible(p) && (p.ang != null || p.cut)) ? B('Unpin all shown', () => edit(() => { for (const p of Object.values(M.pts)) if (mVisible(p)) { delete p.ang; delete p.cut; } drawCompasses(); }), 'Show the measurements shown here at every section angle or height') : null) : null,
         row(B('Clear this view', () => edit(() => { mClear(true); mSel = null; }), 'Remove the measurements in this view (' + n + ' points)'),
           B('Clear all', () => edit(() => { mClear(false); mSel = null; }), 'Remove every measurement, in both views')),
         row(B('Export PNG', () => exportDrawing('png')), B('Export PDF', () => exportDrawing('pdf'))),
@@ -6430,18 +6457,29 @@
       const out = new Uint8Array(len); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
       return out;
     }
+    // where measurements pin to here: the section angle, or (from above) the heights shown
+    function pinWhere() {
+      if (mView() === 'side') return mAng(state.viewAngle);
+      const [lo, hi] = curCut(), r = sceneZRange(), at = (t) => r ? num(hDisp(r[0] + (r[1] - r[0]) * t, zBase()), 3) : num(t, 3);
+      return 'heights ' + at(lo) + '–' + at(hi) + ' ' + UNIT_LABEL;
+    }
+    function mPinPts(ids) {
+      const M = measures(), side = mView() === 'side';
+      for (const p of ids) if (M.pts[p]) { if (side) M.pts[p].ang = state.viewAngle; else M.pts[p].cut = curCut(); }
+      drawCompasses(); syncTopBox();
+    }
     function mPinSelected() {
-      if (topMode() || !state.scene) return;
-      const M = measures(), pts = new Set();
+      if (!state.scene) return;
+      const M = measures(), pts = new Set(), side = mView() === 'side';
       if (mSel && mObj(mSel)) for (const p of mGroup(mSel)) pts.add(p);
-      else for (const [k, p] of Object.entries(M.pts)) if (p.v === 'side' && p.ang == null) pts.add(k);
+      else for (const [k, p] of Object.entries(M.pts)) if (mVisible(p) && (side ? p.ang == null : !p.cut)) pts.add(k);
       if (!pts.size) return;
-      pushUndo();
-      for (const p of pts) if (M.pts[p]) M.pts[p].ang = state.viewAngle;
-      mChanged(); drawCompasses();
+      pushUndo(); mPinPts(pts); mChanged();
     }
     function setMeasure(on) {
+      const was = perfectNow();
       state.measure = !!on; mSel = null; mConnect = null; mHoverSnap = null;
+      if (perfectNow() !== was) recalc();
       if (on) { state.sel = new Set(); state.selNodes = new Set(); }
       measureBar.style.display = on ? 'inline-flex' : 'none';
       syncModeBtns(); renderAll();
