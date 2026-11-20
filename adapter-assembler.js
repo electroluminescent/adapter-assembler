@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.29.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.30.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = "3.29.0";
+  const APP_VERSION = "3.30.0";
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -2664,6 +2664,7 @@
     ungroup: '<rect x="2" y="2" width="5.5" height="5.5" rx="1"/><rect x="8.5" y="8.5" width="5.5" height="5.5" rx="1"/>',
     list: '<path d="M6 4h7.5M6 8h7.5M6 12h7.5M2.5 4h.5M2.5 8h.5M2.5 12h.5"/>',
     add: '<path d="M8 3v10M3 8h10"/>',
+    ruler: '<path d="M1.8 11.2 11.2 1.8l3 3-9.4 9.4z"/><path d="M4.6 8.4l1.4 1.4M6.6 6.4l.9.9M8.6 4.4l1.4 1.4"/>',
     eye: '<path d="M1.5 8s2.4-4.3 6.5-4.3S14.5 8 14.5 8s-2.4 4.3-6.5 4.3S1.5 8 1.5 8z"/><circle cx="8" cy="8" r="1.9"/>',
     eyeoff: '<path d="M1.5 8s2.4-4.3 6.5-4.3S14.5 8 14.5 8s-2.4 4.3-6.5 4.3S1.5 8 1.5 8z" stroke-opacity=".45"/><path d="M2.5 13.5 13.5 2.5"/>',
     pick: '<path d="M4 2.2l8.2 6.1-3.7.7 2.1 4-1.7.9-2.1-4L4 12.6z"/>',
@@ -3067,6 +3068,12 @@
       saveSettings(); syncModeBtns(); drawSection();
     },
       { title: 'Draw everything not selected as one grey shape, without handles' });
+    // the Measurement view: rulers only (the part monomorphic, its points to snap to), and its drawing to export
+    const measureBtn = hbtn('ruler', 'Measure', () => setMeasure(!state.measure), { title: 'Measurement view: draw rulers on the part (drag; Ctrl snaps to points), right-click for more; export the drawing as PNG or PDF' });
+    const measureBar = el('div', { style: 'display:none;gap:2px' },
+      hbtn('trash', 'Clear', () => { if (!Object.keys(measures().pts).some(k => measures().pts[k].v === mView())) return; pushUndo(); mClear(true); mSel = null; mChanged(); }, { title: 'Remove the measurements in this view' }),
+      hbtn('download', 'PNG', () => exportDrawing('png'), { title: 'Export the drawing as a PNG picture' }),
+      hbtn('download', 'PDF', () => exportDrawing('pdf'), { title: 'Export the drawing as a PDF' }));
     const modeBar = el('div', { style: 'display:inline-flex;gap:2px' },
       modeBtn('section', 'sideview', 'Radius/height', 'Cross-section: radius across, height up'),
       modeBtn('top', 'topview', 'Overhead', 'Seen from above: teeth of cogs, sides of n-sided objects, the section\'s angle'));
@@ -3074,7 +3081,7 @@
     const selBtn = hbtn('transform', 'Selection', () => { state.selBoxCollapsed = !state.selBoxCollapsed; saveSettings(); renderSelBox(); },
       { title: 'Move, scale or rotate the selection' });
     selBtn.style.display = 'none';
-    const viewBar = el('div', { style: 'position:absolute;right:30px;top:6px;display:flex;gap:6px;align-items:center;z-index:4' }, selBtn, monoBtn, modeBar, zoomTag);
+    const viewBar = el('div', { style: 'position:absolute;right:30px;top:6px;display:flex;flex-wrap:wrap;justify-content:flex-end;max-width:calc(100% - 40px);gap:6px;align-items:center;z-index:4' }, selBtn, measureBar, measureBtn, monoBtn, modeBar, zoomTag);
     const coord = el('div', { style: 'position:absolute;right:30px;top:32px;font-size:11px;color:#555;background:rgba(255,255,255,.9);padding:2px 6px;border-radius:3px;pointer-events:none' });
     const loading = el('div', { style: 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#666;background:#fbfbfc' }, 'Start a project with New / open…');
     const overlay = el('div', { style: 'position:absolute;inset:0;pointer-events:none;overflow:hidden' });
@@ -3438,12 +3445,17 @@
       if (e.key === 'Escape') {
         if (splash.style.display !== 'none' && state.scene) { hideSplash(); e.stopPropagation(); e.preventDefault(); return; }
         if (menu.style.display !== 'none') { hideMenu(); e.stopPropagation(); e.preventDefault(); return; }
+        if (state.measure && (mConnect || mSel)) { mConnect = null; mSel = null; drawSection(); e.stopPropagation(); e.preventDefault(); return; }
         if (state.sel.size || state.selNodes.size) { state.sel = new Set(); state.selNodes = new Set(); renderAll(); e.stopPropagation(); e.preventDefault(); }
         return;
       }
       if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))) { redo(); e.preventDefault(); e.stopPropagation(); return; }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { undo(); e.preventDefault(); e.stopPropagation(); return; }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd' && state.selNodes.size) { duplicateNodes(topSelected(state.scene)); e.preventDefault(); e.stopPropagation(); return; }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && state.measure) {
+        if (mSel) { pushUndo(); mDelete(mSel); mSel = null; mChanged(); }
+        e.preventDefault(); e.stopPropagation(); return;
+      }
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (state.sel.size) { pushUndo(); deletePoints([...state.sel]); state.sel = new Set(); markEdited(); recalc(); }
         else if (state.selNodes.size) deleteNodes(topSelected(state.scene));
@@ -3969,8 +3981,9 @@
       if (!zoomedOut) monoAutoOff = false;
       return zoomedOut && !monoAutoOff;
     };
-    const monoOn = () => !!(state.mono || autoMono());
-    const monoHid = (id) => monoOn() && !selectedAncestorOf(id);
+    // (the Measurement view: everything monomorphic, nothing to select)
+    const monoOn = () => !!(state.mono || autoMono() || state.measure);
+    const monoHid = (id) => monoOn() && (state.measure || !selectedAncestorOf(id));
     // one shape from these outlines: their edges first, then their fills over them (hiding the edges between them);
     // the subtracted ones are holes (the grid shows through), edged only where they cut the shape
     function drawMono(into, pos, neg, key) {
@@ -4363,7 +4376,7 @@
       syncModeBtns(); drawSection();
     }
     function syncModeBtns() {
-      for (const b of [...modeBar.children, monoBtn]) { const on = b === monoBtn ? monoOn() : (b.__mode === 'top') === topMode(); b.style.background = on ? '#ddf4ff' : '#fff'; b.style.borderColor = on ? '#54aeff' : '#ced4da'; }
+      for (const b of [...modeBar.children, monoBtn, measureBtn]) { const on = b === monoBtn ? monoOn() : b === measureBtn ? !!state.measure : (b.__mode === 'top') === topMode(); b.style.background = on ? '#ddf4ff' : '#fff'; b.style.borderColor = on ? '#54aeff' : '#ced4da'; }
     }
     // where new objects go: the cross-section's view, whichever is showing
     const secView = () => topMode() ? otherView(view, false) : view;
@@ -4993,9 +5006,11 @@
       sceneBase = drag && drag.base != null ? drag.base : zBase();
       const MS0 = MS; MS = 1;
       if (topMode()) {
-        drawWrap(); drawTop(g); drawHover();
+        drawWrap(); drawTop(g); drawHover(); drawMeasures();
         zoomTag.textContent = (view.fit || fitScale) > 0 ? Math.round(view.s / (view.fit || fitScale) * 100) + '%' : '';
-        syncThreadBoxes(); renderSelBox();
+        if (state.measure) for (const [k, tb] of threadBoxes) { tb.box.remove(); threadBoxes.delete(k); }
+        else syncThreadBoxes();
+        renderSelBox();
         MS = MS0; return;
       }
       drawWrap();
@@ -5044,9 +5059,9 @@
         g.append(note);
       }
       // (there, of the objects only the geometric ones are drawn over it, to work on: they are cut where the slice is)
-      const cutOnly = !!(off && monoOn());
+      const cutOnly = !!(off && monoOn() && !state.measure);
       // selected objects are drawn last (on top), so their points and edges can be picked over others
-      const order = cutOnly ? frontOrder().filter(id => state.scene.nodes[id].type === 'geo') : frontOrder(), ext = { y0: Infinity, y1: -Infinity, z0: Infinity, z1: -Infinity };
+      const order = cutOnly ? frontOrder().filter(id => state.scene.nodes[id].type === 'geo') : off && state.measure ? [] : frontOrder(), ext = { y0: Infinity, y1: -Infinity, z0: Infinity, z1: -Infinity };
       lastPolys = { 1: {}, '-1': {} };
       // monomorphic: everything not selected drawn as one grey shape, without handles
       for (const sideK of [-1, 1]) {
@@ -5189,7 +5204,7 @@
       }
       // radial cloners in the selection: the copies' axis, with a handle for its distance from the main axis
       for (const id of MS > 0 && !cutOnly ? Object.keys(state.scene.nodes) : []) {
-        if (!canPick(id) || nodeFlag(state.scene, id, 'hide2d')) continue;
+        if (!canPick(id) || nodeFlag(state.scene, id, 'hide2d') || state.measure) continue;
         const hp = clonerHandle(id); if (!hp) continue;
         const [x1, y1] = toScreen(hp.a.y, hp.a.z), [x2, y2] = toScreen(hp.b.y, hp.b.z), [hx, hy] = toScreen(hp.at.y, hp.at.z);
         const hot = drag && drag.type === 'cloner' && drag.id === id;
@@ -5320,10 +5335,11 @@
         label(svg, lx, drag.labelAt[1] - 14, [drag.label], { border: '#faa2c1', bg: 'rgba(255,240,246,.95)' });
       }
       if (drag && drag.type === 'bevel' && drag.label) label(svg, drag.labelAt[0] + 12, drag.labelAt[1] - 10, [drag.label], { border: '#ffc078', bg: 'rgba(255,249,219,.95)' });
-      drawCursor();
+      drawMeasures();
+      if (!mExporting) drawCursor();
       drawHover();
       zoomTag.textContent = (view.fit || fitScale) > 0 ? Math.round(view.s / (view.fit || fitScale) * 100) + '%' : '';
-      if (cutOnly) for (const [k, tb] of threadBoxes) { tb.box.remove(); threadBoxes.delete(k); }
+      if (cutOnly || state.measure) for (const [k, tb] of threadBoxes) { tb.box.remove(); threadBoxes.delete(k); }
       else syncThreadBoxes();
       renderSelBox();
       MS = MS0;
@@ -5415,6 +5431,7 @@
     }
     let wrapKey = '', wrapTimer = 0;
     function drawWrap(settled) {
+      if (state.measure) { const c = wrapCanvas.getContext('2d'); c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, wrapCanvas.width, wrapCanvas.height); wrapCanvas.style.transform = ''; wrapKey = ''; return; }
       if (topMode() || sliceView()) {
         // nothing behind the view from above
         clearTimeout(wrapTimer);
@@ -5768,9 +5785,296 @@
 
     // ---- pointer interaction ----
     svg.addEventListener('contextmenu', (e) => e.preventDefault());
+    // ---- Measurements: rulers on the cross-section views, kept with the scene ----
+    // scene.measures = { pts: { id: { v: 'side' | 'top', x, y, call?, co? } }, segs: { id: { a, b, call?, co? } } }
+    // (side: x across the view, signed, and y the height; top: the scene's x and y). In the Measurement view only they can
+    // be worked on; the part is drawn monomorphic, its points still there to snap to (Ctrl).
+    const mView = () => topMode() ? 'top' : 'side';
+    function measures() {
+      const sc = state.scene;
+      if (!sc.measures || typeof sc.measures !== 'object') sc.measures = { pts: {}, segs: {} };
+      if (!sc.measures.pts) sc.measures.pts = {};
+      if (!sc.measures.segs) sc.measures.segs = {};
+      return sc.measures;
+    }
+    let mSel = null, mConnect = null, mHoverSnap = null, mExporting = false;
+    const mId = (pre) => pre + Date.now().toString(36).slice(-4) + Math.random().toString(36).slice(2, 6);
+    const mScreen = (P) => { const M0 = MS; MS = 1; const r = toScreen(P.x, P.y); MS = M0; return r; };
+    const mWorld = (sx, sy) => { const M0 = MS; MS = 1; const r = toWorld(sx, sy); MS = M0; return r; };
+    const mAng = (v) => num(v * ANG_SCALE, ANG_SCALE === 1 ? 1 : 4) + ANG_LABEL;
+    const mLen = (v) => num(mm(v), 3) + ' ' + UNIT_LABEL;
+    // the points of the part (and other measurements) to snap to
+    function mTargets(except) {
+      const T = [], v = mView();
+      if (v === 'top') {
+        for (const h of topHandles(true)) if (isFinite(h.x) && isFinite(h.y)) T.push([h.x, h.y]);
+        T.push([0, 0]);
+      } else {
+        for (const id of sliceOff() ? [] : frontOrder()) {
+          const n = state.scene.nodes[id];
+          if (n.type === 'geo') { for (const c of geoSidePts(id).pts) T.push([c.along, c.z]); continue; }
+          for (const h of handlesOf(id)) { T.push([h.y, h.z]); T.push([-h.y, h.z]); }
+        }
+        const loops = meshSection(state.viewAngle * Math.PI / 180, sliceOff() || 0);
+        if (loops) for (const L of loops) for (const p of L) T.push([p[0], p[1]]);
+        T.push([0, zBase()]);
+      }
+      for (const [id, p] of Object.entries(measures().pts)) if (p.v === v && id !== except) T.push([p.x, p.y]);
+      return T;
+    }
+    // onto a point near; else level or upright with one (each way on its own); { p, mark, lines }
+    function mSnap(P, T) {
+      const thr = snapThr();
+      let best = null, bd = thr;
+      for (const t of T) { const d = Math.hypot(t[0] - P[0], t[1] - P[1]); if (d < bd) { bd = d; best = t; } }
+      if (best) return { p: [best[0], best[1]], mark: best, lines: [] };
+      let bx = null, by = null;
+      for (const t of T) {
+        if (Math.abs(t[0] - P[0]) < thr && (!bx || Math.abs(t[0] - P[0]) < Math.abs(bx[0] - P[0]))) bx = t;
+        if (Math.abs(t[1] - P[1]) < thr && (!by || Math.abs(t[1] - P[1]) < Math.abs(by[1] - P[1]))) by = t;
+      }
+      const p = [bx ? bx[0] : P[0], by ? by[1] : P[1]], lines = [];
+      if (bx) lines.push([bx, p]);
+      if (by) lines.push([by, p]);
+      return { p, mark: bx || by ? p : null, lines };
+    }
+    function mSegExists(a, b) { return Object.values(measures().segs).some(s => (s.a === a && s.b === b) || (s.a === b && s.b === a)); }
+    function mChanged() { state.edited = true; rememberScene(); drawSection(); }
+    // removes a point and its rulers; a ruler and the points it leaves alone
+    function mDelete(sel) {
+      const M = measures();
+      if (sel.kind === 'p') { delete M.pts[sel.id]; for (const [k, s] of Object.entries(M.segs)) if (s.a === sel.id || s.b === sel.id) delete M.segs[k]; }
+      else {
+        const s = M.segs[sel.id]; delete M.segs[sel.id];
+        if (s) for (const p of [s.a, s.b]) if (!Object.values(M.segs).some(o => o.a === p || o.b === p)) delete M.pts[p];
+      }
+    }
+    function mClear(viewOnly) {
+      const M = measures(), v = mView();
+      for (const [k, p] of Object.entries(M.pts)) if (!viewOnly || p.v === v) delete M.pts[k];
+      for (const [k, s] of Object.entries(M.segs)) if (!M.pts[s.a] || !M.pts[s.b]) delete M.segs[k];
+    }
+
+    // drawn over the view (only in the Measurement view)
+    function drawMeasures() {
+      if (!state.measure || !state.scene || !view) return;
+      const M = measures(), v = mView(), g = sv('g', { id: 'aa-measures' }), INK = '#1864ab', SEL = '#e03131';
+      svg.append(g);
+      const halo = { 'paint-order': 'stroke', stroke: '#fff', 'stroke-width': 3, 'stroke-linejoin': 'round' };
+      // a label: on the drawing, or in a box at the end of a leader (a callout, moved by dragging it)
+      const label = (ax, ay, lines, o) => {
+        if (o.call) {
+          const co = o.co || [36, -30], bx = ax + co[0], by = ay + co[1], fs = 11, w = Math.max(...lines.map(s => s.length)) * 6.3 + 10, h = lines.length * 14 + 6;
+          const left = co[0] < 0 ? bx - w : bx, top = by - h / 2;
+          g.append(sv('line', { x1: ax, y1: ay, x2: co[0] < 0 ? left + w : left, y2: by, stroke: o.col, 'stroke-width': 1 }));
+          g.append(sv('circle', { cx: ax, cy: ay, r: 1.8, fill: o.col }));
+          const box = sv('rect', { x: left, y: top, width: w, height: h, rx: 3, fill: '#fff', stroke: o.col, 'stroke-width': 1, style: 'cursor:move' });
+          box.__mcall = o.ref; g.append(box);
+          lines.forEach((s, i) => { const t = sv('text', { x: left + 5, y: top + 14 + i * 14, 'font-size': fs, fill: o.col, 'pointer-events': 'none' }); t.textContent = s; g.append(t); });
+          return;
+        }
+        const t = sv('text', { x: ax, y: ay, 'font-size': 11, fill: o.col, 'text-anchor': o.anchor || 'start', ...halo, ...(o.rot != null ? { transform: 'rotate(' + o.rot.toFixed(2) + ' ' + ax.toFixed(1) + ' ' + ay.toFixed(1) + ')' } : {}), 'pointer-events': 'none' });
+        if (lines.length === 1) t.textContent = lines[0];
+        else lines.forEach((s, i) => { const ts = sv('tspan', { x: ax, dy: i ? 13 : 0 }); ts.textContent = s; t.append(ts); });
+        g.append(t);
+      };
+      const ruler = (A, B, o) => {
+        const [x1, y1] = mScreen(A), [x2, y2] = mScreen(B), L = Math.hypot(x2 - x1, y2 - y1);
+        g.append(sv('line', { x1, y1, x2, y2, stroke: o.col, 'stroke-width': 1.3, ...(o.temp ? { 'stroke-dasharray': '5 3' } : {}) }));
+        if (L > 1e-6) {
+          const ux = (x2 - x1) / L, uy = (y2 - y1) / L, ah = Math.min(9, L / 3), aw = ah * 0.38;
+          for (const [px, py, sx] of [[x1, y1, 1], [x2, y2, -1]])
+            g.append(sv('path', { d: 'M' + px + ' ' + py + 'L' + (px + sx * ux * ah - uy * aw) + ' ' + (py + sx * uy * ah + ux * aw) + 'L' + (px + sx * ux * ah + uy * aw) + ' ' + (py + sx * uy * ah - ux * aw) + 'Z', fill: o.col }));
+        }
+        if (!o.temp) { const hl = sv('line', { x1, y1, x2, y2, stroke: 'transparent', 'stroke-width': 9, style: 'cursor:pointer' }); hl.__mseg = o.id; g.append(hl); }
+        // its length and its angle (to the view's level)
+        const d = Math.hypot(B.x - A.x, B.y - A.y);
+        let ang = Math.atan2(-(y2 - y1), x2 - x1) * 180 / Math.PI; ang = ((ang % 180) + 180) % 180;
+        const text = [mLen(d) + '  ' + mAng(ang)], mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+        if (o.call) { label(mx, my, text, o); return; }
+        let rot = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI; if (rot > 90) rot -= 180; if (rot <= -90) rot += 180;
+        const rr = rot * Math.PI / 180;
+        label(mx + Math.sin(rr) * 6, my - Math.cos(rr) * 6, text, { ...o, anchor: 'middle', rot });
+      };
+      for (const [sid, s] of Object.entries(M.segs)) {
+        const A = M.pts[s.a], B = M.pts[s.b]; if (!A || !B || A.v !== v || B.v !== v) continue;
+        const on = !mExporting && mSel && mSel.kind === 's' && mSel.id === sid;
+        ruler(A, B, { id: sid, col: on ? SEL : INK, call: s.call, co: s.co, ref: { kind: 's', id: sid } });
+      }
+      // where two rulers meet: the angle between them
+      const at = {};
+      for (const s of Object.values(M.segs)) for (const [p, q] of [[s.a, s.b], [s.b, s.a]]) (at[p] = at[p] || []).push(q);
+      for (const [pid, others] of Object.entries(at)) {
+        const P = M.pts[pid]; if (!P || P.v !== v || others.length !== 2) continue;
+        const [px, py] = mScreen(P), [ax, ay] = mScreen(M.pts[others[0]] || P), [bx, by] = mScreen(M.pts[others[1]] || P);
+        let a0 = Math.atan2(ay - py, ax - px), a1 = Math.atan2(by - py, bx - px), da = a1 - a0;
+        while (da > Math.PI) da -= 2 * Math.PI;
+        while (da < -Math.PI) da += 2 * Math.PI;
+        const r = 20, deg = Math.abs(da) * 180 / Math.PI;
+        if (deg < 0.05) continue;
+        g.append(sv('path', { d: 'M' + (px + r * Math.cos(a0)) + ' ' + (py + r * Math.sin(a0)) + 'A' + r + ' ' + r + ' 0 0 ' + (da > 0 ? 1 : 0) + ' ' + (px + r * Math.cos(a0 + da)) + ' ' + (py + r * Math.sin(a0 + da)), fill: 'none', stroke: INK, 'stroke-width': 1 }));
+        const am = a0 + da / 2;
+        label(px + (r + 12) * Math.cos(am), py + (r + 12) * Math.sin(am) + 4, [mAng(deg)], { col: INK, anchor: 'middle' });
+      }
+      // the points: radius and height (across and up), or radius and angle (from above)
+      for (const [pid, P] of Object.entries(M.pts)) {
+        if (P.v !== v) continue;
+        const [x, y] = mScreen(P), on = !mExporting && ((mSel && mSel.kind === 'p' && mSel.id === pid) || mConnect === pid), col = on ? SEL : INK;
+        const text = v === 'side' ? ['r ' + mLen(Math.abs(P.x)) + ' · h ' + num(hDisp(P.y, zBase()), 3) + ' ' + UNIT_LABEL]
+          : ['r ' + mLen(Math.hypot(P.x, P.y)) + ' · ' + mAng(((Math.atan2(P.y, P.x) * 180 / Math.PI) + 360) % 360)];
+        const wide = text[0].length * 6.3 + 10, flipL = x + 7 + wide > size().w;
+        label(flipL ? x - 7 : x + 7, y - 7, text, { col, call: P.call, co: P.co || (flipL ? [-36, -30] : null), ref: { kind: 'p', id: pid }, anchor: flipL ? 'end' : 'start' });
+        const c = sv('circle', { cx: x, cy: y, r: on ? 4.5 : 3.5, fill: '#fff', stroke: col, 'stroke-width': 1.6, style: 'cursor:move' });
+        c.__mpt = pid; g.append(c);
+      }
+      // a ruler being drawn, and the snap
+      if (drag && drag.type === 'mnew' && drag.moved) ruler({ x: drag.A[0], y: drag.A[1] }, { x: drag.B[0], y: drag.B[1] }, { col: SEL, temp: true });
+      const sn = drag && drag.snapShow || mHoverSnap;
+      if (sn && !mExporting) {
+        for (const [a, b] of sn.lines || []) { const [x1, y1] = mScreen({ x: a[0], y: a[1] }), [x2, y2] = mScreen({ x: b[0], y: b[1] }); g.append(sv('line', { x1, y1, x2, y2, stroke: '#f08c00', 'stroke-width': 1, 'stroke-dasharray': '3 3', 'pointer-events': 'none' })); }
+        if (sn.mark) { const [x, y] = mScreen({ x: sn.mark[0], y: sn.mark[1] }); g.append(sv('rect', { x: x - 5, y: y - 5, width: 10, height: 10, fill: 'none', stroke: '#f08c00', 'stroke-width': 1.6, 'pointer-events': 'none' })); }
+      }
+      if (mConnect && !mExporting) {
+        const t = sv('text', { x: AX_L + 8, y: 18, 'font-size': 11, fill: SEL, ...halo, 'pointer-events': 'none' });
+        t.textContent = 'Pick a point (or a place) to join it to — Esc to stop'; g.append(t);
+      }
+    }
+
+    function measureDown(e) {
+      const [sx, sy] = local(e), W = mWorld(sx, sy), M = measures(), v = mView(), t = e.target, ctrl = e.ctrlKey || e.metaKey;
+      if (e.button === 2) {
+        const ref = t.__mpt ? { kind: 'p', id: t.__mpt } : t.__mseg ? { kind: 's', id: t.__mseg } : t.__mcall || null;
+        mSel = ref; mConnect = null; drawSection(); showMeasureMenu(e.clientX, e.clientY, ref); return;
+      }
+      svg.setPointerCapture(e.pointerId);
+      const T = mTargets(t.__mpt);
+      if (mConnect) {
+        const a = mConnect; mConnect = null; pushUndo();
+        let b = t.__mpt;
+        if (!b) { const P = ctrl ? mSnap(W, T).p : W; b = mId('p'); M.pts[b] = { v, x: P[0], y: P[1] }; }
+        if (b !== a && M.pts[a] && !mSegExists(a, b)) M.segs[mId('s')] = { a, b };
+        mSel = { kind: 'p', id: b }; drag = { type: 'mnone' }; mChanged(); return;
+      }
+      if (t.__mcall) {
+        const o = t.__mcall.kind === 'p' ? M.pts[t.__mcall.id] : M.segs[t.__mcall.id];
+        mSel = t.__mcall; drag = { type: 'mcall', ref: t.__mcall, sx, sy, co0: (o && o.co) || [36, -30], undo: false }; drawSection(); return;
+      }
+      if (t.__mpt) { mSel = { kind: 'p', id: t.__mpt }; drag = { type: 'mpt', id: t.__mpt, T, undo: false }; drawSection(); return; }
+      if (t.__mseg) { mSel = { kind: 's', id: t.__mseg }; drag = { type: 'mnone' }; drawSection(); return; }
+      // a new ruler, from here to where the button is let go
+      const s0 = ctrl ? mSnap(W, T) : null;
+      drag = { type: 'mnew', A: s0 ? s0.p : W, B: s0 ? s0.p : W, T, sx, sy, moved: false, snapShow: s0 };
+      mSel = null; mHoverSnap = null; drawSection();
+    }
+    function measureMove(e) {
+      const [sx, sy] = local(e), W = mWorld(sx, sy), ctrl = e.ctrlKey || e.metaKey, M = measures();
+      if (topMode()) { const r = Math.hypot(W[0], W[1]), a = ((Math.atan2(W[1], W[0]) * 180 / Math.PI) + 360) % 360; coord.textContent = 'x ' + fmt(W[0], 3) + ' · y ' + fmt(W[1], 3) + ' · r ' + fmt(r, 3) + ' ' + UNIT_LABEL + ' · ' + mAng(a); }
+      else coord.textContent = 'radius ' + fmt(Math.abs(W[0]), 3) + ' · height ' + num(hDisp(W[1], zBase()), 3) + ' ' + UNIT_LABEL;
+      if (!drag) {
+        const s = ctrl ? mSnap(W, mTargets()) : null, had = !!mHoverSnap;
+        mHoverSnap = s && (s.mark || s.lines.length) ? s : null;
+        svg.style.cursor = e.target.__mpt || e.target.__mcall ? 'move' : e.target.__mseg ? 'pointer' : 'crosshair';
+        if (had || mHoverSnap) drawSection();
+        return;
+      }
+      if (drag.type === 'mnew') {
+        const s = ctrl ? mSnap(W, drag.T) : null;
+        drag.B = s ? s.p : W; drag.snapShow = s;
+        if (Math.hypot(sx - drag.sx, sy - drag.sy) > 3) drag.moved = true;
+        drawSection(); return;
+      }
+      if (drag.type === 'mpt') {
+        const P = M.pts[drag.id]; if (!P) return;
+        if (!drag.undo) { pushUndo(); drag.undo = true; }
+        const s = ctrl ? mSnap(W, drag.T) : null, Q = s ? s.p : W;
+        P.x = Q[0]; P.y = Q[1]; drag.snapShow = s; drag.moved = true; drawSection(); return;
+      }
+      if (drag.type === 'mcall') {
+        const o = drag.ref.kind === 'p' ? M.pts[drag.ref.id] : M.segs[drag.ref.id]; if (!o) return;
+        if (!drag.undo) { pushUndo(); drag.undo = true; }
+        o.co = [drag.co0[0] + sx - drag.sx, drag.co0[1] + sy - drag.sy]; drag.moved = true; drawSection();
+      }
+    }
+    function measureUp(d) {
+      if (d.type === 'mnew' && d.moved && Math.hypot(d.B[0] - d.A[0], d.B[1] - d.A[1]) > 1e-9) {
+        const M = measures(), v = mView(), a = mId('p'), b = mId('p'), s = mId('s');
+        pushUndo();
+        M.pts[a] = { v, x: d.A[0], y: d.A[1] }; M.pts[b] = { v, x: d.B[0], y: d.B[1] }; M.segs[s] = { a, b };
+        mSel = { kind: 's', id: s }; mChanged(); return;
+      }
+      if (d.moved) mChanged(); else drawSection();
+    }
+    function showMeasureMenu(x, y, ref) {
+      const M = measures(), o = ref ? (ref.kind === 'p' ? M.pts[ref.id] : M.segs[ref.id]) : null;
+      menu.textContent = '';
+      const B = (label, f, title) => el('button', { type: 'button', style: BTN2, title: title || label, onclick: () => { hideMenu(); f(); } }, label);
+      const edit = (f) => { pushUndo(); f(); mChanged(); };
+      if (o) {
+        menu.append(el('div', { style: 'font-weight:700;margin-bottom:4px' }, ref.kind === 'p' ? 'Measurement point' : 'Ruler'),
+          row(ref.kind === 'p' ? B('Connect to…', () => { mConnect = ref.id; drawSection(); }, 'Join it to another point (or a new one) to make a ruler') : null,
+            B(o.call ? 'Label on the drawing' : 'Label as a callout', () => edit(() => { if (o.call) { delete o.call; delete o.co; } else o.call = true; })),
+            B(ref.kind === 'p' ? 'Delete point' : 'Delete ruler', () => edit(() => { mDelete(ref); mSel = null; }))), hr());
+      }
+      const n = Object.values(M.pts).filter(p => p.v === mView()).length;
+      menu.append(el('div', { style: 'font-weight:700;margin-bottom:4px' }, 'Measurements'),
+        row(B('Clear this view', () => edit(() => { mClear(true); mSel = null; }), 'Remove the measurements in this view (' + n + ' points)'),
+          B('Clear all', () => edit(() => { mClear(false); mSel = null; }), 'Remove every measurement, in both views')),
+        row(B('Export PNG', () => exportDrawing('png')), B('Export PDF', () => exportDrawing('pdf'))),
+        el('div', { style: 'color:#666;font-size:11px;margin-top:4px;max-width:260px' }, 'Drag to draw a ruler; hold Ctrl to snap to points (and to line up with them).'));
+      openMenu(x, y);
+    }
+    // the drawing (the view as it is, measurements and all) as a picture or a one-page PDF
+    async function exportDrawing(kind) {
+      if (!view) return;
+      mExporting = true; mHoverSnap = null; drawSection();
+      const { w, h } = size(), c2 = svg.cloneNode(true);
+      mExporting = false; drawSection();
+      for (const x of c2.querySelectorAll('#aa-cursor')) x.remove();
+      c2.setAttribute('xmlns', 'http://www.w3.org/2000/svg'); c2.setAttribute('width', w); c2.setAttribute('height', h); c2.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+      c2.setAttribute('style', 'font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#fff');
+      const img = new Image(), xml = new XMLSerializer().serializeToString(c2);
+      img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
+      try { await img.decode(); } catch (_) { state.exportError = 'Could not draw the view to export it'; renderAll(); return; }
+      const k = 2, cv = document.createElement('canvas'); cv.width = Math.round(w * k); cv.height = Math.round(h * k);
+      const cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, cv.width, cv.height); cx.drawImage(img, 0, 0, cv.width, cv.height);
+      const name = partName() + '-' + (topMode() ? 'overhead' : 'section') + '-drawing';
+      const save = (blob, ext) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = String(name).replace(/[\\/:*?"<>|]+/g, '_') + '.' + ext; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000); };
+      if (kind === 'png') { cv.toBlob(b => b && save(b, 'png'), 'image/png'); return; }
+      const jpg = Uint8Array.from(atob(cv.toDataURL('image/jpeg', 0.95).split(',')[1]), ch => ch.charCodeAt(0));
+      save(new Blob([pdfOfJpeg(jpg, cv.width, cv.height, w * 0.75, h * 0.75)], { type: 'application/pdf' }), 'pdf');
+    }
+    // a one-page PDF holding a JPEG picture, the page its size (points)
+    function pdfOfJpeg(jpg, iw, ih, pw, ph) {
+      const enc = new TextEncoder(), parts = [], offs = [];
+      let len = 0;
+      const push = (x) => { const b = typeof x === 'string' ? enc.encode(x) : x; parts.push(b); len += b.length; };
+      const obj = (n, body) => { offs[n] = len; push(n + ' 0 obj\n' + body + '\nendobj\n'); };
+      push('%PDF-1.4\n%âãÏÓ\n');
+      obj(1, '<< /Type /Catalog /Pages 2 0 R >>');
+      obj(2, '<< /Type /Pages /Kids [3 0 R] /Count 1 >>');
+      obj(3, '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' + pw.toFixed(2) + ' ' + ph.toFixed(2) + '] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>');
+      offs[4] = len;
+      push('4 0 obj\n<< /Type /XObject /Subtype /Image /Width ' + iw + ' /Height ' + ih + ' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ' + jpg.length + ' >>\nstream\n');
+      push(jpg); push('\nendstream\nendobj\n');
+      const cs = 'q ' + pw.toFixed(2) + ' 0 0 ' + ph.toFixed(2) + ' 0 0 cm /Im0 Do Q';
+      obj(5, '<< /Length ' + cs.length + ' >>\nstream\n' + cs + '\nendstream');
+      const xref = len;
+      push('xref\n0 6\n0000000000 65535 f \n' + [1, 2, 3, 4, 5].map(n => String(offs[n]).padStart(10, '0') + ' 00000 n \n').join(''));
+      push('trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n' + xref + '\n%%EOF\n');
+      const out = new Uint8Array(len); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
+      return out;
+    }
+    function setMeasure(on) {
+      state.measure = !!on; mSel = null; mConnect = null; mHoverSnap = null;
+      if (on) { state.sel = new Set(); state.selNodes = new Set(); }
+      measureBar.style.display = on ? 'inline-flex' : 'none';
+      syncModeBtns(); renderAll();
+    }
+
     svg.addEventListener('pointerdown', (e) => {
       if (!state.scene) return;
       hideMenu();
+      if (state.measure && e.button !== 1) { measureDown(e); return; }
       if (topMode()) {
         // from above: click an object to select it, drag the section line to turn the section; middle/right-drag pans
         const [sx, sy] = local(e); MS = 1;
@@ -5970,6 +6274,7 @@
     });
     svg.addEventListener('pointermove', (e) => {
       if (!state.scene) return;
+      if (state.measure && (!drag || /^m(new|pt|call|none)$/.test(drag.type))) { measureMove(e); return; }
       if (topMode()) {
         const [sx, sy] = local(e); MS = 1;
         const [X, Y] = toWorld(sx, sy), r = Math.hypot(X, Y), a = ((Math.atan2(Y, X) * 180 / Math.PI) + 360) % 360;
@@ -6141,6 +6446,7 @@
       offTag.style.display = 'none';
       if (!drag) return;
       const d = drag; drag = null;
+      if (/^m(new|pt|call|none)$/.test(d.type)) { measureUp(d); return; }
       if (d.type === 'pan') return;
       if (d.type === 'bandline' || d.type === 'sliceline') { saveSettings(); drawSection(); return; }
       if (d.type === 'geoh' || d.type === 'georot') { if (d.moved) recalc(); else renderAll(); return; }
@@ -6778,6 +7084,13 @@
       const x = panels.project.extra;
       x.textContent = s.text.startsWith('Error') ? '✘ error' : state.busy ? 'updating…' : '';
       x.style.color = s.color; x.title = s.text;
+      // the download button follows the chosen format (and the state) even while a field is being edited
+      const b = panels.project.tools.querySelector('[data-dl]');
+      if (b) {
+        const l = b.querySelector('.aa-hl'); if (l) l.textContent = 'Download ' + (state.format || 'stl').toUpperCase();
+        b.disabled = !s.ready; b.style.opacity = s.ready ? '' : '0.45'; b.style.cursor = s.ready ? '' : 'default';
+        b.title = s.ready ? downloadLabel(s) : 'The part is still being built';
+      }
     }
     function renderSide() {
       const fe = document.activeElement;
@@ -6801,7 +7114,7 @@
         hbtn('upload', 'Import', pickJsonFile, { title: 'Import a scene or saved models from a JSON file' }),
         hbtn('fit', 'Fit', () => { fit(); drawSection(); }, { title: 'Fit the cross-section view' }),
         (() => { const b = hbtn('download', 'Download ' + (state.format || 'stl').toUpperCase(), download, { title: s.ready ? downloadLabel(s) : 'The part is still being built', disabled: !s.ready });
-          b.style.background = '#1f6feb'; b.style.color = '#fff'; b.style.borderColor = '#1f6feb'; return b; })());
+          b.style.background = '#1f6feb'; b.style.color = '#fff'; b.style.borderColor = '#1f6feb'; b.setAttribute('data-dl', '1'); return b; })());
       const msg = state.exportError || (state.exporting ? 'Exporting ' + state.exporting + '…' : state.libMessage) || '';
       appendKids(panels.project.body,
         msg ? el('div', { style: 'margin-bottom:4px;color:' + (state.exportError ? '#b42318' : '#1a7f37') }, msg) : null,

@@ -86,6 +86,16 @@ A browser tool for designing threaded adapters, rings and gears, and exporting t
 
   * Everything not selected as one grey shape, taken from the finished solid.
 
+- #### **Measurement view**
+  * The Measure button: rulers only; the part is drawn monomorphic, without the inner shading.
+  * Drag to draw a ruler; Ctrl snaps its ends to the part's points (and lines them up level or upright).
+  * Rulers show their length and angle; where two meet, the angle between them.
+  * Points show radius and height (radius/height view) or radius and angle (overhead).
+  * Right-click: connect a point to another to chain rulers, label as a callout (drag the box), delete, clear.
+  * Points and callouts can be dragged; Delete removes the selected one; undoable.
+  * Kept with the scene (saved, exported and reopened with it), each in its own view.
+  * Export the drawing as PNG or PDF.
+
 - #### **Move readout**
 
   * Distance and angle, or a radial or orthogonal vector, by the pointer while dragging.
