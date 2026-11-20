@@ -90,17 +90,21 @@ A browser tool for designing threaded adapters, rings and gears, and exporting t
   * The Measure button: rulers only; the part is drawn monomorphic, without the inner shading.
   * Drag to draw a ruler; Ctrl snaps its ends to the part's points (and lines them up level or upright).
   * Rulers show their length, and their angle unless it is square to the view; where two meet, the angle between them (a square mark for a right angle).
-  * Scroll while placing to switch between a ruler and an angle: the angle is about the part's point nearest the start (from the view's level when started on one).
-  * Points show R (radius) and H (height), or R and θ (angle) from above; points, rulers and angles each have their own colour, with a key at the top left.
+  * Scroll while placing to switch between a ruler, an angle and a radius:
+    * Angle: about the part's point nearest the start (from the view's level when started on one).
+    * Radius: drag across an arc (a bevel, a cog's rounding) from one end to the other; its radius, with the centre marked.
+  * Points show their place, (radius, height) or (radius, angle) from above; points, rulers, angles and radii each have their own colour, with a key at the top left.
+  * Perfect: round bevels and cog roundings drawn as true curves, whatever their edge count (straight-sided shapes stay as they are).
   * Nothing is repeated: a point put on another becomes that point, and a second ruler or angle between the same points is not added.
   * Shift-drag from a point starts a ruler there (a plain drag moves the point).
   * Labels keep clear of each other and of the rulers; where there is no room they become callouts, set off the part.
   * Rulers lying over each other are set apart, with extension lines.
   * Right-click: connect a point to another to chain rulers, label as a callout (drag the box), turn each datapoint on or off, delete, clear.
-  * Pin a measurement to the section angle: it shows only there, is marked on the compass (which snaps to it), and is counted above the compass's ends when out of its range (click to turn to it).
+  * Pin a measurement to the section angle (right-click it, right-click anywhere for all shown, or the Pin button): it shows only there, is marked on the compass (which snaps to it), and is counted above the compass's ends when out of its range (click to turn to it).
   * Points and callouts can be dragged; Delete removes the selected one; undoable.
   * Kept with the scene (saved, exported and reopened with it), each in its own view.
   * Export the drawing as PNG or PDF.
+  * The axes stay readable over the drawing.
 
 - #### **Move readout**
 

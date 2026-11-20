@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.31.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.32.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = "3.31.1";
+  const APP_VERSION = "3.32.0";
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -76,7 +76,7 @@
 
 
   // Settings remembered in this browser.
-  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'quality', 'collapsed', 'secMode', 'mono', 'autoSimplify', 'rotMode', 'orbitSnap', 'offsetMode', 'heightFrom', 'linkViews', 'linkSlicers', 'settingsRev', 'treeFolded', 'cutsLo', 'cutHandles', 'topCut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts', 'cutLo'];
+  const SETTINGS_KEY = 'adapterAssembler.settings', SAVED_SETTINGS = ['helical', 'optimize', 'precision', 'faces', 'format', 'lenUnit', 'angUnit', 'quality', 'collapsed', 'secMode', 'mono', 'autoSimplify', 'rotMode', 'orbitSnap', 'measurePerfect', 'offsetMode', 'heightFrom', 'linkViews', 'linkSlicers', 'settingsRev', 'treeFolded', 'cutsLo', 'cutHandles', 'topCut', 'wire', 'ssao', 'ortho', 'flip', 'paneLeft', 'paneSide', 'minLeft', 'min3d', 'minSide', 'selBoxCollapsed', 'sidePanels', 'cutMode', 'cuts', 'cutLo'];
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     for (const k of SAVED_SETTINGS) if (k in saved && typeof saved[k] === typeof state[k]) state[k] = saved[k];
@@ -606,6 +606,9 @@
   //     the next point (outA) or the previous one (outB) carried on straight
   //     past the corner, and a cove of radius r joining it to the other edge).
   // ---------------------------------------------------------------------------
+  // (the Measurement view's perfect drawing: round bevels as true arcs, whatever their edge count; never set inside
+  // the worker, where it does not exist)
+  let ARC_PERFECT = false;
   // Tangent distance a bevel wants at corner P (how far it eats into each edge).
   function bevelReach(A, P, B, bv) {
     if (!bv || P.y < 1e-9) return 0;
@@ -646,7 +649,7 @@
       let da = Math.atan2(T2[1] - C[1], T2[0] - C[0]) - a1;
       while (da > Math.PI) da -= 2 * Math.PI;
       while (da < -Math.PI) da += 2 * Math.PI;
-      const segs = Math.max(1, Math.min(64, bv.segs | 0 || 1));
+      const segs = typeof ARC_PERFECT !== 'undefined' && ARC_PERFECT ? 96 : Math.max(1, Math.min(64, bv.segs | 0 || 1));
       let out = [];
       for (let i = 0; i <= segs; i++) { const a = a1 + da * i / segs; out.push({ y: C[0] + r * Math.cos(a), z: C[1] + r * Math.sin(a) }); }
       out.push({ y: P.y, z: P.z });                         // back along the carried-on edge to the corner
@@ -657,7 +660,7 @@
     const half = ang / 2;
     const t = tFix != null ? tFix : Math.min(bv.r / Math.tan(half), la * 0.45, lb * 0.45), r = t * Math.tan(half);
     const T1 = [P.y + u1[0] * t, P.z + u1[1] * t], T2 = [P.y + u2[0] * t, P.z + u2[1] * t];
-    const segs = Math.max(1, Math.min(64, bv.segs | 0 || 1));
+    const segs = typeof ARC_PERFECT !== 'undefined' && ARC_PERFECT ? 96 : Math.max(1, Math.min(64, bv.segs | 0 || 1));
     let out;
     if (segs === 1) out = [{ y: T1[0], z: T1[1] }, { y: T2[0], z: T2[1] }];
     else {
@@ -1390,7 +1393,7 @@
   function post(data) {
     const w = getWorker();
     if (w) w.postMessage(data);
-    else setTimeout(() => runJob(data).then(r => dispatch(data.job, r), err => dispatch(data.job, null, String(err && err.message || err))), 0);
+    else setTimeout(() => (ARC_PERFECT = false, runJob(data)).then(r => dispatch(data.job, r), err => dispatch(data.job, null, String(err && err.message || err))), 0);
   }
   function dispatch(job, result, error) {
     const cb = exportJobs.get(job);
@@ -1704,7 +1707,7 @@
     if (!n || n.type !== 'geo') return null;
     const chain = [];
     for (let cur = id, guard = 0; guard < 64; guard++) { const pr = findParent(sc, cur); if (!pr || pr.parent === null) break; cur = pr.parent; if (sc.nodes[cur].type === 'cloner') chain.push(sc.nodes[cur].params); }
-    const key = JSON.stringify([n.params, n.shape, chain]);
+    const key = JSON.stringify([n.params, n.shape, chain, ARC_PERFECT]);
     const hit = geoCache.get(key);
     if (hit) return hit;
     let m;
@@ -2224,6 +2227,7 @@
   // (prec: the object's own circular precision, or the project's)
   function cogShapeOf(q, prec) {
     prec = prec > 2 ? prec : state.precision;
+    if (ARC_PERFECT) prec = Math.max(prec, 720);
     const k = [prec, q.toothWidth, q.kind, q.teeth, q.module, q.pressure, q.addendum, q.dedendum, q.backlash, q.rotation, q.tipRound, q.rootRound].join('|');
     let s = cogCache.get(k);
     if (!s) { if (cogCache.size > 64) cogCache.clear(); s = cogShape(q, prec); cogCache.set(k, s); }
@@ -2664,6 +2668,7 @@
     ungroup: '<rect x="2" y="2" width="5.5" height="5.5" rx="1"/><rect x="8.5" y="8.5" width="5.5" height="5.5" rx="1"/>',
     list: '<path d="M6 4h7.5M6 8h7.5M6 12h7.5M2.5 4h.5M2.5 8h.5M2.5 12h.5"/>',
     add: '<path d="M8 3v10M3 8h10"/>',
+    pin: '<path d="M6 2h4l-.6 4 2.6 2.4H4L6.6 6z"/><path d="M8 8.4V14"/>',
     ruler: '<path d="M1.8 11.2 11.2 1.8l3 3-9.4 9.4z"/><path d="M4.6 8.4l1.4 1.4M6.6 6.4l.9.9M8.6 4.4l1.4 1.4"/>',
     eye: '<path d="M1.5 8s2.4-4.3 6.5-4.3S14.5 8 14.5 8s-2.4 4.3-6.5 4.3S1.5 8 1.5 8z"/><circle cx="8" cy="8" r="1.9"/>',
     eyeoff: '<path d="M1.5 8s2.4-4.3 6.5-4.3S14.5 8 14.5 8s-2.4 4.3-6.5 4.3S1.5 8 1.5 8z" stroke-opacity=".45"/><path d="M2.5 13.5 13.5 2.5"/>',
@@ -3070,7 +3075,11 @@
       { title: 'Draw everything not selected as one grey shape, without handles' });
     // the Measurement view: rulers only (the part monomorphic, its points to snap to), and its drawing to export
     const measureBtn = hbtn('ruler', 'Measure', () => setMeasure(!state.measure), { title: 'Measurement view: draw rulers on the part (drag; Ctrl snaps to points), right-click for more; export the drawing as PNG or PDF' });
-    const measureBar = el('div', { style: 'display:none;gap:2px' },
+    const perfectBtn = hbtn('circle', 'Perfect', () => { state.measurePerfect = !state.measurePerfect; saveSettings(); syncModeBtns(); drawSection(); },
+      { title: 'Perfect drawing: round bevels and cog roundings as true curves, whatever their edge count (straight-sided shapes stay as they are)' });
+    const pinBtn = hbtn('pin', 'Pin', () => mPinSelected(), { title: 'Pin the selected measurement (or, with none selected, every unpinned one here) to this section angle' });
+    for (const b of [perfectBtn, pinBtn]) { b.style.whiteSpace = 'nowrap'; b.style.flexShrink = '0'; }
+    const measureBar = el('div', { style: 'display:none;gap:2px;white-space:nowrap' }, perfectBtn, pinBtn,
       hbtn('trash', 'Clear', () => { if (!Object.keys(measures().pts).some(k => measures().pts[k].v === mView())) return; pushUndo(); mClear(true); mSel = null; mChanged(); }, { title: 'Remove the measurements in this view' }),
       hbtn('download', 'PNG', () => exportDrawing('png'), { title: 'Export the drawing as a PNG picture' }),
       hbtn('download', 'PDF', () => exportDrawing('pdf'), { title: 'Export the drawing as a PDF' }));
@@ -3082,6 +3091,7 @@
       { title: 'Move, scale or rotate the selection' });
     selBtn.style.display = 'none';
     const viewBar = el('div', { style: 'position:absolute;right:30px;top:6px;display:flex;flex-wrap:wrap;justify-content:flex-end;max-width:calc(100% - 40px);gap:6px;align-items:center;z-index:4' }, selBtn, measureBar, measureBtn, monoBtn, modeBar, zoomTag);
+    for (const b of measureBar.children) { b.style.whiteSpace = 'nowrap'; b.style.flexShrink = '0'; }
     const coord = el('div', { style: 'position:absolute;right:30px;top:32px;font-size:11px;color:#555;background:rgba(255,255,255,.9);padding:2px 6px;border-radius:3px;pointer-events:none' });
     const loading = el('div', { style: 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#666;background:#fbfbfc' }, 'Start a project with New / open…');
     const overlay = el('div', { style: 'position:absolute;inset:0;pointer-events:none;overflow:hidden' });
@@ -3832,7 +3842,8 @@
           g.append(sv('line', { x1: AX_L, y1: y, x2: w, y2: y, stroke: Math.abs(zr) < st / 2 ? '#adb5bd' : '#e9ecef', 'stroke-opacity': aL }));
         }
       }
-      // axis strips
+      // axis strips (their own group, raised over the drawing once it is drawn)
+      { const axG = sv('g', { 'data-axes': '1' }); g.append(axG); g = axG; }
       g.append(sv('rect', { x: 0, y: h - AX_B, width: w, height: AX_B, fill: 'rgba(248,249,250,.95)', stroke: '#dee2e6' }));
       g.append(sv('rect', { x: 0, y: 0, width: AX_L, height: h - AX_B, fill: 'rgba(248,249,250,.95)', stroke: '#dee2e6' }));
       for (const [st, aL, aT] of levels) {
@@ -4389,7 +4400,10 @@
       syncModeBtns(); drawSection();
     }
     function syncModeBtns() {
-      for (const b of [...modeBar.children, monoBtn, measureBtn]) { const on = b === monoBtn ? monoOn() : b === measureBtn ? !!state.measure : (b.__mode === 'top') === topMode(); b.style.background = on ? '#ddf4ff' : '#fff'; b.style.borderColor = on ? '#54aeff' : '#ced4da'; }
+      if (typeof pinBtn !== 'undefined') pinBtn.style.display = state.measure && !topMode() ? 'inline-flex' : 'none';
+      // (the readout under the view's buttons, however many rows they take)
+      if (viewBar.isConnected && viewBar.offsetHeight) coord.style.top = (viewBar.offsetTop + viewBar.offsetHeight + 4) + 'px';
+      for (const b of [...modeBar.children, monoBtn, measureBtn, perfectBtn]) { const on = b === monoBtn ? monoOn() : b === measureBtn ? !!state.measure : b === perfectBtn ? !!state.measurePerfect : (b.__mode === 'top') === topMode(); b.style.background = on ? '#ddf4ff' : '#fff'; b.style.borderColor = on ? '#54aeff' : '#ced4da'; }
     }
     // where new objects go: the cross-section's view, whichever is showing
     const secView = () => topMode() ? otherView(view, false) : view;
@@ -4563,7 +4577,7 @@
         }
         lastPolys[1][it.id] = { d, col };
       }
-      const exactTop = monoPos.length + monoNeg.length ? topMono(topBand()) : null;
+      const exactTop = !ARC_PERFECT && monoPos.length + monoNeg.length ? topMono(topBand()) : null;
       if (exactTop) {
         // world → screen is a turn, a scale and a shift: one transform for the whole drawing
         const [x0, y0] = toScreen(0, 0), [x1, y1] = toScreen(1, 0), [x2, y2] = toScreen(0, 1);
@@ -5005,6 +5019,7 @@
     }
     let seenSwaps = sceneSwaps;
     function drawSection() {
+      ARC_PERFECT = !!(state.measure && state.measurePerfect);
       measure();
       if (seenSwaps !== sceneSwaps) { seenSwaps = sceneSwaps; view = null; ownViews.section = ownViews.top = null; }
       syncModeBtns(); syncTopBox();
@@ -5019,7 +5034,7 @@
       sceneBase = drag && drag.base != null ? drag.base : zBase();
       const MS0 = MS; MS = 1;
       if (topMode()) {
-        drawWrap(); drawTop(g); drawHover(); drawMeasures();
+        drawWrap(); drawTop(g); for (const a of g.querySelectorAll('[data-axes]')) g.append(a); drawHover(); drawMeasures();
         zoomTag.textContent = (view.fit || fitScale) > 0 ? Math.round(view.s / (view.fit || fitScale) * 100) + '%' : '';
         if (state.measure) for (const [k, tb] of threadBoxes) { tb.box.remove(); threadBoxes.delete(k); }
         else syncThreadBoxes();
@@ -5189,7 +5204,8 @@
         }
       }
       // the grey shape is the finished part's own section (both sides at once), when the 3D model is there
-      const exact = state.mono || monoPos.length ? meshSection(state.viewAngle * Math.PI / 180) : null;
+      // (drawn perfect, it is made from the objects' own outlines instead, their curves true)
+      const exact = !ARC_PERFECT && (state.mono || monoPos.length) ? meshSection(state.viewAngle * Math.PI / 180) : null;
       if (exact && monoPos.length + monoNeg.length) {
         if (MS < 0) {
           const MS0 = MS; MS = 1;
@@ -5348,6 +5364,7 @@
         label(svg, lx, drag.labelAt[1] - 14, [drag.label], { border: '#faa2c1', bg: 'rgba(255,240,246,.95)' });
       }
       if (drag && drag.type === 'bevel' && drag.label) label(svg, drag.labelAt[0] + 12, drag.labelAt[1] - 10, [drag.label], { border: '#ffc078', bg: 'rgba(255,249,219,.95)' });
+      for (const a of g.querySelectorAll('[data-axes]')) g.append(a);   // (the axes over the drawing)
       drawMeasures();
       if (!mExporting) drawCursor();
       drawHover();
@@ -5738,7 +5755,7 @@
         selBtn.querySelector('.aa-hl').textContent = 'Selection — ' + (keys.length ? pk.length + ' point' + (pk.length === 1 ? '' : 's') + (keys.some(k => parseKey(k).kind === 'e') ? ' (with edges)' : '')
           : objs.length + ' object' + (objs.length === 1 ? '' : 's')); }
       if (!open) {
-        coord.style.top = '32px';
+        coord.style.top = (viewBar.offsetHeight ? viewBar.offsetTop + viewBar.offsetHeight + 4 : 32) + 'px';
         if (selBox.style.display !== 'none' && selBox.animate && !reduceMotion()) {
           const a = selBox.animate([{ opacity: 1 }, { opacity: 0, transform: 'translateY(-6px)' }], { duration: 120, easing: 'ease-in' });
           a.onfinish = () => { if ((!state.sel.size && !state.selNodes.size) || state.selBoxCollapsed) selBox.style.display = 'none'; };
@@ -5809,21 +5826,23 @@
       if (!sc.measures.pts) sc.measures.pts = {};
       if (!sc.measures.segs) sc.measures.segs = {};
       if (!sc.measures.angs) sc.measures.angs = {};
+      if (!sc.measures.rads) sc.measures.rads = {};
       return sc.measures;
     }
     // (side-view measurements can be pinned to a section angle: shown only there, marked on the compass)
     function angNear(a, b) { return Math.abs((((a - b) % 360) + 540) % 360 - 180) < 0.26; }
     const mVisible = (P) => !!P && P.v === mView() && (P.v !== 'side' || P.ang == null || angNear(P.ang, state.viewAngle));
-    const mObj = (ref) => { const M = measures(); return !ref ? null : ref.kind === 'p' ? M.pts[ref.id] : ref.kind === 's' ? M.segs[ref.id] : M.angs[ref.id]; };
+    const mObj = (ref) => { const M = measures(); return !ref ? null : ref.kind === 'p' ? M.pts[ref.id] : ref.kind === 's' ? M.segs[ref.id] : ref.kind === 'r' ? M.rads[ref.id] : M.angs[ref.id]; };
     // the points a measurement joins up with (through rulers and angles)
     function mGroup(ref) {
       const M = measures(), pts = new Set(), seen = new Set();
-      const start = ref.kind === 'p' ? [ref.id] : ref.kind === 's' ? [M.segs[ref.id].a, M.segs[ref.id].b] : [M.angs[ref.id].a, M.angs[ref.id].o, M.angs[ref.id].b];
+      const start = ref.kind === 'p' ? [ref.id] : ref.kind === 's' ? [M.segs[ref.id].a, M.segs[ref.id].b] : ref.kind === 'r' ? [M.rads[ref.id].a, M.rads[ref.id].b] : [M.angs[ref.id].a, M.angs[ref.id].o, M.angs[ref.id].b];
       const st = start.filter(Boolean);
       while (st.length) {
         const p = st.pop(); if (pts.has(p)) continue; pts.add(p);
         for (const [k, s] of Object.entries(M.segs)) if (!seen.has(k) && (s.a === p || s.b === p)) { seen.add(k); st.push(s.a, s.b); }
         for (const [k, a] of Object.entries(M.angs)) if (!seen.has(k) && [a.a, a.o, a.b].includes(p)) { seen.add(k); st.push(...[a.a, a.o, a.b].filter(Boolean)); }
+        for (const [k, r] of Object.entries(M.rads)) if (!seen.has(k) && (r.a === p || r.b === p)) { seen.add(k); st.push(r.a, r.b); }
       }
       return pts;
     }
@@ -5881,7 +5900,9 @@
         delete M.pts[sel.id];
         for (const [k, s] of Object.entries(M.segs)) if (s.a === sel.id || s.b === sel.id) delete M.segs[k];
         for (const [k, a] of Object.entries(M.angs)) if ([a.a, a.o, a.b].includes(sel.id)) delete M.angs[k];
+        for (const [k, r] of Object.entries(M.rads)) if (r.a === sel.id || r.b === sel.id) delete M.rads[k];
       } else if (sel.kind === 's') delete M.segs[sel.id];
+      else if (sel.kind === 'r') delete M.rads[sel.id];
       else delete M.angs[sel.id];
       mTidy();
     }
@@ -5896,6 +5917,7 @@
         if (Math.hypot(qx - x, qy - y) >= 2.5) continue;
         for (const s of Object.values(M.segs)) { if (s.a === pid) s.a = k; if (s.b === pid) s.b = k; }
         for (const a of Object.values(M.angs)) for (const f of ['a', 'o', 'b']) if (a[f] === pid) a[f] = k;
+        for (const r of Object.values(M.rads)) { if (r.a === pid) r.a = k; if (r.b === pid) r.b = k; }
         delete M.pts[pid]; mDedupe(); return k;
       }
       return pid;
@@ -5910,6 +5932,7 @@
       const M = measures(), used = new Set();
       for (const s of Object.values(M.segs)) used.add(s.a), used.add(s.b);
       for (const a of Object.values(M.angs)) for (const p of [a.a, a.o, a.b]) if (p) used.add(p);
+      for (const r of Object.values(M.rads)) used.add(r.a), used.add(r.b);
       for (const k of Object.keys(M.pts)) if (!used.has(k)) delete M.pts[k];
     }
     function mClear(viewOnly) {
@@ -5917,6 +5940,48 @@
       for (const [k, p] of Object.entries(M.pts)) if (!viewOnly || mVisible(p)) delete M.pts[k];
       for (const [k, s] of Object.entries(M.segs)) if (!M.pts[s.a] || !M.pts[s.b]) delete M.segs[k];
       for (const [k, a] of Object.entries(M.angs)) if ((a.a && !M.pts[a.a]) || !M.pts[a.o] || !M.pts[a.b]) delete M.angs[k];
+      for (const [k, r] of Object.entries(M.rads)) if (!M.pts[r.a] || !M.pts[r.b]) delete M.rads[k];
+    }
+    // the circle through three places (x, y), or null when they are in a line
+    function circle3(a, b, c) {
+      const d = 2 * (a[0] * (b[1] - c[1]) + b[0] * (c[1] - a[1]) + c[0] * (a[1] - b[1]));
+      if (Math.abs(d) < 1e-14) return null;
+      const A2 = a[0] * a[0] + a[1] * a[1], B2 = b[0] * b[0] + b[1] * b[1], C2 = c[0] * c[0] + c[1] * c[1];
+      const x = (A2 * (b[1] - c[1]) + B2 * (c[1] - a[1]) + C2 * (a[1] - b[1])) / d, y = (A2 * (c[0] - b[0]) + B2 * (a[0] - c[0]) + C2 * (b[0] - a[0])) / d;
+      return { c: [x, y], r: Math.hypot(a[0] - x, a[1] - y) };
+    }
+    // the part's outline points in this view (round bevels as true arcs), to find an arc on
+    function mOutlinePts() {
+      const was = ARC_PERFECT; ARC_PERFECT = true;
+      const T = [];
+      try {
+        if (topMode()) { for (const it of topItems()) for (const sh of it.shapes || []) for (const L of [sh.outer, sh.inner]) if (L) for (const p of L) if (p && isFinite(p[0])) T.push([p[0], p[1]]); }
+        else for (const id of frontOrder()) {
+          const n = state.scene.nodes[id];
+          if (n.type === 'geo') { for (const L of geoSection(id)) for (const p of L) T.push([p[0], p[1]]); continue; }
+          for (const p of viewOutline(state.scene, id)) { T.push([p.y, p.z]); T.push([-p.y, p.z]); }
+        }
+      } finally { ARC_PERFECT = was; }
+      return T;
+    }
+    // a radius measurement from a drag across an arc: the arc's point half way between the ends picked, and the
+    // circle through the three
+    function mRadiusOf(d) {
+      const T = d.O || (d.O = mOutlinePts());
+      // the ends onto the outline when near it (the arc's own points, drawn true)
+      const onto = (P) => { const [px, py] = mScreen({ x: P[0], y: P[1] }); let best = null, bd = 6; for (const t of T) { const [x, y] = mScreen({ x: t[0], y: t[1] }), dd = Math.hypot(x - px, y - py); if (dd < bd) { bd = dd; best = t; } } return best || P; };
+      const A = onto(d.A), B = onto(d.B), [ax, ay] = mScreen({ x: A[0], y: A[1] }), [bx, by] = mScreen({ x: B[0], y: B[1] });
+      const L = Math.hypot(bx - ax, by - ay); if (L < 4) return null;
+      const ux = (bx - ax) / L, uy = (by - ay) / L;
+      let best = null, bt = 1;
+      for (const t of T) {
+        const [x, y] = mScreen({ x: t[0], y: t[1] }), along = ((x - ax) * ux + (y - ay) * uy) / L, off = Math.abs(-(x - ax) * uy + (y - ay) * ux);
+        if (along < 0.1 || along > 0.9 || off < 0.4 || off > L) continue;
+        if (Math.abs(along - 0.5) < bt) { bt = Math.abs(along - 0.5); best = t; }
+      }
+      if (!best) return null;
+      const C = circle3(A, best, B);
+      return C ? { a: A, b: B, m: best, ...C } : null;
     }
 
     // drawn over the view (only in the Measurement view)
@@ -5943,7 +6008,7 @@
         }
         return false;
       };
-      boxes.push({ x0: AX_L, y0: 26, x1: AX_L + 230, y1: 58 });   // (the key, top left)
+      boxes.push({ x0: AX_L, y0: 26, x1: AX_L + 260, y1: 58 });   // (the key, top left)
       const offModel = (b) => !onModel(b.x0, b.y0) && !onModel(b.x1, b.y0) && !onModel(b.x0, b.y1) && !onModel(b.x1, b.y1) && !onModel((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2);
       const reqs = [], drawn = [];
       // two rulers over each other (along the same line, overlapping): the later one is set off to the side, with
@@ -6026,6 +6091,32 @@
         if (o.temp) { const t = sv('text', { x: cands[0].x, y: cands[0].y, 'font-size': 11, fill: o.col, 'text-anchor': 'middle', ...halo, 'pointer-events': 'none' }); t.textContent = text[0]; g.append(t); return; }
         reqs.push({ ax: px + r * Math.cos(am), ay: py + r * Math.sin(am), lines: text, o, cands, w: tw, h: textH(text) });
       };
+      // radius measurements: the arc picked, its centre marked, a line from the centre to the arc with R …
+      const RAD = '#d6336c';
+      for (const [rid, rd] of Object.entries(M.rads)) {
+        const A = M.pts[rd.a], B = M.pts[rd.b]; if (!mVisible(A) || !mVisible(B) || !rd.m) continue;
+        const C = circle3([A.x, A.y], rd.m, [B.x, B.y]); if (!C) continue;
+        const on = !mExporting && mSel && mSel.kind === 'r' && mSel.id === rid, col = on ? SEL : RAD;
+        const [cx, cy] = mScreen({ x: C.c[0], y: C.c[1] }), [x1, y1] = mScreen(A), [x2, y2] = mScreen(B), [mx, my] = mScreen({ x: rd.m[0], y: rd.m[1] });
+        const R = Math.hypot(x1 - cx, y1 - cy);
+        // the arc from A through m to B
+        const cross = (x1 - cx) * (my - cy) - (y1 - cy) * (mx - cx), a1 = Math.atan2(y1 - cy, x1 - cx), a2 = Math.atan2(y2 - cy, x2 - cx), am = Math.atan2(my - cy, mx - cx);
+        const norm = (a) => ((a % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI), sweep = cross > 0 ? 1 : 0;
+        const span = sweep ? norm(a2 - a1) : norm(a1 - a2), large = span > Math.PI ? 1 : 0;
+        const arcD = 'M' + x1 + ' ' + y1 + 'A' + R + ' ' + R + ' 0 ' + large + ' ' + sweep + ' ' + x2 + ' ' + y2;
+        g.append(sv('path', { d: arcD, fill: 'none', stroke: col, 'stroke-width': 2.2, opacity: 0.85 }));
+        const hp = sv('path', { d: arcD, fill: 'none', stroke: 'transparent', 'stroke-width': 10, style: 'cursor:pointer' }); hp.__mrad = rid; g.append(hp);
+        g.append(sv('path', { d: 'M' + (cx - 5) + ' ' + cy + 'h10M' + cx + ' ' + (cy - 5) + 'v10', stroke: col, 'stroke-width': 1.2 }));
+        // the radius line, from the centre to the arc's middle, arrow at the arc
+        const ex = cx + R * Math.cos(am), ey = cy + R * Math.sin(am), ux = Math.cos(am), uy = Math.sin(am), ah = Math.min(9, R / 3), aw = ah * 0.38;
+        g.append(sv('line', { x1: cx, y1: cy, x2: ex, y2: ey, stroke: col, 'stroke-width': 1.2 }));
+        g.append(sv('path', { d: 'M' + ex + ' ' + ey + 'L' + (ex - ux * ah - uy * aw) + ' ' + (ey - uy * ah + ux * aw) + 'L' + (ex - ux * ah + uy * aw) + ' ' + (ey - uy * ah - ux * aw) + 'Z', fill: col }));
+        segs.push(Object.assign([cx, cy, ex, ey], { own: rid }));
+        const text = ['R ' + mLen(C.r)], tw = textW(text), cands = [];
+        for (const k of [0.5, 0.3, 0.7]) for (const sd of [1, -1]) { const px = cx + (ex - cx) * k - uy * sd * 9, py = cy + (ey - cy) * k + ux * sd * 9; cands.push({ x: px, y: py + 4, box: { x0: px - tw / 2, y0: py - 7, x1: px + tw / 2, y1: py + 7 }, anchor: 'middle' }); }
+        for (const k of [1.25, 1.5]) { const px = cx + (ex - cx) * k, py = cy + (ey - cy) * k; cands.push({ x: px, y: py + 4, box: { x0: px - tw / 2, y0: py - 7, x1: px + tw / 2, y1: py + 7 }, anchor: 'middle' }); }
+        reqs.push({ ax: (cx + ex) / 2, ay: (cy + ey) / 2, lines: text, o: { col, call: rd.call, co: rd.co, ref: { kind: 'r', id: rid } }, cands, w: tw, h: textH(text) });
+      }
       for (const [aid, a] of Object.entries(M.angs)) {
         const O = M.pts[a.o], A = a.a ? M.pts[a.a] : null, B = M.pts[a.b];
         if (!mVisible(O) || !mVisible(B) || (a.a && !mVisible(A))) continue;
@@ -6063,9 +6154,10 @@
         if (placed.some(q => Math.hypot(q[0] - x, q[1] - y) < 2.5)) continue;
         placed.push([x, y]);
         boxes.push({ x0: x - 5, y0: y - 5, x1: x + 5, y1: y + 5 });
-        const ph = P.hide || {}, parts = v === 'side' ? [ph.a ? '' : 'R ' + num(mm(Math.abs(P.x)), 3), ph.b ? '' : 'H ' + num(hDisp(P.y, zBase()), 3)]
-          : [ph.a ? '' : 'R ' + mLen(Math.hypot(P.x, P.y)), ph.b ? '' : 'θ ' + mAng(((Math.atan2(P.y, P.x) * 180 / Math.PI) + 360) % 360)];
-        const shown = parts.filter(Boolean), text = [shown.join(' · ') + (v === 'side' && shown.length ? ' ' + UNIT_LABEL : '')];
+        // a point is its place: (radius, height) across and up, or (radius, angle) from above; one of them alone is named
+        const ph = P.hide || {}, rTxt = num(mm(v === 'side' ? Math.abs(P.x) : Math.hypot(P.x, P.y)), 3), sTxt = v === 'side' ? num(hDisp(P.y, zBase()), 3) : mAng(((Math.atan2(P.y, P.x) * 180 / Math.PI) + 360) % 360);
+        const text = [!ph.a && !ph.b ? (v === 'side' ? '(' + rTxt + ', ' + sTxt + ') ' + UNIT_LABEL : '(' + rTxt + ' ' + UNIT_LABEL + ', ' + sTxt + ')')
+          : !ph.a ? 'radius ' + rTxt + ' ' + UNIT_LABEL : !ph.b ? (v === 'side' ? 'height ' + sTxt + ' ' + UNIT_LABEL : 'angle ' + sTxt) : ''];
         dots.push({ pid, x, y, on, col });
         if (!text[0]) continue;
         const tw = textW(text), th = textH(text), cands = [];
@@ -6118,7 +6210,8 @@
         const lx = AX_L + 8, ly = 36, lg = sv('g', { 'pointer-events': 'none' });
         const item = (x, y, mark, text, col) => { lg.append(mark); const t = sv('text', { x: x + 14, y: y + 4, 'font-size': 10, fill: col, ...halo }); t.textContent = text; lg.append(t); return x + 14 + text.length * 5.6 + 14; };
         const y2 = ly + 14;
-        item(lx, ly, sv('circle', { cx: lx + 5, cy: ly, r: 3.5, fill: PTC, stroke: '#fff', 'stroke-width': 1.2 }), 'point: R radius · ' + (v === 'side' ? 'H height' : 'θ angle'), PTC);
+        const x1 = item(lx, ly, sv('circle', { cx: lx + 5, cy: ly, r: 3.5, fill: PTC, stroke: '#fff', 'stroke-width': 1.2 }), 'point (radius, ' + (v === 'side' ? 'height)' : 'angle)'), PTC);
+        item(x1, ly, sv('path', { d: 'M' + x1 + ' ' + (ly + 4) + 'A8 8 0 0 1 ' + (x1 + 8) + ' ' + (ly - 4) + 'M' + (x1 + 3) + ' ' + ly + 'h-3v-3', stroke: '#d6336c', fill: 'none', 'stroke-width': 1.4 }), 'R arc radius', '#d6336c');
         const x = item(lx, y2, sv('path', { d: 'M' + lx + ' ' + y2 + 'h11M' + lx + ' ' + y2 + 'l3 -2v4zM' + (lx + 11) + ' ' + y2 + 'l-3 -2v4z', stroke: INK, fill: INK, 'stroke-width': 1 }), 'ruler: length (angle)', INK);
         item(x, y2, sv('path', { d: 'M' + (x + 11) + ' ' + (y2 + 3) + 'H' + x + 'L' + (x + 9) + ' ' + (y2 - 5), stroke: ANG, fill: 'none', 'stroke-width': 1.2 }), 'angle', ANG);
         g.append(lg);
@@ -6126,11 +6219,21 @@
       // a ruler being drawn, and the snap
       if (drag && drag.type === 'mnew' && drag.moved) {
         if (drag.mode === 'angle') { const V = mAngleVertex(drag); angleMark({ x: V.o[0], y: V.o[1] }, V.a ? { x: V.a[0], y: V.a[1] } : null, { x: drag.B[0], y: drag.B[1] }, { col: SEL, temp: true }); }
-        else ruler({ x: drag.A[0], y: drag.A[1] }, { x: drag.B[0], y: drag.B[1] }, { col: SEL, temp: true });
+        else if (drag.mode === 'radius') {
+          const rr = mRadiusOf(drag), [x1, y1] = mScreen({ x: drag.A[0], y: drag.A[1] }), [x2, y2] = mScreen({ x: drag.B[0], y: drag.B[1] });
+          g.append(sv('line', { x1, y1, x2, y2, stroke: SEL, 'stroke-width': 1, 'stroke-dasharray': '3 3' }));
+          if (rr) {
+            const [cx, cy] = mScreen({ x: rr.c[0], y: rr.c[1] }), [mx, my] = mScreen({ x: rr.m[0], y: rr.m[1] });
+            g.append(sv('circle', { cx, cy, r: Math.hypot(mx - cx, my - cy), fill: 'none', stroke: SEL, 'stroke-width': 1, 'stroke-dasharray': '4 3', opacity: 0.6 }));
+            g.append(sv('line', { x1: cx, y1: cy, x2: mx, y2: my, stroke: SEL, 'stroke-width': 1.2 }));
+            const t = sv('text', { x: (cx + mx) / 2, y: (cy + my) / 2 - 6, 'font-size': 11, fill: SEL, 'text-anchor': 'middle', ...halo, 'pointer-events': 'none' }); t.textContent = 'R ' + mLen(rr.r); g.append(t);
+          }
+        } else ruler({ x: drag.A[0], y: drag.A[1] }, { x: drag.B[0], y: drag.B[1] }, { col: SEL, temp: true });
       }
       if (drag && drag.type === 'mnew' && !mExporting) {
         const t = sv('text', { x: AX_L + 8, y: 18, 'font-size': 11, fill: '#868e96', ...halo, 'pointer-events': 'none' });
-        t.textContent = (drag.mode === 'angle' ? 'Angle' : 'Ruler') + ' — scroll to switch to ' + (drag.mode === 'angle' ? 'a ruler' : 'an angle'); g.append(t);
+        const nm = { line: 'Ruler', angle: 'Angle', radius: 'Radius (across an arc: from one end to the other)' }[drag.mode || 'line'];
+        t.textContent = nm + ' — scroll for ' + { line: 'an angle', angle: 'a radius', radius: 'a ruler' }[drag.mode || 'line']; g.append(t);
       }
       const sn = drag && drag.snapShow || mHoverSnap;
       if (sn && !mExporting) {
@@ -6153,7 +6256,7 @@
     function measureDown(e) {
       const [sx, sy] = local(e), W = mWorld(sx, sy), M = measures(), v = mView(), t = e.target, ctrl = e.ctrlKey || e.metaKey;
       if (e.button === 2) {
-        const ref = t.__mpt ? { kind: 'p', id: t.__mpt } : t.__mseg ? { kind: 's', id: t.__mseg } : t.__mang ? { kind: 'a', id: t.__mang } : t.__mcall || null;
+        const ref = t.__mpt ? { kind: 'p', id: t.__mpt } : t.__mseg ? { kind: 's', id: t.__mseg } : t.__mang ? { kind: 'a', id: t.__mang } : t.__mrad ? { kind: 'r', id: t.__mrad } : t.__mcall || null;
         mSel = ref; mConnect = null; drawSection(); showMeasureMenu(e.clientX, e.clientY, ref); return;
       }
       svg.setPointerCapture(e.pointerId);
@@ -6178,6 +6281,7 @@
       if (t.__mpt && M.pts[t.__mpt]) { const P = M.pts[t.__mpt]; drag = { type: 'mnew', A: [P.x, P.y], B: [P.x, P.y], T: mTargets(), sx, sy, moved: false }; mSel = null; drawSection(); return; }
       if (t.__mseg) { mSel = { kind: 's', id: t.__mseg }; drag = { type: 'mnone' }; drawSection(); return; }
       if (t.__mang) { mSel = { kind: 'a', id: t.__mang }; drag = { type: 'mnone' }; drawSection(); return; }
+      if (t.__mrad) { mSel = { kind: 'r', id: t.__mrad }; drag = { type: 'mnone' }; drawSection(); return; }
       // a new ruler, from here to where the button is let go
       const s0 = ctrl ? mSnap(W, T) : null;
       drag = { type: 'mnew', A: s0 ? s0.p : W, B: s0 ? s0.p : W, T, sx, sy, moved: false, snapShow: s0 };
@@ -6217,7 +6321,13 @@
       if (d.type === 'mnew' && d.moved && Math.hypot(d.B[0] - d.A[0], d.B[1] - d.A[1]) > 1e-9) {
         const M = measures(), v = mView(), mk = (P) => { const id = mId('p'); M.pts[id] = { v, x: P[0], y: P[1] }; return id; };
         pushUndo();
-        if (d.mode === 'angle') {
+        if (d.mode === 'radius') {
+          const rr = mRadiusOf(d);
+          if (!rr) { state.undo.pop(); drawSection(); return; }
+          const a = mk(rr.a), b = mk(rr.b), id = mId('r');
+          M.rads[id] = { a, b, m: [rr.m[0], rr.m[1]] }; mSel = { kind: 'r', id };
+          mMerge(a); mMerge(b);
+        } else if (d.mode === 'angle') {
           const V = mAngleVertex(d), o = mk(V.o), a = V.a ? mk(V.a) : null, b = mk(d.B), id = mId('a');
           M.angs[id] = { a, o, b }; mSel = { kind: 'a', id };
           for (const p of [o, a, b]) if (p) mMerge(p);
@@ -6246,7 +6356,7 @@
         return [tick(name + ': radius', ga, sa), tick(name + ': ' + (P.v === 'side' ? 'height' : 'angle'), gb, sb)];
       };
       if (o) {
-        const title = ref.kind === 'p' ? 'Measurement point' : ref.kind === 's' ? 'Ruler' : 'Angle';
+        const title = ref.kind === 'p' ? 'Measurement point' : ref.kind === 's' ? 'Ruler' : ref.kind === 'r' ? 'Radius' : 'Angle';
         const grp = mGroup(ref), side = [...grp].some(p => M.pts[p] && M.pts[p].v === 'side'), pinned = [...grp].some(p => M.pts[p] && M.pts[p].ang != null);
         menu.append(el('div', { style: 'font-weight:700;margin-bottom:4px' }, title),
           row(ref.kind === 'p' ? B('Connect to…', () => { mConnect = ref.id; drawSection(); }, 'Join it to another point (or a new one) to make a ruler') : null,
@@ -6263,12 +6373,16 @@
             (v) => { pushUndo(); o.hide = o.hide || {}; o.hide.ang = !v; mChanged(); }));
           ticks.push(...ptTicks(o.a, 'Start'), ...ptTicks(o.b, 'End'));
         } else if (ref.kind === 'p') ticks.push(...ptTicks(ref.id, 'Point'));
+        else if (ref.kind === 'r') ticks.push(...ptTicks(o.a, 'Start'), ...ptTicks(o.b, 'End'));
         else ticks.push(...ptTicks(o.o, 'Vertex'));
         if (ticks.length) menu.append(el('div', { style: 'margin-top:4px;color:#555;font-size:11px' }, 'Shown'), ...ticks);
         menu.append(hr());
       }
       const n = Object.values(M.pts).filter(p => mVisible(p)).length;
       menu.append(el('div', { style: 'font-weight:700;margin-bottom:4px' }, 'Measurements'),
+        mView() === 'side' && n ? row(
+          B('Pin all shown to ' + mAng(state.viewAngle), () => edit(() => { for (const p of Object.values(M.pts)) if (mVisible(p)) p.ang = state.viewAngle; }), 'Pin every measurement shown here to this section angle (marked on the compass, which snaps to it)'),
+          Object.values(M.pts).some(p => mVisible(p) && p.ang != null) ? B('Unpin all shown', () => edit(() => { for (const p of Object.values(M.pts)) if (mVisible(p)) delete p.ang; }), 'Show the measurements shown here at every section angle') : null) : null,
         row(B('Clear this view', () => edit(() => { mClear(true); mSel = null; }), 'Remove the measurements in this view (' + n + ' points)'),
           B('Clear all', () => edit(() => { mClear(false); mSel = null; }), 'Remove every measurement, in both views')),
         row(B('Export PNG', () => exportDrawing('png')), B('Export PDF', () => exportDrawing('pdf'))),
@@ -6315,6 +6429,16 @@
       push('trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n' + xref + '\n%%EOF\n');
       const out = new Uint8Array(len); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
       return out;
+    }
+    function mPinSelected() {
+      if (topMode() || !state.scene) return;
+      const M = measures(), pts = new Set();
+      if (mSel && mObj(mSel)) for (const p of mGroup(mSel)) pts.add(p);
+      else for (const [k, p] of Object.entries(M.pts)) if (p.v === 'side' && p.ang == null) pts.add(k);
+      if (!pts.size) return;
+      pushUndo();
+      for (const p of pts) if (M.pts[p]) M.pts[p].ang = state.viewAngle;
+      mChanged(); drawCompasses();
     }
     function setMeasure(on) {
       state.measure = !!on; mSel = null; mConnect = null; mHoverSnap = null;
@@ -6770,7 +6894,7 @@
       if (state.measure && drag && drag.type === 'mnew') {
         // (one switch per scroll gesture)
         const now = performance.now();
-        if (!drag.lastWheel || now - drag.lastWheel > 250) { drag.mode = drag.mode === 'angle' ? 'line' : 'angle'; drag.moved = true; drawSection(); }
+        if (!drag.lastWheel || now - drag.lastWheel > 250) { const order = ['line', 'angle', 'radius'], i = order.indexOf(drag.mode || 'line'); drag.mode = order[(i + (e.deltaY < 0 ? 2 : 1)) % 3]; drag.moved = true; drawSection(); }
         drag.lastWheel = now; return;
       }
       const [sx, sy] = local(e);
