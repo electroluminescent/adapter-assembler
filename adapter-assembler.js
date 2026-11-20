@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.30.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.31.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = "3.30.0";
+  const APP_VERSION = "3.31.0";
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -3178,7 +3178,20 @@
     });
     // how far a drag has moved what it moves, by the pointer (the project setting chooses how it is given)
     const offTag = el('div', { style: 'position:absolute;display:none;pointer-events:none;font-size:11px;line-height:1.35;color:#1f2328;background:rgba(255,249,219,.95);border:1px solid #ffc078;border-radius:3px;padding:1px 5px;white-space:nowrap;z-index:5' });
-    left.append(overlay, viewBar, coord, loading, compass1, topBox, offTag);
+    // above the compass's ends: pinned measurements out of its range (click: turn to the nearest that way)
+    const pinHint = (dir) => {
+      const b = el('div', { style: 'position:absolute;bottom:' + (44 + 4 + 28) + 'px;font-size:10px;color:#1864ab;background:rgba(255,255,255,.92);border:1px solid #a5d8ff;border-radius:3px;padding:1px 5px;cursor:pointer;z-index:2;display:none;' + (dir < 0 ? '' : 'transform:translateX(-100%);'), title: 'Measurements pinned to section angles that way: click to turn to the nearest' });
+      b.addEventListener('pointerdown', (e) => e.stopPropagation());
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        let best = null;
+        for (const a of pinnedAngles()) { const d = (((a - state.viewAngle) % 360) + 540) % 360 - 180; if (d * dir > 0.3 && (best == null || Math.abs(d) < Math.abs(best))) best = d; }
+        if (best != null) setViewAngle(state.viewAngle + best);
+      });
+      return b;
+    };
+    const pinHintL = pinHint(-1), pinHintR = pinHint(1);
+    left.append(overlay, viewBar, coord, loading, compass1, pinHintL, pinHintR, topBox, offTag);
 
     // right: 3D preview + side panel
     const canvas = el('canvas', { style: 'width:100%;height:100%;display:block;touch-action:none;cursor:grab;background:#1c1f24' });
@@ -5795,8 +5808,29 @@
       if (!sc.measures || typeof sc.measures !== 'object') sc.measures = { pts: {}, segs: {} };
       if (!sc.measures.pts) sc.measures.pts = {};
       if (!sc.measures.segs) sc.measures.segs = {};
+      if (!sc.measures.angs) sc.measures.angs = {};
       return sc.measures;
     }
+    // (side-view measurements can be pinned to a section angle: shown only there, marked on the compass)
+    function angNear(a, b) { return Math.abs((((a - b) % 360) + 540) % 360 - 180) < 0.26; }
+    const mVisible = (P) => !!P && P.v === mView() && (P.v !== 'side' || P.ang == null || angNear(P.ang, state.viewAngle));
+    const mObj = (ref) => { const M = measures(); return !ref ? null : ref.kind === 'p' ? M.pts[ref.id] : ref.kind === 's' ? M.segs[ref.id] : M.angs[ref.id]; };
+    // the points a measurement joins up with (through rulers and angles)
+    function mGroup(ref) {
+      const M = measures(), pts = new Set(), seen = new Set();
+      const start = ref.kind === 'p' ? [ref.id] : ref.kind === 's' ? [M.segs[ref.id].a, M.segs[ref.id].b] : [M.angs[ref.id].a, M.angs[ref.id].o, M.angs[ref.id].b];
+      const st = start.filter(Boolean);
+      while (st.length) {
+        const p = st.pop(); if (pts.has(p)) continue; pts.add(p);
+        for (const [k, s] of Object.entries(M.segs)) if (!seen.has(k) && (s.a === p || s.b === p)) { seen.add(k); st.push(s.a, s.b); }
+        for (const [k, a] of Object.entries(M.angs)) if (!seen.has(k) && [a.a, a.o, a.b].includes(p)) { seen.add(k); st.push(...[a.a, a.o, a.b].filter(Boolean)); }
+      }
+      return pts;
+    }
+    // the section angles measurements are pinned to
+    function pinnedAngles() { if (!state.scene || !state.scene.measures) return []; const out = []; for (const p of Object.values(state.scene.measures.pts || {})) if (p.v === 'side' && p.ang != null && !out.some(a => angNear(a, p.ang))) out.push(p.ang); return out; }
+    // a section angle drawn to a pinned one when it comes close (within a few pixels of the compass tape)
+    function pinMagnet(deg) { for (const a of pinnedAngles()) { const d = (((deg - a) % 360) + 540) % 360 - 180; if (Math.abs(d) < 2.5) return deg - d; } return deg; }
     let mSel = null, mConnect = null, mHoverSnap = null, mExporting = false;
     const mId = (pre) => pre + Date.now().toString(36).slice(-4) + Math.random().toString(36).slice(2, 6);
     const mScreen = (P) => { const M0 = MS; MS = 1; const r = toScreen(P.x, P.y); MS = M0; return r; };
@@ -5819,7 +5853,7 @@
         if (loops) for (const L of loops) for (const p of L) T.push([p[0], p[1]]);
         T.push([0, zBase()]);
       }
-      for (const [id, p] of Object.entries(measures().pts)) if (p.v === v && id !== except) T.push([p.x, p.y]);
+      for (const [id, p] of Object.entries(measures().pts)) if (mVisible(p) && id !== except) T.push([p.x, p.y]);
       return T;
     }
     // onto a point near; else level or upright with one (each way on its own); { p, mark, lines }
@@ -5843,16 +5877,26 @@
     // removes a point and its rulers; a ruler and the points it leaves alone
     function mDelete(sel) {
       const M = measures();
-      if (sel.kind === 'p') { delete M.pts[sel.id]; for (const [k, s] of Object.entries(M.segs)) if (s.a === sel.id || s.b === sel.id) delete M.segs[k]; }
-      else {
-        const s = M.segs[sel.id]; delete M.segs[sel.id];
-        if (s) for (const p of [s.a, s.b]) if (!Object.values(M.segs).some(o => o.a === p || o.b === p)) delete M.pts[p];
-      }
+      if (sel.kind === 'p') {
+        delete M.pts[sel.id];
+        for (const [k, s] of Object.entries(M.segs)) if (s.a === sel.id || s.b === sel.id) delete M.segs[k];
+        for (const [k, a] of Object.entries(M.angs)) if ([a.a, a.o, a.b].includes(sel.id)) delete M.angs[k];
+      } else if (sel.kind === 's') delete M.segs[sel.id];
+      else delete M.angs[sel.id];
+      mTidy();
+    }
+    // points left with nothing joined to them go
+    function mTidy() {
+      const M = measures(), used = new Set();
+      for (const s of Object.values(M.segs)) used.add(s.a), used.add(s.b);
+      for (const a of Object.values(M.angs)) for (const p of [a.a, a.o, a.b]) if (p) used.add(p);
+      for (const k of Object.keys(M.pts)) if (!used.has(k)) delete M.pts[k];
     }
     function mClear(viewOnly) {
-      const M = measures(), v = mView();
-      for (const [k, p] of Object.entries(M.pts)) if (!viewOnly || p.v === v) delete M.pts[k];
+      const M = measures();
+      for (const [k, p] of Object.entries(M.pts)) if (!viewOnly || mVisible(p)) delete M.pts[k];
       for (const [k, s] of Object.entries(M.segs)) if (!M.pts[s.a] || !M.pts[s.b]) delete M.segs[k];
+      for (const [k, a] of Object.entries(M.angs)) if ((a.a && !M.pts[a.a]) || !M.pts[a.o] || !M.pts[a.b]) delete M.angs[k];
     }
 
     // drawn over the view (only in the Measurement view)
@@ -5860,26 +5904,54 @@
       if (!state.measure || !state.scene || !view) return;
       const M = measures(), v = mView(), g = sv('g', { id: 'aa-measures' }), INK = '#1864ab', SEL = '#e03131';
       svg.append(g);
-      const halo = { 'paint-order': 'stroke', stroke: '#fff', 'stroke-width': 3, 'stroke-linejoin': 'round' };
-      // a label: on the drawing, or in a box at the end of a leader (a callout, moved by dragging it)
-      const label = (ax, ay, lines, o) => {
-        if (o.call) {
-          const co = o.co || [36, -30], bx = ax + co[0], by = ay + co[1], fs = 11, w = Math.max(...lines.map(s => s.length)) * 6.3 + 10, h = lines.length * 14 + 6;
-          const left = co[0] < 0 ? bx - w : bx, top = by - h / 2;
-          g.append(sv('line', { x1: ax, y1: ay, x2: co[0] < 0 ? left + w : left, y2: by, stroke: o.col, 'stroke-width': 1 }));
-          g.append(sv('circle', { cx: ax, cy: ay, r: 1.8, fill: o.col }));
-          const box = sv('rect', { x: left, y: top, width: w, height: h, rx: 3, fill: '#fff', stroke: o.col, 'stroke-width': 1, style: 'cursor:move' });
-          box.__mcall = o.ref; g.append(box);
-          lines.forEach((s, i) => { const t = sv('text', { x: left + 5, y: top + 14 + i * 14, 'font-size': fs, fill: o.col, 'pointer-events': 'none' }); t.textContent = s; g.append(t); });
-          return;
+      const { w: VW, h: VH } = size(), halo = { 'paint-order': 'stroke', stroke: '#fff', 'stroke-width': 3, 'stroke-linejoin': 'round' };
+      // an angle worth showing: not along or across the view (0, 90, 180, 270 …)
+      const square = (deg) => { const r = ((deg % 90) + 90) % 90; return r < 0.05 || r > 89.95; };
+      // where the part is (labels that have to move off it become callouts)
+      const loops = v === 'side' ? meshSection(state.viewAngle * Math.PI / 180, sliceOff() || 0) : null;
+      const onModel = (sx, sy) => { const [X, Y] = mWorld(sx, sy); return v === 'side' ? !!(loops && inLoops(X, Y, loops)) : !!topNodeAt(X, Y); };
+      // what labels must keep clear of: points, ruler lines, labels already placed
+      const boxes = [], segs = [];
+      const textW = (lines) => Math.max(...lines.map(s => s.length)) * 6.3 + 6, textH = (lines) => lines.length * 13 + 3;
+      const hitBox = (b) => {
+        if (b.x0 < AX_L || b.y0 < 0 || b.x1 > VW - 34 || b.y1 > VH - AX_B) return true;   // (clear of the height slider on the right)
+        for (const o of boxes) if (b.x0 < o.x1 && b.x1 > o.x0 && b.y0 < o.y1 && b.y1 > o.y0) return true;
+        for (const s of segs) {
+          if (s.own === b.own && b.own != null) continue;
+          // the segment against the box (a few samples along it)
+          for (let k = 0; k <= 8; k++) { const x = s[0] + (s[2] - s[0]) * k / 8, y = s[1] + (s[3] - s[1]) * k / 8; if (x > b.x0 && x < b.x1 && y > b.y0 && y < b.y1) return true; }
         }
-        const t = sv('text', { x: ax, y: ay, 'font-size': 11, fill: o.col, 'text-anchor': o.anchor || 'start', ...halo, ...(o.rot != null ? { transform: 'rotate(' + o.rot.toFixed(2) + ' ' + ax.toFixed(1) + ' ' + ay.toFixed(1) + ')' } : {}), 'pointer-events': 'none' });
-        if (lines.length === 1) t.textContent = lines[0];
-        else lines.forEach((s, i) => { const ts = sv('tspan', { x: ax, dy: i ? 13 : 0 }); ts.textContent = s; t.append(ts); });
-        g.append(t);
+        return false;
+      };
+      const offModel = (b) => !onModel(b.x0, b.y0) && !onModel(b.x1, b.y0) && !onModel(b.x0, b.y1) && !onModel(b.x1, b.y1) && !onModel((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2);
+      const reqs = [], drawn = [];
+      // two rulers over each other (along the same line, overlapping): the later one is set off to the side, with
+      // extension lines back to its points, as dimension lines are
+      const overlaps = (a, b) => {
+        const La = Math.hypot(a[2] - a[0], a[3] - a[1]), Lb = Math.hypot(b[2] - b[0], b[3] - b[1]);
+        if (La < 1 || Lb < 1) return false;
+        const ux = (a[2] - a[0]) / La, uy = (a[3] - a[1]) / La, vx = (b[2] - b[0]) / Lb, vy = (b[3] - b[1]) / Lb;
+        if (Math.abs(ux * vy - uy * vx) > 0.035) return false;
+        const dist = (x, y) => Math.abs((x - a[0]) * -uy + (y - a[1]) * ux);
+        if (dist(b[0], b[1]) > 6 || dist(b[2], b[3]) > 6) return false;
+        const t = (x, y) => (x - a[0]) * ux + (y - a[1]) * uy, t0 = Math.min(t(b[0], b[1]), t(b[2], b[3])), t1 = Math.max(t(b[0], b[1]), t(b[2], b[3]));
+        return Math.min(t1, La) - Math.max(t0, 0) > 4;
       };
       const ruler = (A, B, o) => {
-        const [x1, y1] = mScreen(A), [x2, y2] = mScreen(B), L = Math.hypot(x2 - x1, y2 - y1);
+        let [x1, y1] = mScreen(A), [x2, y2] = mScreen(B);
+        const L = Math.hypot(x2 - x1, y2 - y1);
+        if (!o.temp && L > 1) {
+          const nx = -(y2 - y1) / L, ny = (x2 - x1) / L, p1 = [x1, y1], p2 = [x2, y2];
+          for (let k = 1, tries = 0; drawn.some(d => overlaps(d, [x1, y1, x2, y2])) && tries < 12; tries++) {
+            const off = (tries % 2 ? -1 : 1) * 14 * k; if (tries % 2) k++;
+            x1 = p1[0] + nx * off; y1 = p1[1] + ny * off; x2 = p2[0] + nx * off; y2 = p2[1] + ny * off;
+          }
+          if (x1 !== p1[0] || y1 !== p1[1]) {
+            const ex = Math.sign(x1 - p1[0]) * 3, ey = Math.sign(y1 - p1[1]) * 3;
+            for (const [a, b] of [[p1, [x1, y1]], [p2, [x2, y2]]]) g.append(sv('line', { x1: a[0] + ex * 0.6, y1: a[1] + ey * 0.6, x2: b[0] + ex, y2: b[1] + ey, stroke: o.col, 'stroke-width': 0.8 }));
+          }
+          drawn.push([x1, y1, x2, y2]);
+        }
         g.append(sv('line', { x1, y1, x2, y2, stroke: o.col, 'stroke-width': 1.3, ...(o.temp ? { 'stroke-dasharray': '5 3' } : {}) }));
         if (L > 1e-6) {
           const ux = (x2 - x1) / L, uy = (y2 - y1) / L, ah = Math.min(9, L / 3), aw = ah * 0.38;
@@ -5887,48 +5959,143 @@
             g.append(sv('path', { d: 'M' + px + ' ' + py + 'L' + (px + sx * ux * ah - uy * aw) + ' ' + (py + sx * uy * ah + ux * aw) + 'L' + (px + sx * ux * ah + uy * aw) + ' ' + (py + sx * uy * ah - ux * aw) + 'Z', fill: o.col }));
         }
         if (!o.temp) { const hl = sv('line', { x1, y1, x2, y2, stroke: 'transparent', 'stroke-width': 9, style: 'cursor:pointer' }); hl.__mseg = o.id; g.append(hl); }
-        // its length and its angle (to the view's level)
-        const d = Math.hypot(B.x - A.x, B.y - A.y);
+        const sg = [x1, y1, x2, y2]; sg.own = o.id; segs.push(sg);
+        // its length, and its angle to the view's level when that says something
         let ang = Math.atan2(-(y2 - y1), x2 - x1) * 180 / Math.PI; ang = ((ang % 180) + 180) % 180;
-        const text = [mLen(d) + '  ' + mAng(ang)], mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
-        if (o.call) { label(mx, my, text, o); return; }
+        const hd = o.hide || {}, showAng = hd.ang === false || (hd.ang == null && !square(ang));
+        const text = [[hd.len ? '' : mLen(Math.hypot(B.x - A.x, B.y - A.y)), showAng ? mAng(ang) : ''].filter(Boolean).join('  ')];
         let rot = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI; if (rot > 90) rot -= 180; if (rot <= -90) rot += 180;
-        const rr = rot * Math.PI / 180;
-        label(mx + Math.sin(rr) * 6, my - Math.cos(rr) * 6, text, { ...o, anchor: 'middle', rot });
+        const rr = rot * Math.PI / 180, nx = Math.sin(rr), ny = -Math.cos(rr), tw = textW(text);
+        // along the line, either side of it, at its middle or toward its ends
+        const cands = [];
+        for (const t of [0.5, 0.33, 0.67, 0.2, 0.8]) for (const side of [1, -1]) {
+          const cx = x1 + (x2 - x1) * t + nx * side * 9, cy = y1 + (y2 - y1) * t + ny * side * 9;
+          const hw = (Math.abs(Math.cos(rr)) * tw + Math.abs(Math.sin(rr)) * 13) / 2, hh = (Math.abs(Math.sin(rr)) * tw + Math.abs(Math.cos(rr)) * 13) / 2;
+          if (tw > L - 6 && t !== 0.5) continue;
+          cands.push({ x: cx, y: cy + 4, box: { x0: cx - hw, y0: cy - hh, x1: cx + hw, y1: cy + hh, own: o.id }, anchor: 'middle', rot });
+        }
+        if (!o.temp && text[0]) reqs.push({ ax: (x1 + x2) / 2, ay: (y1 + y2) / 2, lines: text, o, cands, w: tw, h: textH(text) });
+        else for (const t of [sv('text', { x: (x1 + x2) / 2, y: (y1 + y2) / 2 - 8, 'font-size': 11, fill: o.col, 'text-anchor': 'middle', ...halo, 'pointer-events': 'none' })]) { t.textContent = text[0]; g.append(t); }
       };
       for (const [sid, s] of Object.entries(M.segs)) {
-        const A = M.pts[s.a], B = M.pts[s.b]; if (!A || !B || A.v !== v || B.v !== v) continue;
+        const A = M.pts[s.a], B = M.pts[s.b]; if (!mVisible(A) || !mVisible(B)) continue;
         const on = !mExporting && mSel && mSel.kind === 's' && mSel.id === sid;
-        ruler(A, B, { id: sid, col: on ? SEL : INK, call: s.call, co: s.co, ref: { kind: 's', id: sid } });
+        ruler(A, B, { id: sid, col: on ? SEL : INK, call: s.call, co: s.co, ref: { kind: 's', id: sid }, hide: s.hide || {} });
       }
-      // where two rulers meet: the angle between them
-      const at = {};
-      for (const s of Object.values(M.segs)) for (const [p, q] of [[s.a, s.b], [s.b, s.a]]) (at[p] = at[p] || []).push(q);
-      for (const [pid, others] of Object.entries(at)) {
-        const P = M.pts[pid]; if (!P || P.v !== v || others.length !== 2) continue;
-        const [px, py] = mScreen(P), [ax, ay] = mScreen(M.pts[others[0]] || P), [bx, by] = mScreen(M.pts[others[1]] || P);
-        let a0 = Math.atan2(ay - py, ax - px), a1 = Math.atan2(by - py, bx - px), da = a1 - a0;
+      // angle measurements: about a point, between two others (or from the view's level)
+      const angleMark = (O, A, B, o) => {
+        const [px, py] = mScreen(O), [bx, by] = mScreen(B);
+        let ax, ay;
+        if (A) [ax, ay] = mScreen(A); else { ax = px + (bx >= px ? 40 : -40); ay = py; }
+        const a0 = Math.atan2(ay - py, ax - px); let da = Math.atan2(by - py, bx - px) - a0;
         while (da > Math.PI) da -= 2 * Math.PI;
         while (da < -Math.PI) da += 2 * Math.PI;
-        const r = 20, deg = Math.abs(da) * 180 / Math.PI;
-        if (deg < 0.05) continue;
+        const deg = Math.abs(da) * 180 / Math.PI, r = 24;
+        g.append(sv('line', { x1: px, y1: py, x2: ax, y2: ay, stroke: o.col, 'stroke-width': A ? 1 : 0.8, ...(A ? {} : { 'stroke-dasharray': '4 3' }) }));
+        g.append(sv('line', { x1: px, y1: py, x2: bx, y2: by, stroke: o.col, 'stroke-width': 1, ...(o.temp ? { 'stroke-dasharray': '5 3' } : {}) }));
+        const arc = 'M' + (px + r * Math.cos(a0)) + ' ' + (py + r * Math.sin(a0)) + 'A' + r + ' ' + r + ' 0 0 ' + (da > 0 ? 1 : 0) + ' ' + (px + r * Math.cos(a0 + da)) + ' ' + (py + r * Math.sin(a0 + da));
+        g.append(sv('path', { d: arc, fill: 'none', stroke: o.col, 'stroke-width': 1.4 }));
+        if (!o.temp) { const hp = sv('path', { d: arc, fill: 'none', stroke: 'transparent', 'stroke-width': 10, style: 'cursor:pointer' }); hp.__mang = o.id; g.append(hp); }
+        segs.push(Object.assign([px, py, bx, by], { own: o.id }));
+        if (A) segs.push(Object.assign([px, py, ax, ay], { own: o.id }));
+        const am = a0 + da / 2, text = ['∠ ' + mAng(deg)], tw = textW(text), cands = [];
+        for (const rad of [r + 14, r + 28, r + 44]) { const cx = px + rad * Math.cos(am), cy = py + rad * Math.sin(am); cands.push({ x: cx, y: cy + 4, box: { x0: cx - tw / 2, y0: cy - 7, x1: cx + tw / 2, y1: cy + 7 }, anchor: 'middle' }); }
+        if (o.temp) { const t = sv('text', { x: cands[0].x, y: cands[0].y, 'font-size': 11, fill: o.col, 'text-anchor': 'middle', ...halo, 'pointer-events': 'none' }); t.textContent = text[0]; g.append(t); return; }
+        reqs.push({ ax: px + r * Math.cos(am), ay: py + r * Math.sin(am), lines: text, o, cands, w: tw, h: textH(text) });
+      };
+      for (const [aid, a] of Object.entries(M.angs)) {
+        const O = M.pts[a.o], A = a.a ? M.pts[a.a] : null, B = M.pts[a.b];
+        if (!mVisible(O) || !mVisible(B) || (a.a && !mVisible(A))) continue;
+        const on = !mExporting && mSel && mSel.kind === 'a' && mSel.id === aid;
+        angleMark(O, A, B, { id: aid, col: on ? SEL : INK, call: a.call, co: a.co, ref: { kind: 'a', id: aid } });
+      }
+      // where two rulers meet: the angle between them (a square mark for a right angle; nothing when straight)
+      const at = {};
+      for (const s of Object.values(M.segs)) if (mVisible(M.pts[s.a]) && mVisible(M.pts[s.b])) for (const [p, q] of [[s.a, s.b], [s.b, s.a]]) (at[p] = at[p] || []).push(q);
+      for (const [pid, others] of Object.entries(at)) {
+        const P = M.pts[pid]; if (!mVisible(P) || others.length !== 2) continue;
+        const [px, py] = mScreen(P), [ax, ay] = mScreen(M.pts[others[0]] || P), [bx, by] = mScreen(M.pts[others[1]] || P);
+        const a0 = Math.atan2(ay - py, ax - px); let da = Math.atan2(by - py, bx - px) - a0;
+        while (da > Math.PI) da -= 2 * Math.PI;
+        while (da < -Math.PI) da += 2 * Math.PI;
+        const deg = Math.abs(da) * 180 / Math.PI;
+        if (deg < 0.05 || deg > 179.95) continue;
+        if (square(deg)) {
+          const r = 9, u = [Math.cos(a0), Math.sin(a0)], w2 = [Math.cos(a0 + da), Math.sin(a0 + da)];
+          g.append(sv('path', { d: 'M' + (px + u[0] * r) + ' ' + (py + u[1] * r) + 'L' + (px + (u[0] + w2[0]) * r) + ' ' + (py + (u[1] + w2[1]) * r) + 'L' + (px + w2[0] * r) + ' ' + (py + w2[1] * r), fill: 'none', stroke: INK, 'stroke-width': 1 }));
+          continue;
+        }
+        const r = 20;
         g.append(sv('path', { d: 'M' + (px + r * Math.cos(a0)) + ' ' + (py + r * Math.sin(a0)) + 'A' + r + ' ' + r + ' 0 0 ' + (da > 0 ? 1 : 0) + ' ' + (px + r * Math.cos(a0 + da)) + ' ' + (py + r * Math.sin(a0 + da)), fill: 'none', stroke: INK, 'stroke-width': 1 }));
-        const am = a0 + da / 2;
-        label(px + (r + 12) * Math.cos(am), py + (r + 12) * Math.sin(am) + 4, [mAng(deg)], { col: INK, anchor: 'middle' });
+        const am = a0 + da / 2, text = [mAng(deg)], tw = textW(text), cands = [];
+        for (const rad of [r + 12, r + 24]) { const cx = px + rad * Math.cos(am), cy = py + rad * Math.sin(am); cands.push({ x: cx, y: cy + 4, box: { x0: cx - tw / 2, y0: cy - 7, x1: cx + tw / 2, y1: cy + 7 }, anchor: 'middle' }); }
+        reqs.push({ ax: px + r * Math.cos(am), ay: py + r * Math.sin(am), lines: text, o: { col: INK }, cands, w: tw, h: textH(text) });
       }
       // the points: radius and height (across and up), or radius and angle (from above)
+      const dots = [];
       for (const [pid, P] of Object.entries(M.pts)) {
-        if (P.v !== v) continue;
+        if (!mVisible(P)) continue;
         const [x, y] = mScreen(P), on = !mExporting && ((mSel && mSel.kind === 'p' && mSel.id === pid) || mConnect === pid), col = on ? SEL : INK;
-        const text = v === 'side' ? ['r ' + mLen(Math.abs(P.x)) + ' · h ' + num(hDisp(P.y, zBase()), 3) + ' ' + UNIT_LABEL]
-          : ['r ' + mLen(Math.hypot(P.x, P.y)) + ' · ' + mAng(((Math.atan2(P.y, P.x) * 180 / Math.PI) + 360) % 360)];
-        const wide = text[0].length * 6.3 + 10, flipL = x + 7 + wide > size().w;
-        label(flipL ? x - 7 : x + 7, y - 7, text, { col, call: P.call, co: P.co || (flipL ? [-36, -30] : null), ref: { kind: 'p', id: pid }, anchor: flipL ? 'end' : 'start' });
-        const c = sv('circle', { cx: x, cy: y, r: on ? 4.5 : 3.5, fill: '#fff', stroke: col, 'stroke-width': 1.6, style: 'cursor:move' });
-        c.__mpt = pid; g.append(c);
+        boxes.push({ x0: x - 5, y0: y - 5, x1: x + 5, y1: y + 5 });
+        const ph = P.hide || {}, parts = v === 'side' ? [ph.a ? '' : 'r ' + mLen(Math.abs(P.x)), ph.b ? '' : 'h ' + num(hDisp(P.y, zBase()), 3) + ' ' + UNIT_LABEL]
+          : [ph.a ? '' : 'r ' + mLen(Math.hypot(P.x, P.y)), ph.b ? '' : mAng(((Math.atan2(P.y, P.x) * 180 / Math.PI) + 360) % 360)];
+        const text = [parts.filter(Boolean).join(' · ')];
+        dots.push({ pid, x, y, on, col });
+        if (!text[0]) continue;
+        const tw = textW(text), th = textH(text), cands = [];
+        for (const [dx, dy, an] of [[7, -9, 'start'], [-7, -9, 'end'], [7, 15, 'start'], [-7, 15, 'end']]) {
+          const x0 = an === 'start' ? x + dx - 2 : x + dx - tw + 2;
+          cands.push({ x: x + dx, y: y + dy, box: { x0, y0: y + dy - 11, x1: x0 + tw, y1: y + dy + th - 11 }, anchor: an });
+        }
+        reqs.push({ ax: x, ay: y, lines: text, o: { col, call: P.call, co: P.co, ref: { kind: 'p', id: pid } }, cands, w: tw, h: th });
       }
+      // labels: each where it is clear, else a callout, its box set off the part where there is room
+      const callout = (rq, co, auto) => {
+        const { ax, ay, lines, o } = rq, bx = ax + co[0], by = ay + co[1], w = rq.w + 4, h = rq.h + 3;
+        const left = co[0] < 0 ? bx - w : bx, top = by - h / 2;
+        boxes.push({ x0: left, y0: top, x1: left + w, y1: top + h });
+        g.append(sv('line', { x1: ax, y1: ay, x2: co[0] < 0 ? left + w : left, y2: by, stroke: o.col, 'stroke-width': 1 }));
+        g.append(sv('circle', { cx: ax, cy: ay, r: 1.8, fill: o.col }));
+        const box = sv('rect', { x: left, y: top, width: w, height: h, rx: 3, fill: '#fff', stroke: o.col, 'stroke-width': 1, style: o.ref ? 'cursor:move' : '' });
+        if (o.ref) box.__mcall = o.ref;
+        box.__mauto = auto; box.__co = co;
+        g.append(box);
+        lines.forEach((s, i) => { const t = sv('text', { x: left + 5, y: top + 13 + i * 13, 'font-size': 11, fill: o.col, 'pointer-events': 'none' }); t.textContent = s; g.append(t); });
+      };
+      for (const rq of reqs) {
+        const { o } = rq;
+        if (o.call) { callout(rq, o.co || [36, -30], false); continue; }
+        const c = rq.cands.find(c => !hitBox(c.box));
+        if (c) {
+          boxes.push(c.box);
+          const t = sv('text', { x: c.x, y: c.y, 'font-size': 11, fill: o.col, 'text-anchor': c.anchor, ...halo, ...(c.rot != null ? { transform: 'rotate(' + c.rot.toFixed(2) + ' ' + c.x.toFixed(1) + ' ' + (c.y - 4).toFixed(1) + ')' } : {}), 'pointer-events': 'none' });
+          t.textContent = rq.lines[0]; g.append(t);
+          continue;
+        }
+        // nowhere clear beside it: a callout, its box in the first clear place round it, off the part if it can be
+        let best = null;
+        for (const dist of [40, 60, 85, 120, 170]) {
+          for (let k = 0; k < 16 && !(best && best.off); k++) {
+            const a = -Math.PI / 4 + k * Math.PI / 8, co = [Math.cos(a) * dist, Math.sin(a) * dist];
+            const w = rq.w + 4, h = rq.h + 3, left = co[0] < 0 ? rq.ax + co[0] - w : rq.ax + co[0], top = rq.ay + co[1] - h / 2, b = { x0: left, y0: top, x1: left + w, y1: top + h };
+            if (hitBox(b)) continue;
+            const off = offModel(b);
+            if (!best || (off && !best.off)) best = { co, off };
+          }
+          if (best && best.off) break;
+        }
+        callout(rq, best ? best.co : [36, -30], true);
+      }
+      for (const d of dots) { const c = sv('circle', { cx: d.x, cy: d.y, r: d.on ? 4.5 : 3.5, fill: '#fff', stroke: d.col, 'stroke-width': 1.6, style: 'cursor:move' }); c.__mpt = d.pid; g.append(c); }
       // a ruler being drawn, and the snap
-      if (drag && drag.type === 'mnew' && drag.moved) ruler({ x: drag.A[0], y: drag.A[1] }, { x: drag.B[0], y: drag.B[1] }, { col: SEL, temp: true });
+      if (drag && drag.type === 'mnew' && drag.moved) {
+        if (drag.mode === 'angle') { const V = mAngleVertex(drag); angleMark({ x: V.o[0], y: V.o[1] }, V.a ? { x: V.a[0], y: V.a[1] } : null, { x: drag.B[0], y: drag.B[1] }, { col: SEL, temp: true }); }
+        else ruler({ x: drag.A[0], y: drag.A[1] }, { x: drag.B[0], y: drag.B[1] }, { col: SEL, temp: true });
+      }
+      if (drag && drag.type === 'mnew' && !mExporting) {
+        const t = sv('text', { x: AX_L + 8, y: 18, 'font-size': 11, fill: '#868e96', ...halo, 'pointer-events': 'none' });
+        t.textContent = (drag.mode === 'angle' ? 'Angle' : 'Ruler') + ' — scroll to switch to ' + (drag.mode === 'angle' ? 'a ruler' : 'an angle'); g.append(t);
+      }
       const sn = drag && drag.snapShow || mHoverSnap;
       if (sn && !mExporting) {
         for (const [a, b] of sn.lines || []) { const [x1, y1] = mScreen({ x: a[0], y: a[1] }), [x2, y2] = mScreen({ x: b[0], y: b[1] }); g.append(sv('line', { x1, y1, x2, y2, stroke: '#f08c00', 'stroke-width': 1, 'stroke-dasharray': '3 3', 'pointer-events': 'none' })); }
@@ -5940,27 +6107,38 @@
       }
     }
 
+    function mAngleVertex(d) {
+      const [ax, ay] = mScreen({ x: d.A[0], y: d.A[1] });
+      let best = null, bd = 60;
+      for (const t of d.T) { const [x, y] = mScreen({ x: t[0], y: t[1] }), dd = Math.hypot(x - ax, y - ay); if (dd < bd) { bd = dd; best = t; } }
+      if (!best || bd < 2) return { o: d.A, a: null };
+      return { o: [best[0], best[1]], a: d.A };
+    }
     function measureDown(e) {
       const [sx, sy] = local(e), W = mWorld(sx, sy), M = measures(), v = mView(), t = e.target, ctrl = e.ctrlKey || e.metaKey;
       if (e.button === 2) {
-        const ref = t.__mpt ? { kind: 'p', id: t.__mpt } : t.__mseg ? { kind: 's', id: t.__mseg } : t.__mcall || null;
+        const ref = t.__mpt ? { kind: 'p', id: t.__mpt } : t.__mseg ? { kind: 's', id: t.__mseg } : t.__mang ? { kind: 'a', id: t.__mang } : t.__mcall || null;
         mSel = ref; mConnect = null; drawSection(); showMeasureMenu(e.clientX, e.clientY, ref); return;
       }
       svg.setPointerCapture(e.pointerId);
       const T = mTargets(t.__mpt);
+      const pin = v === 'side' && mConnect && M.pts[mConnect] && M.pts[mConnect].ang != null ? { ang: M.pts[mConnect].ang } : {};
       if (mConnect) {
         const a = mConnect; mConnect = null; pushUndo();
         let b = t.__mpt;
-        if (!b) { const P = ctrl ? mSnap(W, T).p : W; b = mId('p'); M.pts[b] = { v, x: P[0], y: P[1] }; }
+        if (!b) { const P = ctrl ? mSnap(W, T).p : W; b = mId('p'); M.pts[b] = { v, x: P[0], y: P[1], ...pin }; }
         if (b !== a && M.pts[a] && !mSegExists(a, b)) M.segs[mId('s')] = { a, b };
         mSel = { kind: 'p', id: b }; drag = { type: 'mnone' }; mChanged(); return;
       }
       if (t.__mcall) {
-        const o = t.__mcall.kind === 'p' ? M.pts[t.__mcall.id] : M.segs[t.__mcall.id];
-        mSel = t.__mcall; drag = { type: 'mcall', ref: t.__mcall, sx, sy, co0: (o && o.co) || [36, -30], undo: false }; drawSection(); return;
+        const o = mObj(t.__mcall);
+        // (an automatic callout: where it is now, from its anchor)
+        const co0 = t.__co || (o && o.co) || [36, -30];
+        mSel = t.__mcall; drag = { type: 'mcall', ref: t.__mcall, sx, sy, co0, auto: !!t.__mauto, undo: false }; drawSection(); return;
       }
       if (t.__mpt) { mSel = { kind: 'p', id: t.__mpt }; drag = { type: 'mpt', id: t.__mpt, T, undo: false }; drawSection(); return; }
       if (t.__mseg) { mSel = { kind: 's', id: t.__mseg }; drag = { type: 'mnone' }; drawSection(); return; }
+      if (t.__mang) { mSel = { kind: 'a', id: t.__mang }; drag = { type: 'mnone' }; drawSection(); return; }
       // a new ruler, from here to where the button is let go
       const s0 = ctrl ? mSnap(W, T) : null;
       drag = { type: 'mnew', A: s0 ? s0.p : W, B: s0 ? s0.p : W, T, sx, sy, moved: false, snapShow: s0 };
@@ -5990,32 +6168,60 @@
         P.x = Q[0]; P.y = Q[1]; drag.snapShow = s; drag.moved = true; drawSection(); return;
       }
       if (drag.type === 'mcall') {
-        const o = drag.ref.kind === 'p' ? M.pts[drag.ref.id] : M.segs[drag.ref.id]; if (!o) return;
+        const o = mObj(drag.ref); if (!o) return;
         if (!drag.undo) { pushUndo(); drag.undo = true; }
+        if (drag.auto) o.call = true;
         o.co = [drag.co0[0] + sx - drag.sx, drag.co0[1] + sy - drag.sy]; drag.moved = true; drawSection();
       }
     }
     function measureUp(d) {
       if (d.type === 'mnew' && d.moved && Math.hypot(d.B[0] - d.A[0], d.B[1] - d.A[1]) > 1e-9) {
-        const M = measures(), v = mView(), a = mId('p'), b = mId('p'), s = mId('s');
+        const M = measures(), v = mView(), mk = (P) => { const id = mId('p'); M.pts[id] = { v, x: P[0], y: P[1] }; return id; };
         pushUndo();
-        M.pts[a] = { v, x: d.A[0], y: d.A[1] }; M.pts[b] = { v, x: d.B[0], y: d.B[1] }; M.segs[s] = { a, b };
-        mSel = { kind: 's', id: s }; mChanged(); return;
+        if (d.mode === 'angle') {
+          const V = mAngleVertex(d), o = mk(V.o), a = V.a ? mk(V.a) : null, b = mk(d.B), id = mId('a');
+          M.angs[id] = { a, o, b }; mSel = { kind: 'a', id };
+        } else { const a = mk(d.A), b = mk(d.B), s = mId('s'); M.segs[s] = { a, b }; mSel = { kind: 's', id: s }; }
+        mChanged(); return;
       }
       if (d.moved) mChanged(); else drawSection();
     }
     function showMeasureMenu(x, y, ref) {
-      const M = measures(), o = ref ? (ref.kind === 'p' ? M.pts[ref.id] : M.segs[ref.id]) : null;
+      const M = measures(), o = mObj(ref);
       menu.textContent = '';
       const B = (label, f, title) => el('button', { type: 'button', style: BTN2, title: title || label, onclick: () => { hideMenu(); f(); } }, label);
       const edit = (f) => { pushUndo(); f(); mChanged(); };
+      // a datapoint shown or not (kept open, to set several)
+      const tick = (text, get, set) => checkRow(text, get, (v) => { pushUndo(); set(v); mChanged(); });
+      const flag = (obj, k) => [() => !(obj.hide && obj.hide[k]), (v) => { obj.hide = obj.hide || {}; if (v) delete obj.hide[k]; else obj.hide[k] = true; if (!Object.keys(obj.hide).length) delete obj.hide; }];
+      const ptTicks = (pid, name) => {
+        const P = M.pts[pid]; if (!P) return [];
+        const [ga, sa] = flag(P, 'a'), [gb, sb] = flag(P, 'b');
+        return [tick(name + ': radius', ga, sa), tick(name + ': ' + (P.v === 'side' ? 'height' : 'angle'), gb, sb)];
+      };
       if (o) {
-        menu.append(el('div', { style: 'font-weight:700;margin-bottom:4px' }, ref.kind === 'p' ? 'Measurement point' : 'Ruler'),
+        const title = ref.kind === 'p' ? 'Measurement point' : ref.kind === 's' ? 'Ruler' : 'Angle';
+        const grp = mGroup(ref), side = [...grp].some(p => M.pts[p] && M.pts[p].v === 'side'), pinned = [...grp].some(p => M.pts[p] && M.pts[p].ang != null);
+        menu.append(el('div', { style: 'font-weight:700;margin-bottom:4px' }, title),
           row(ref.kind === 'p' ? B('Connect to…', () => { mConnect = ref.id; drawSection(); }, 'Join it to another point (or a new one) to make a ruler') : null,
             B(o.call ? 'Label on the drawing' : 'Label as a callout', () => edit(() => { if (o.call) { delete o.call; delete o.co; } else o.call = true; })),
-            B(ref.kind === 'p' ? 'Delete point' : 'Delete ruler', () => edit(() => { mDelete(ref); mSel = null; }))), hr());
+            B('Delete ' + title.toLowerCase(), () => edit(() => { mDelete(ref); mSel = null; }))),
+          side ? row(pinned ? B('Unpin', () => edit(() => { for (const p of grp) if (M.pts[p]) delete M.pts[p].ang; }), 'Show it at every section angle')
+            : B('Pin to ' + mAng(state.viewAngle), () => edit(() => { for (const p of grp) if (M.pts[p]) M.pts[p].ang = state.viewAngle; }), 'Show it only at this section angle (marked on the compass, which snaps to it)')) : null);
+        // its datapoints
+        const ticks = [];
+        if (ref.kind === 's') {
+          const [gl, sl] = flag(o, 'len');
+          ticks.push(tick('Length', gl, sl));
+          ticks.push(checkRow('Angle', () => { const A = M.pts[o.a], Bp = M.pts[o.b]; if (o.hide && o.hide.ang != null) return !o.hide.ang; if (!A || !Bp) return true; const [x1, y1] = mScreen(A), [x2, y2] = mScreen(Bp); let a = Math.atan2(-(y2 - y1), x2 - x1) * 180 / Math.PI; a = ((a % 90) + 90) % 90; return !(a < 0.05 || a > 89.95); },
+            (v) => { pushUndo(); o.hide = o.hide || {}; o.hide.ang = !v; mChanged(); }));
+          ticks.push(...ptTicks(o.a, 'Start'), ...ptTicks(o.b, 'End'));
+        } else if (ref.kind === 'p') ticks.push(...ptTicks(ref.id, 'Point'));
+        else ticks.push(...ptTicks(o.o, 'Vertex'));
+        if (ticks.length) menu.append(el('div', { style: 'margin-top:4px;color:#555;font-size:11px' }, 'Shown'), ...ticks);
+        menu.append(hr());
       }
-      const n = Object.values(M.pts).filter(p => p.v === mView()).length;
+      const n = Object.values(M.pts).filter(p => mVisible(p)).length;
       menu.append(el('div', { style: 'font-weight:700;margin-bottom:4px' }, 'Measurements'),
         row(B('Clear this view', () => edit(() => { mClear(true); mSel = null; }), 'Remove the measurements in this view (' + n + ' points)'),
           B('Clear all', () => edit(() => { mClear(false); mSel = null; }), 'Remove every measurement, in both views')),
@@ -6317,7 +6523,7 @@
           const [ox, oy] = toScreen(0, 0), sNow = Math.atan2(oy - sy, sx - ox) * 180 / Math.PI;
           drag.acc += ((sNow - drag.sl + 540) % 360) - 180; drag.sl = sNow;
           let deg = drag.a0 - FZ() * drag.acc;
-          if (e.ctrlKey || e.metaKey) deg = Math.round(deg / orbitStep()) * orbitStep();
+          if (e.ctrlKey || e.metaKey) deg = Math.round(deg / orbitStep()) * orbitStep(); else deg = pinMagnet(deg);
           setViewAngle(deg, false); drawSection();
         }
         return;
@@ -6515,6 +6721,12 @@
     svg.addEventListener('wheel', (e) => {
       e.preventDefault();
       if (!view) return;
+      if (state.measure && drag && drag.type === 'mnew') {
+        // (one switch per scroll gesture)
+        const now = performance.now();
+        if (!drag.lastWheel || now - drag.lastWheel > 250) { drag.mode = drag.mode === 'angle' ? 'line' : 'angle'; drag.moved = true; drawSection(); }
+        drag.lastWheel = now; return;
+      }
       const [sx, sy] = local(e);
       zoomTo((zoomAnim ? zoomAnim.s : view.s) * Math.exp(-e.deltaY * 0.0015), sx, sy);
     }, { passive: false });
@@ -8143,7 +8355,8 @@
 
     // ---- the section angle, shared by the cross-section, the 3D view and both compasses ----
     function setViewAngle(deg, keepYaw) {
-      deg = Math.round(deg * 2) / 2;                 // half-degree steps
+      // half-degree steps (a section angle measurements are pinned to is kept exactly)
+      if (!pinnedAngles().some(a => Math.abs((((deg - a) % 360) + 540) % 360 - 180) < 1e-6)) deg = Math.round(deg * 2) / 2;
       state.viewAngle = ((deg % 360) + 360) % 360;
       const want = yawOf(state.viewAngle), before = yaw;
       // keep yaw continuous (no jump of 2π while orbiting)
@@ -8173,6 +8386,17 @@
           x.strokeStyle = major ? '#495057' : '#adb5bd'; x.beginPath(); x.moveTo(px + 0.5, H1); x.lineTo(px + 0.5, H1 - (major ? 9 : 5)); x.stroke();
           if (major) x.fillText(ANG_SCALE === 1 ? String(((d % 360) + 360) % 360) + '°' : num((((d % 360) + 360) % 360) * ANG_SCALE, 2), px, 11);
         }
+        // section angles measurements are pinned to; those off the tape (or faded out) counted above its ends
+        let nl = 0, nr = 0;
+        for (const a of pinnedAngles()) {
+          const dd = (((a - A) % 360) + 540) % 360 - 180, px = cx + dd * PXD;
+          if (px < W1 * 0.15) { nl++; continue; }
+          if (px > W1 * 0.85) { nr++; continue; }
+          x.fillStyle = '#1864ab'; x.beginPath(); x.moveTo(px - 5, 0); x.lineTo(px + 5, 0); x.lineTo(px, 7); x.closePath(); x.fill();
+        }
+        pinHintL.style.display = nl ? '' : 'none'; pinHintL.textContent = '◂ ' + nl + ' measured';
+        pinHintR.style.display = nr ? '' : 'none'; pinHintR.textContent = nr + ' measured ▸';
+        pinHintL.style.left = 'calc(50% - ' + (W1 / 2) + 'px)'; pinHintR.style.left = 'calc(50% + ' + (W1 / 2) + 'px)';
         x.strokeStyle = '#e8590c'; x.lineWidth = 2; x.beginPath(); x.moveTo(cx, 0); x.lineTo(cx, H1); x.stroke(); x.lineWidth = 1;
         x.fillStyle = '#e8590c'; x.font = 'bold 10px sans-serif'; x.fillText(ANG_SCALE === 1 ? A.toFixed(1) + '°' : (A * ANG_SCALE).toFixed(3), cx + 22, H1 - 4);
       }
@@ -8184,7 +8408,7 @@
       compass1.addEventListener('pointermove', (e) => {
         if (d1 == null) return;
         raw -= (e.clientX - d1) / 2.2; d1 = e.clientX;
-        setViewAngle(e.ctrlKey || e.metaKey ? Math.round(raw / orbitStep()) * orbitStep() : raw);
+        setViewAngle(e.ctrlKey || e.metaKey ? Math.round(raw / orbitStep()) * orbitStep() : pinMagnet(raw));
       });
       compass1.addEventListener('pointerup', () => { d1 = null; });
       compass1.addEventListener('dblclick', (e) => { e.stopPropagation(); setViewAngle(Math.round(state.viewAngle / orbitStep()) * orbitStep()); });
