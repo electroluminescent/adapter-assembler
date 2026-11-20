@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.31.0. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.31.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = "3.31.0";
+  const APP_VERSION = "3.31.1";
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -5886,6 +5886,26 @@
       mTidy();
     }
     // points left with nothing joined to them go
+    // a point put where another already is becomes that one (what joined it joins the other); nothing repeated
+    function mMerge(pid) {
+      const M = measures(), P = M.pts[pid]; if (!P || !mVisible(P)) return pid;
+      const [x, y] = mScreen(P);
+      for (const [k, Q] of Object.entries(M.pts)) {
+        if (k === pid || !mVisible(Q)) continue;
+        const [qx, qy] = mScreen(Q);
+        if (Math.hypot(qx - x, qy - y) >= 2.5) continue;
+        for (const s of Object.values(M.segs)) { if (s.a === pid) s.a = k; if (s.b === pid) s.b = k; }
+        for (const a of Object.values(M.angs)) for (const f of ['a', 'o', 'b']) if (a[f] === pid) a[f] = k;
+        delete M.pts[pid]; mDedupe(); return k;
+      }
+      return pid;
+    }
+    function mDedupe() {
+      const M = measures(), ss = new Set(), sa = new Set();
+      for (const [k, s] of Object.entries(M.segs)) { const key = [s.a, s.b].sort().join('|'); if (s.a === s.b || ss.has(key)) delete M.segs[k]; else ss.add(key); }
+      for (const [k, a] of Object.entries(M.angs)) { const key = a.o + '|' + [a.a || '', a.b].sort().join('|'); if (a.o === a.b || a.a === a.b || a.a === a.o || sa.has(key)) delete M.angs[k]; else sa.add(key); }
+      mTidy();
+    }
     function mTidy() {
       const M = measures(), used = new Set();
       for (const s of Object.values(M.segs)) used.add(s.a), used.add(s.b);
@@ -5902,7 +5922,7 @@
     // drawn over the view (only in the Measurement view)
     function drawMeasures() {
       if (!state.measure || !state.scene || !view) return;
-      const M = measures(), v = mView(), g = sv('g', { id: 'aa-measures' }), INK = '#1864ab', SEL = '#e03131';
+      const M = measures(), v = mView(), g = sv('g', { id: 'aa-measures' }), INK = '#1864ab', PTC = '#0c8599', ANG = '#7048e8', SEL = '#e03131';
       svg.append(g);
       const { w: VW, h: VH } = size(), halo = { 'paint-order': 'stroke', stroke: '#fff', 'stroke-width': 3, 'stroke-linejoin': 'round' };
       // an angle worth showing: not along or across the view (0, 90, 180, 270 …)
@@ -5923,6 +5943,7 @@
         }
         return false;
       };
+      boxes.push({ x0: AX_L, y0: 26, x1: AX_L + 230, y1: 58 });   // (the key, top left)
       const offModel = (b) => !onModel(b.x0, b.y0) && !onModel(b.x1, b.y0) && !onModel(b.x0, b.y1) && !onModel(b.x1, b.y1) && !onModel((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2);
       const reqs = [], drawn = [];
       // two rulers over each other (along the same line, overlapping): the later one is set off to the side, with
@@ -5977,8 +5998,10 @@
         if (!o.temp && text[0]) reqs.push({ ax: (x1 + x2) / 2, ay: (y1 + y2) / 2, lines: text, o, cands, w: tw, h: textH(text) });
         else for (const t of [sv('text', { x: (x1 + x2) / 2, y: (y1 + y2) / 2 - 8, 'font-size': 11, fill: o.col, 'text-anchor': 'middle', ...halo, 'pointer-events': 'none' })]) { t.textContent = text[0]; g.append(t); }
       };
+      const twice = new Set(), at2 = (P) => mScreen(P).map(v => Math.round(v * 2)).join(',');
       for (const [sid, s] of Object.entries(M.segs)) {
         const A = M.pts[s.a], B = M.pts[s.b]; if (!mVisible(A) || !mVisible(B)) continue;
+        const key = [at2(A), at2(B)].sort().join('|'); if (twice.has(key)) continue; twice.add(key);
         const on = !mExporting && mSel && mSel.kind === 's' && mSel.id === sid;
         ruler(A, B, { id: sid, col: on ? SEL : INK, call: s.call, co: s.co, ref: { kind: 's', id: sid }, hide: s.hide || {} });
       }
@@ -6007,7 +6030,7 @@
         const O = M.pts[a.o], A = a.a ? M.pts[a.a] : null, B = M.pts[a.b];
         if (!mVisible(O) || !mVisible(B) || (a.a && !mVisible(A))) continue;
         const on = !mExporting && mSel && mSel.kind === 'a' && mSel.id === aid;
-        angleMark(O, A, B, { id: aid, col: on ? SEL : INK, call: a.call, co: a.co, ref: { kind: 'a', id: aid } });
+        angleMark(O, A, B, { id: aid, col: on ? SEL : ANG, call: a.call, co: a.co, ref: { kind: 'a', id: aid } });
       }
       // where two rulers meet: the angle between them (a square mark for a right angle; nothing when straight)
       const at = {};
@@ -6022,24 +6045,27 @@
         if (deg < 0.05 || deg > 179.95) continue;
         if (square(deg)) {
           const r = 9, u = [Math.cos(a0), Math.sin(a0)], w2 = [Math.cos(a0 + da), Math.sin(a0 + da)];
-          g.append(sv('path', { d: 'M' + (px + u[0] * r) + ' ' + (py + u[1] * r) + 'L' + (px + (u[0] + w2[0]) * r) + ' ' + (py + (u[1] + w2[1]) * r) + 'L' + (px + w2[0] * r) + ' ' + (py + w2[1] * r), fill: 'none', stroke: INK, 'stroke-width': 1 }));
+          g.append(sv('path', { d: 'M' + (px + u[0] * r) + ' ' + (py + u[1] * r) + 'L' + (px + (u[0] + w2[0]) * r) + ' ' + (py + (u[1] + w2[1]) * r) + 'L' + (px + w2[0] * r) + ' ' + (py + w2[1] * r), fill: 'none', stroke: ANG, 'stroke-width': 1 }));
           continue;
         }
         const r = 20;
-        g.append(sv('path', { d: 'M' + (px + r * Math.cos(a0)) + ' ' + (py + r * Math.sin(a0)) + 'A' + r + ' ' + r + ' 0 0 ' + (da > 0 ? 1 : 0) + ' ' + (px + r * Math.cos(a0 + da)) + ' ' + (py + r * Math.sin(a0 + da)), fill: 'none', stroke: INK, 'stroke-width': 1 }));
+        g.append(sv('path', { d: 'M' + (px + r * Math.cos(a0)) + ' ' + (py + r * Math.sin(a0)) + 'A' + r + ' ' + r + ' 0 0 ' + (da > 0 ? 1 : 0) + ' ' + (px + r * Math.cos(a0 + da)) + ' ' + (py + r * Math.sin(a0 + da)), fill: 'none', stroke: ANG, 'stroke-width': 1 }));
         const am = a0 + da / 2, text = [mAng(deg)], tw = textW(text), cands = [];
         for (const rad of [r + 12, r + 24]) { const cx = px + rad * Math.cos(am), cy = py + rad * Math.sin(am); cands.push({ x: cx, y: cy + 4, box: { x0: cx - tw / 2, y0: cy - 7, x1: cx + tw / 2, y1: cy + 7 }, anchor: 'middle' }); }
-        reqs.push({ ax: px + r * Math.cos(am), ay: py + r * Math.sin(am), lines: text, o: { col: INK }, cands, w: tw, h: textH(text) });
+        reqs.push({ ax: px + r * Math.cos(am), ay: py + r * Math.sin(am), lines: text, o: { col: ANG }, cands, w: tw, h: textH(text) });
       }
       // the points: radius and height (across and up), or radius and angle (from above)
-      const dots = [];
+      const dots = [], placed = [];
       for (const [pid, P] of Object.entries(M.pts)) {
         if (!mVisible(P)) continue;
-        const [x, y] = mScreen(P), on = !mExporting && ((mSel && mSel.kind === 'p' && mSel.id === pid) || mConnect === pid), col = on ? SEL : INK;
+        const [x, y] = mScreen(P), on = !mExporting && ((mSel && mSel.kind === 'p' && mSel.id === pid) || mConnect === pid), col = on ? SEL : PTC;
+        // (points in the same place: one marker, one label)
+        if (placed.some(q => Math.hypot(q[0] - x, q[1] - y) < 2.5)) continue;
+        placed.push([x, y]);
         boxes.push({ x0: x - 5, y0: y - 5, x1: x + 5, y1: y + 5 });
-        const ph = P.hide || {}, parts = v === 'side' ? [ph.a ? '' : 'r ' + mLen(Math.abs(P.x)), ph.b ? '' : 'h ' + num(hDisp(P.y, zBase()), 3) + ' ' + UNIT_LABEL]
-          : [ph.a ? '' : 'r ' + mLen(Math.hypot(P.x, P.y)), ph.b ? '' : mAng(((Math.atan2(P.y, P.x) * 180 / Math.PI) + 360) % 360)];
-        const text = [parts.filter(Boolean).join(' · ')];
+        const ph = P.hide || {}, parts = v === 'side' ? [ph.a ? '' : 'R ' + num(mm(Math.abs(P.x)), 3), ph.b ? '' : 'H ' + num(hDisp(P.y, zBase()), 3)]
+          : [ph.a ? '' : 'R ' + mLen(Math.hypot(P.x, P.y)), ph.b ? '' : 'θ ' + mAng(((Math.atan2(P.y, P.x) * 180 / Math.PI) + 360) % 360)];
+        const shown = parts.filter(Boolean), text = [shown.join(' · ') + (v === 'side' && shown.length ? ' ' + UNIT_LABEL : '')];
         dots.push({ pid, x, y, on, col });
         if (!text[0]) continue;
         const tw = textW(text), th = textH(text), cands = [];
@@ -6086,7 +6112,17 @@
         }
         callout(rq, best ? best.co : [36, -30], true);
       }
-      for (const d of dots) { const c = sv('circle', { cx: d.x, cy: d.y, r: d.on ? 4.5 : 3.5, fill: '#fff', stroke: d.col, 'stroke-width': 1.6, style: 'cursor:move' }); c.__mpt = d.pid; g.append(c); }
+      for (const d of dots) { const c = sv('circle', { cx: d.x, cy: d.y, r: d.on ? 5 : 4, fill: d.col, stroke: '#fff', 'stroke-width': 1.5, style: 'cursor:move' }); c.__mpt = d.pid; g.append(c); }
+      // what is what
+      if (dots.length || reqs.length) {
+        const lx = AX_L + 8, ly = 36, lg = sv('g', { 'pointer-events': 'none' });
+        const item = (x, y, mark, text, col) => { lg.append(mark); const t = sv('text', { x: x + 14, y: y + 4, 'font-size': 10, fill: col, ...halo }); t.textContent = text; lg.append(t); return x + 14 + text.length * 5.6 + 14; };
+        const y2 = ly + 14;
+        item(lx, ly, sv('circle', { cx: lx + 5, cy: ly, r: 3.5, fill: PTC, stroke: '#fff', 'stroke-width': 1.2 }), 'point: R radius · ' + (v === 'side' ? 'H height' : 'θ angle'), PTC);
+        const x = item(lx, y2, sv('path', { d: 'M' + lx + ' ' + y2 + 'h11M' + lx + ' ' + y2 + 'l3 -2v4zM' + (lx + 11) + ' ' + y2 + 'l-3 -2v4z', stroke: INK, fill: INK, 'stroke-width': 1 }), 'ruler: length (angle)', INK);
+        item(x, y2, sv('path', { d: 'M' + (x + 11) + ' ' + (y2 + 3) + 'H' + x + 'L' + (x + 9) + ' ' + (y2 - 5), stroke: ANG, fill: 'none', 'stroke-width': 1.2 }), 'angle', ANG);
+        g.append(lg);
+      }
       // a ruler being drawn, and the snap
       if (drag && drag.type === 'mnew' && drag.moved) {
         if (drag.mode === 'angle') { const V = mAngleVertex(drag); angleMark({ x: V.o[0], y: V.o[1] }, V.a ? { x: V.a[0], y: V.a[1] } : null, { x: drag.B[0], y: drag.B[1] }, { col: SEL, temp: true }); }
@@ -6128,6 +6164,7 @@
         let b = t.__mpt;
         if (!b) { const P = ctrl ? mSnap(W, T).p : W; b = mId('p'); M.pts[b] = { v, x: P[0], y: P[1], ...pin }; }
         if (b !== a && M.pts[a] && !mSegExists(a, b)) M.segs[mId('s')] = { a, b };
+        b = mMerge(b);
         mSel = { kind: 'p', id: b }; drag = { type: 'mnone' }; mChanged(); return;
       }
       if (t.__mcall) {
@@ -6136,7 +6173,9 @@
         const co0 = t.__co || (o && o.co) || [36, -30];
         mSel = t.__mcall; drag = { type: 'mcall', ref: t.__mcall, sx, sy, co0, auto: !!t.__mauto, undo: false }; drawSection(); return;
       }
-      if (t.__mpt) { mSel = { kind: 'p', id: t.__mpt }; drag = { type: 'mpt', id: t.__mpt, T, undo: false }; drawSection(); return; }
+      // (Shift: a new ruler from the point, instead of moving it)
+      if (t.__mpt && !e.shiftKey) { mSel = { kind: 'p', id: t.__mpt }; drag = { type: 'mpt', id: t.__mpt, T, undo: false }; drawSection(); return; }
+      if (t.__mpt && M.pts[t.__mpt]) { const P = M.pts[t.__mpt]; drag = { type: 'mnew', A: [P.x, P.y], B: [P.x, P.y], T: mTargets(), sx, sy, moved: false }; mSel = null; drawSection(); return; }
       if (t.__mseg) { mSel = { kind: 's', id: t.__mseg }; drag = { type: 'mnone' }; drawSection(); return; }
       if (t.__mang) { mSel = { kind: 'a', id: t.__mang }; drag = { type: 'mnone' }; drawSection(); return; }
       // a new ruler, from here to where the button is let go
@@ -6181,9 +6220,16 @@
         if (d.mode === 'angle') {
           const V = mAngleVertex(d), o = mk(V.o), a = V.a ? mk(V.a) : null, b = mk(d.B), id = mId('a');
           M.angs[id] = { a, o, b }; mSel = { kind: 'a', id };
-        } else { const a = mk(d.A), b = mk(d.B), s = mId('s'); M.segs[s] = { a, b }; mSel = { kind: 's', id: s }; }
+          for (const p of [o, a, b]) if (p) mMerge(p);
+          if (!M.angs[id]) mSel = null;
+        } else {
+          const a = mk(d.A), b = mk(d.B), s = mId('s'); M.segs[s] = { a, b }; mSel = { kind: 's', id: s };
+          mMerge(a); mMerge(b);
+          if (!M.segs[s]) mSel = null;
+        }
         mChanged(); return;
       }
+      if (d.type === 'mpt' && d.moved) { const k = mMerge(d.id); if (k !== d.id) mSel = { kind: 'p', id: k }; }
       if (d.moved) mChanged(); else drawSection();
     }
     function showMeasureMenu(x, y, ref) {
@@ -6226,7 +6272,7 @@
         row(B('Clear this view', () => edit(() => { mClear(true); mSel = null; }), 'Remove the measurements in this view (' + n + ' points)'),
           B('Clear all', () => edit(() => { mClear(false); mSel = null; }), 'Remove every measurement, in both views')),
         row(B('Export PNG', () => exportDrawing('png')), B('Export PDF', () => exportDrawing('pdf'))),
-        el('div', { style: 'color:#666;font-size:11px;margin-top:4px;max-width:260px' }, 'Drag to draw a ruler; hold Ctrl to snap to points (and to line up with them).'));
+        el('div', { style: 'color:#666;font-size:11px;margin-top:4px;max-width:260px' }, 'Drag to draw a ruler (Shift-drag from a point to start one there); hold Ctrl to snap to points and line up with them; scroll while drawing for an angle.'));
       openMenu(x, y);
     }
     // the drawing (the view as it is, measurements and all) as a picture or a one-page PDF

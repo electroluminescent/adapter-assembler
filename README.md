@@ -91,7 +91,9 @@ A browser tool for designing threaded adapters, rings and gears, and exporting t
   * Drag to draw a ruler; Ctrl snaps its ends to the part's points (and lines them up level or upright).
   * Rulers show their length, and their angle unless it is square to the view; where two meet, the angle between them (a square mark for a right angle).
   * Scroll while placing to switch between a ruler and an angle: the angle is about the part's point nearest the start (from the view's level when started on one).
-  * Points show radius and height (radius/height view) or radius and angle (overhead).
+  * Points show R (radius) and H (height), or R and θ (angle) from above; points, rulers and angles each have their own colour, with a key at the top left.
+  * Nothing is repeated: a point put on another becomes that point, and a second ruler or angle between the same points is not added.
+  * Shift-drag from a point starts a ruler there (a plain drag moves the point).
   * Labels keep clear of each other and of the rulers; where there is no room they become callouts, set off the part.
   * Rulers lying over each other are set apart, with extension lines.
   * Right-click: connect a point to another to chain rulers, label as a callout (drag the box), turn each datapoint on or off, delete, clear.
