@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.32.3. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.32.4. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = "3.32.3";
+  const APP_VERSION = "3.32.4";
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -1437,7 +1437,12 @@
     let fin = total;
     // (4e-5 inch, about a micron: far below anything a printer or a machine makes, well above what a file's
     // single-precision numbers can tell apart, so no two corners land on one point and no face is a speck)
-    try { const sm = total.simplify(4e-5); if (sm && !sm.isEmpty()) { fin = sm; garbage.push(sm); } } catch (_) { fin = total; }
+    // (as one original solid first: Manifold keeps the seams between the objects it was made from, and would not
+    // collapse an edge along one)
+    try {
+      const one = total.asOriginal(); garbage.push(one);
+      const sm = one.simplify(4e-5); if (sm && !sm.isEmpty()) { fin = sm; garbage.push(sm); }
+    } catch (_) { fin = total; }
     const out = fin.getMesh(), np = out.numProp, V = [], T = Array.from(out.triVerts);
     for (let i = 0; i < out.vertProperties.length; i += np) V.push(out.vertProperties[i], out.vertProperties[i + 1], out.vertProperties[i + 2]);
     garbage.forEach(g => { try { g.delete(); } catch (_) {} });
@@ -4351,6 +4356,8 @@
         const ux = V[b] - V[a], uy = V[b + 1] - V[a + 1], uz = V[b + 2] - V[a + 2], vx = V[c] - V[a], vy = V[c + 1] - V[a + 1], vz = V[c + 2] - V[a + 2];
         let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx; const l = Math.hypot(nx, ny, nz) || 1;
         N[f * 3] = nx / l; N[f * 3 + 1] = ny / l; N[f * 3 + 2] = nz / l;
+        // (a sliver's normal is noise: it makes no line)
+        if (l < 1e-10 * Math.max(1e-12, ux * ux + uy * uy + uz * uz, vx * vx + vy * vy + vz * vz)) N[f * 3] = N[f * 3 + 1] = N[f * 3 + 2] = NaN;
         for (let e = 0; e < 3; e++) {
           const i = T[f * 3 + e], j = T[f * 3 + (e + 1) % 3], key = i < j ? i * 4294967296 + j : j * 4294967296 + i;
           const s = edges.get(key); if (s) s.push(f); else edges.set(key, [f]);
@@ -4361,7 +4368,7 @@
       for (const [key, fs0] of edges) {
         const fs = fs0.filter(f => !ghost[f]);
         let sharp = false;
-        if (fs.length === 2) {
+        if (fs.length === 2 && !isNaN(N[fs[0] * 3]) && !isNaN(N[fs[1] * 3])) {
           const [f, g] = fs, dot = N[f * 3] * N[g * 3] + N[f * 3 + 1] * N[g * 3 + 1] + N[f * 3 + 2] * N[g * 3 + 2];
           const zf = N[f * 3 + 2], zg = N[g * 3 + 2];
           sharp = dot < COS || (zf > 1e-3 && zg < -1e-3) || (zf < -1e-3 && zg > 1e-3);   // a crease, or where the surface turns away from above

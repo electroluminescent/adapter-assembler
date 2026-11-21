@@ -176,7 +176,7 @@ A browser tool for designing threaded adapters, rings and gears, and exporting t
 
   * Welded, repaired and checked for open or non-manifold edges.
     * Objects are snapped to a 24 nm grid before they are combined, so faces meant to meet meet exactly (no slits or slivers).
-    * Manifold collapses slivers under about a micron itself; points are then set to the file's own precision and only float noise is welded (0.1 µin), so the file reads back closed.
+    * Manifold collapses slivers under about a micron itself (as one solid, so seams between the objects it was made from do not hold them); points are then set to the file's own precision and only float noise is welded (0.1 µin), so the file reads back closed.
     * OBJ n-gons are written only when convex with no straight corners (any program triangulates them the same way); STEP writes each separate body as its own solid, and any flat area that does not make a plain face triangle by triangle.
 
 - #### **Scene files**
