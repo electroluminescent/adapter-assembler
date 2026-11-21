@@ -1,17 +1,17 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.32.1. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.32.2. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = "3.32.1";
+  const APP_VERSION = "3.32.2";
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
   // Points within this distance of each other (in inches, the model's units) are
   // welded into one when "Optimize" is on: 0.00001 in = 0.000254 mm.
-  const WELD_TOLERANCE_IN = 0.00001;
+  const WELD_TOLERANCE_IN = 0.0000001;   // (points closer than this are one: just float noise; Manifold has already joined the rest)
   // Booleans and extra objects are computed with the Manifold library
   // (Apache-2.0), loaded on demand from jsDelivr. Change this to self-host it.
   const MANIFOLD_URL = 'https://cdn.jsdelivr.net/npm/manifold-3d@3.5.4/manifold.js';
@@ -124,6 +124,9 @@
       pos[v * 3 + 1] = (mesh[v * S + 1] - cy) * scale;
       pos[v * 3 + 2] = (mesh[v * S + 2] - minZ) * scale;
     }
+    // Every point onto the numbers the file can hold (single precision, as STL stores them, and as the others are
+    // written): points that would land on one place in the file are one point here, so the file reads back whole.
+    for (let i = 0; i < pos.length; i++) pos[i] = Math.fround(pos[i]);
 
     // Give every triangle corner a vertex id.
     //  - optimize: points within `tol` of each other share an id (welded), using a
@@ -251,6 +254,25 @@
       }
     }
 
+    // Optimize, part 3: two triangles on the same three points facing opposite ways (a fin of no thickness, left
+    // where a sliver closed up) are no part of the solid: both go.
+    if (opts.optimize) {
+      const seen = new Map(), drop = new Set();
+      for (let t = 0; t < tris.length; t += 3) {
+        const k = [tris[t], tris[t + 1], tris[t + 2]].sort((x, y) => x - y).join(','), o = seen.get(k);
+        if (o === undefined) { seen.set(k, t); continue; }
+        // the same way round as the other: a copy, which goes alone
+        const same = [0, 1, 2].some(r => tris[o] === tris[t + r] && tris[o + 1] === tris[t + (r + 1) % 3] && tris[o + 2] === tris[t + (r + 2) % 3]);
+        drop.add(t); if (!same) drop.add(o);
+        seen.delete(k);
+      }
+      if (drop.size) {
+        const next = [];
+        for (let t = 0; t < tris.length; t += 3) if (!drop.has(t)) next.push(tris[t], tris[t + 1], tris[t + 2]);
+        dropped += drop.size; tris.length = 0; for (const v of next) tris.push(v);
+      }
+    }
+
     // Solidity: every edge must be used exactly once in each direction
     // (closed surface, two faces per edge, consistent outward winding).
     const n = uniq.length, edges = new Map();
@@ -341,7 +363,8 @@
       ext = 'step';
     } else if (opts.format === 'obj') {
       const out = ['# Adapter Assembler, units: ' + opts.unitLabel + ', ' + (opts.faces === 'ngons' ? 'n-gons' : opts.faces === 'quads' ? 'quads' : 'triangles')];
-      for (const P of uniq) out.push('v ' + P[0].toFixed(6) + ' ' + P[1].toFixed(6) + ' ' + P[2].toFixed(6));
+      const f9 = (x) => String(+x.toPrecision(9));   // (exactly the single-precision number)
+      for (const P of uniq) out.push('v ' + f9(P[0]) + ' ' + f9(P[1]) + ' ' + f9(P[2]));
       for (const f of faces) out.push('f ' + f.map(i => i + 1).join(' '));
       buffer = new TextEncoder().encode(out.join('\n') + '\n').buffer;
       ext = 'obj';
@@ -471,6 +494,18 @@
       const e = edges.get(key);
       return add("ORIENTED_EDGE('',*,*," + e.id + ',' + (e.a === a ? '.T.' : '.F.') + ')');
     };
+    // the separate bodies (triangles joined across edges), each its own solid; one that faces inward is a void
+    const comp = new Int32Array(count).fill(-1), vol = [], box = [];
+    for (let t0 = 0; t0 < count; t0++) {
+      if (comp[t0] >= 0) continue;
+      const c = vol.length, st = [t0]; comp[t0] = c; vol.push(0); box.push([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity]);
+      while (st.length) {
+        const t = st.pop(), A = uniq[tris[t * 3]], B = uniq[tris[t * 3 + 1]], C = uniq[tris[t * 3 + 2]];
+        vol[c] += (A[0] * (B[1] * C[2] - B[2] * C[1]) + A[1] * (B[2] * C[0] - B[0] * C[2]) + A[2] * (B[0] * C[1] - B[1] * C[0])) / 6;
+        for (const P of [A, B, C]) for (let q = 0; q < 3; q++) { box[c][q] = Math.min(box[c][q], P[q]); box[c][q + 3] = Math.max(box[c][q + 3], P[q]); }
+        for (let j = 0; j < 3; j++) { const o = owner.get(tris[t * 3 + (j + 1) % 3] * nU + tris[t * 3 + j]); if (o != null && comp[o] < 0) { comp[o] = c; st.push(o); } }
+      }
+    }
     const faces = [];
     regions.forEach((R, r) => {
       const loops = loopsOf(R, r); if (!loops.length) return;
@@ -481,15 +516,26 @@
       const P0 = uniq[loops[oi][0]], P1 = uniq[loops[oi][1]], u = [P1[0] - P0[0], P1[1] - P0[1], P1[2] - P0[2]], dn = u[0] * n[0] + u[1] * n[1] + u[2] * n[2];
       const ref = [u[0] - dn * n[0], u[1] - dn * n[1], u[2] - dn * n[2]];
       const plane = add("PLANE(''," + add("AXIS2_PLACEMENT_3D(''," + pt(P0) + ',' + dir(n) + ',' + dir(Math.hypot(...ref) > 1e-12 ? ref : Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0]) + ')') + ')');
-      faces.push(add("ADVANCED_FACE('',(" + bounds.join(',') + '),' + plane + ',.T.)'));
+      faces.push({ id: add("ADVANCED_FACE('',(" + bounds.join(',') + '),' + plane + ',.T.)'), c: comp[R.list[0]] });
     });
     const origin = add("AXIS2_PLACEMENT_3D(''," + pt([0, 0, 0]) + ',' + dir([0, 0, 1]) + ',' + dir([1, 0, 0]) + ')');
     let rep;
     if (closed) {
-      const solid = add("MANIFOLD_SOLID_BREP(''," + add("CLOSED_SHELL('',(" + faces.join(',') + '))') + ')');
-      rep = add("ADVANCED_BREP_SHAPE_REPRESENTATION(''," + '(' + origin + ',' + solid + '),' + gctx + ')');
+      const shellOf = (c) => add("CLOSED_SHELL('',(" + faces.filter(f => f.c === c).map(f => f.id).join(',') + '))');
+      const outer = [], voids = [];
+      vol.forEach((v, c) => (v >= 0 ? outer : voids).push(c));
+      // a void goes with the smallest body whose box holds it
+      const holds = (a, b) => box[a][0] <= box[b][0] && box[a][1] <= box[b][1] && box[a][2] <= box[b][2] && box[a][3] >= box[b][3] && box[a][4] >= box[b][4] && box[a][5] >= box[b][5];
+      const inside = new Map(outer.map(c => [c, []]));
+      for (const v of voids) { let best = null; for (const c of outer) if (holds(c, v) && (best == null || vol[c] < vol[best])) best = c; if (best != null) inside.get(best).push(v); else outer.push(v); }
+      const solids = outer.map(c => {
+        const sh = shellOf(c), vs = inside.get(c) || [];
+        return vs.length ? add("BREP_WITH_VOIDS(''," + sh + ',(' + vs.map(v => add("ORIENTED_CLOSED_SHELL('',*," + shellOf(v) + ',.T.)')).join(',') + '))')
+          : add("MANIFOLD_SOLID_BREP(''," + sh + ')');
+      });
+      rep = add("ADVANCED_BREP_SHAPE_REPRESENTATION(''," + '(' + origin + ',' + solids.join(',') + '),' + gctx + ')');
     } else {
-      const sm = add("SHELL_BASED_SURFACE_MODEL('',(" + add("OPEN_SHELL('',(" + faces.join(',') + '))') + '))');
+      const sm = add("SHELL_BASED_SURFACE_MODEL('',(" + add("OPEN_SHELL('',(" + faces.map(f => f.id).join(',') + '))') + '))');
       rep = add("MANIFOLD_SURFACE_SHAPE_REPRESENTATION(''," + '(' + origin + ',' + sm + '),' + gctx + ')');
     }
     add('SHAPE_DEFINITION_REPRESENTATION(' + pds + ',' + rep + ')');
@@ -543,10 +589,21 @@
       }
       return out;
     };
+    const convex = (L, n) => {
+      for (let i = 0; i < L.length; i++) {
+        const A = uniq[L[(i + L.length - 1) % L.length]], B = uniq[L[i]], C = uniq[L[(i + 1) % L.length]];
+        const ux = B[0] - A[0], uy = B[1] - A[1], uz = B[2] - A[2], wx = C[0] - B[0], wy = C[1] - B[1], wz = C[2] - B[2];
+        const cr = (uy * wz - uz * wy) * n[0] + (uz * wx - ux * wz) * n[1] + (ux * wy - uy * wx) * n[2];
+        if (!(cr > 2e-3 * Math.hypot(ux, uy, uz) * Math.hypot(wx, wy, wz))) return false;   // (no corner within about 0.1° of straight)
+      }
+      return true;
+    };
     const emit = (list, n, depth) => {
       if (list.length === 1) { faces.push(triFace(list[0])); return; }
       const loops = outlines(list);
-      if (loops && loops.length === 1 && loops[0].length >= 3) { faces.push(loops[0]); return; }
+      // (only a polygon every program reads the same way: convex, no corner in a straight line with its neighbours, so a
+      // fan from any corner is the face; anything else is split)
+      if (loops && loops.length === 1 && loops[0].length >= 3 && (loops[0].length === 3 || convex(loops[0], n))) { faces.push(loops[0]); return; }
       if (depth >= 10) { for (const t of list) faces.push(triFace(t)); return; }
       // split across the middle, alternating between two directions in the face's plane
       const ax = Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
@@ -1287,7 +1344,11 @@
     const garbage = [];
     const keep = (m) => { garbage.push(m); return m; };
     const toM = (mesh, what) => {
-      const m = new mf.Mesh({ numProp: 3, vertProperties: new Float32Array(mesh.V), triVerts: new Uint32Array(mesh.T) });
+      // every point onto a fine grid (2^-20 inch, about 24 nm): faces meant to meet then meet exactly, which Manifold
+      // joins cleanly, instead of almost, which leaves slits and slivers of no thickness
+      const G = 1048576, P = new Float32Array(mesh.V.length);
+      for (let i = 0; i < P.length; i++) P[i] = Math.round(mesh.V[i] * G) / G;
+      const m = new mf.Mesh({ numProp: 3, vertProperties: P, triVerts: new Uint32Array(mesh.T) });
       m.merge();
       try { return keep(new mf.Manifold(m)); } catch (e) { throw new Error(what + ' is not a closed solid (' + (e.message || e) + ')'); }
     };
@@ -1338,7 +1399,13 @@
     }
     const total = unionAll(scene.root);
     if (!total || total.isEmpty()) { garbage.forEach(g => { try { g.delete(); } catch (_) {} }); throw new Error('the scene is empty'); }
-    const out = total.getMesh(), np = out.numProp, V = [], T = Array.from(out.triVerts);
+    // Slivers where objects only just meet (edges far shorter than anything printable) are collapsed by Manifold
+    // itself, which keeps the solid whole; welding them afterwards could tear it.
+    let fin = total;
+    // (1e-5 inch, a quarter of a micron: well above what an STL's single-precision numbers can tell apart, so no two
+    // corners of the file land on one point)
+    try { const sm = total.simplify(1e-5); if (sm && !sm.isEmpty()) { fin = sm; garbage.push(sm); } } catch (_) { fin = total; }
+    const out = fin.getMesh(), np = out.numProp, V = [], T = Array.from(out.triVerts);
     for (let i = 0; i < out.vertProperties.length; i += np) V.push(out.vertProperties[i], out.vertProperties[i + 1], out.vertProperties[i + 2]);
     garbage.forEach(g => { try { g.delete(); } catch (_) {} });
     return { mesh: { V, T }, engine: 'manifold' };
