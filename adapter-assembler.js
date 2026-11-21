@@ -1,11 +1,11 @@
 // Adapter Assembler — design threaded adapters in the browser and export STL / OBJ.
 // https://github.com/electroluminescent/adapter-assembler
-// Version 3.32.2. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
+// Version 3.32.3. Booleans use the Manifold library (Apache-2.0), loaded from jsDelivr.
 (function () {
   'use strict';
 
   // The model is kept in inches; files (STL / OBJ) and thread standards are in millimetres.
-  const APP_VERSION = "3.32.2";
+  const APP_VERSION = "3.32.3";
   const MM = 25.4;
   // Display units (Project settings): lengths in mm or inches, angles in degrees or radians.
   let UNIT_SCALE = MM, UNIT_LABEL = 'mm', ANG_SCALE = 1, ANG_LABEL = '°';
@@ -440,32 +440,48 @@
     const at = Array.from({ length: nU }, () => new Set());
     for (let t = 0; t < count; t++) for (let j = 0; j < 3; j++) at[tris[t * 3 + j]].add(region[t]);
     // each region's outlines: closed loops of directed edges
-    const loopsOf = (R, r) => {
+    // each region's outlines: closed loops of directed edges; null when they do not make a plain face (a point
+    // where the outline pinches, a loop that does not close, or one with no area)
+    const rawLoops = (R, r) => {
       const next = new Map();
       for (const t of R.list) for (let j = 0; j < 3; j++) {
         const a = tris[t * 3 + j], b = tris[t * 3 + (j + 1) % 3], o = owner.get(b * nU + a);
         if (o != null && region[o] === r) continue;
-        if (!next.has(a)) next.set(a, []);
-        next.get(a).push(b);
+        if (next.has(a)) return null;
+        next.set(a, b);
       }
-      const loops = [];
-      for (const [a0, outs] of next) while (outs.length) {
-        const L = [a0]; let b = outs.pop(), guard = 0;
-        while (b !== a0 && guard++ < 1e6) { L.push(b); const nx = next.get(b); if (!nx || !nx.length) break; b = nx.pop(); }
-        if (b === a0 && L.length >= 3) loops.push(L);
+      const loops = [], used = new Set();
+      for (const a0 of next.keys()) {
+        if (used.has(a0)) continue;
+        const L = [];
+        let v = a0;
+        while (!used.has(v)) { used.add(v); L.push(v); v = next.get(v); if (v === undefined) return null; }
+        if (v !== a0 || L.length < 3) return null;
+        loops.push(L);
       }
-      // points in the middle of a straight run between the same two faces
-      return loops.map(L => {
-        const keep = L.filter((v, i) => {
-          if (at[v].size !== 2) return true;
-          const A = uniq[L[(i + L.length - 1) % L.length]], P = uniq[v], B = uniq[L[(i + 1) % L.length]];
-          const u = [P[0] - A[0], P[1] - A[1], P[2] - A[2]], w = [B[0] - P[0], B[1] - P[1], B[2] - P[2]];
-          const cx = u[1] * w[2] - u[2] * w[1], cy = u[2] * w[0] - u[0] * w[2], cz = u[0] * w[1] - u[1] * w[0];
-          return Math.hypot(cx, cy, cz) > 1e-9 * Math.hypot(...u) * Math.hypot(...w) || (u[0] * w[0] + u[1] * w[1] + u[2] * w[2]) < 0;
-        });
-        return keep.length >= 3 ? keep : L;
-      });
+      const n = R.n;
+      for (const L of loops) {
+        let x = 0, y = 0, z = 0;
+        for (let i = 0; i < L.length; i++) { const P = uniq[L[i]], Q = uniq[L[(i + 1) % L.length]]; x += P[1] * Q[2] - P[2] * Q[1]; y += P[2] * Q[0] - P[0] * Q[2]; z += P[0] * Q[1] - P[1] * Q[0]; }
+        if (Math.abs(x * n[0] + y * n[1] + z * n[2]) / 2 < 1e-9) return null;
+      }
+      return loops.length ? loops : null;
     };
+    const raw = regions.map((R, r) => rawLoops(R, r));
+    // a region that does not make a plain face is written triangle by triangle; its points stay in every outline
+    const fixed = new Uint8Array(nU);
+    regions.forEach((R, r) => { if (!raw[r]) for (const t of R.list) for (let j = 0; j < 3; j++) fixed[tris[t * 3 + j]] = 1; });
+    // points in the middle of a straight run between the same two faces are left out
+    const loopsOf = (R, r) => raw[r].map(L => {
+      const keep = L.filter((v, i) => {
+        if (at[v].size !== 2 || fixed[v]) return true;
+        const A = uniq[L[(i + L.length - 1) % L.length]], P = uniq[v], B = uniq[L[(i + 1) % L.length]];
+        const u = [P[0] - A[0], P[1] - A[1], P[2] - A[2]], w = [B[0] - P[0], B[1] - P[1], B[2] - P[2]];
+        const cx = u[1] * w[2] - u[2] * w[1], cy = u[2] * w[0] - u[0] * w[2], cz = u[0] * w[1] - u[1] * w[0];
+        return Math.hypot(cx, cy, cz) > 1e-9 * Math.hypot(...u) * Math.hypot(...w) || (u[0] * w[0] + u[1] * w[1] + u[2] * w[2]) < 0;
+      });
+      return keep.length >= 3 ? keep : L;
+    });
     // entities
     const E = [], add = (s) => { E.push(s); return '#' + E.length; };
     const num = (x) => { let s = (Math.abs(x) < 1e-12 ? 0 : +x.toFixed(9)).toString(); if (/e/i.test(s)) { const [m, e] = s.split(/e/i); s = (m.includes('.') ? m : m + '.') + 'E' + e; } else if (!s.includes('.')) s += '.'; return s; };
@@ -508,11 +524,28 @@
     }
     const faces = [];
     regions.forEach((R, r) => {
+      if (!raw[r]) {
+        for (const t of R.list) {
+          const L = [tris[t * 3], tris[t * 3 + 1], tris[t * 3 + 2]], A = uniq[L[0]], B = uniq[L[1]], C = uniq[L[2]];
+          const u = [B[0] - A[0], B[1] - A[1], B[2] - A[2]], w = [C[0] - A[0], C[1] - A[1], C[2] - A[2]];
+          let nn = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]]; const l = Math.hypot(...nn);
+          nn = l > 1e-30 ? nn.map(q => q / l) : R.n;
+          const bound = add("FACE_OUTER_BOUND(''," + add("EDGE_LOOP('',(" + L.map((v, j) => edge(v, L[(j + 1) % 3])).join(',') + '))') + ',.T.)');
+          const ref = Math.hypot(...u) > 1e-30 ? u : (Math.abs(nn[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0]);
+          const dd = ref[0] * nn[0] + ref[1] * nn[1] + ref[2] * nn[2], rp = [ref[0] - dd * nn[0], ref[1] - dd * nn[1], ref[2] - dd * nn[2]];
+          const plane = add("PLANE(''," + add("AXIS2_PLACEMENT_3D(''," + pt(A) + ',' + dir(nn) + ',' + dir(Math.hypot(...rp) > 1e-30 ? rp : (Math.abs(nn[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0])) + ')') + ')');
+          faces.push({ id: add("ADVANCED_FACE('',(" + bound + '),' + plane + ',.T.)'), c: comp[t] });
+        }
+        return;
+      }
       const loops = loopsOf(R, r); if (!loops.length) return;
       // the outer outline: the largest (area in the face's plane)
-      const n = R.n, area = (L) => { let x = 0, y = 0, z = 0; for (let i = 0; i < L.length; i++) { const P = uniq[L[i]], Q = uniq[L[(i + 1) % L.length]]; x += P[1] * Q[2] - P[2] * Q[1]; y += P[2] * Q[0] - P[0] * Q[2]; z += P[0] * Q[1] - P[1] * Q[0]; } return (x * n[0] + y * n[1] + z * n[2]) / 2; };
+      let n = R.n; const area = (L) => { let x = 0, y = 0, z = 0; for (let i = 0; i < L.length; i++) { const P = uniq[L[i]], Q = uniq[L[(i + 1) % L.length]]; x += P[1] * Q[2] - P[2] * Q[1]; y += P[2] * Q[0] - P[0] * Q[2]; z += P[0] * Q[1] - P[1] * Q[0]; } return (x * n[0] + y * n[1] + z * n[2]) / 2; };
       let oi = 0; loops.forEach((L, i) => { if (area(L) > area(loops[oi])) oi = i; });
       const bounds = loops.map((L, i) => add((i === oi ? 'FACE_OUTER_BOUND' : 'FACE_BOUND') + "(''," + add("EDGE_LOOP('',(" + L.map((v, j) => edge(v, L[(j + 1) % L.length])).join(',') + '))') + ',.T.)'));
+      // (the plane's normal from the whole outline, Newell's way: steadier than one triangle's on a small face)
+      { const L = loops[oi]; let x = 0, y = 0, z = 0; for (let i = 0; i < L.length; i++) { const P = uniq[L[i]], Q = uniq[L[(i + 1) % L.length]]; x += (P[1] - Q[1]) * (P[2] + Q[2]); y += (P[2] - Q[2]) * (P[0] + Q[0]); z += (P[0] - Q[0]) * (P[1] + Q[1]); }
+        const l = Math.hypot(x, y, z); if (l > 1e-30 && x * n[0] + y * n[1] + z * n[2] > 0) n = [x / l, y / l, z / l]; }
       const P0 = uniq[loops[oi][0]], P1 = uniq[loops[oi][1]], u = [P1[0] - P0[0], P1[1] - P0[1], P1[2] - P0[2]], dn = u[0] * n[0] + u[1] * n[1] + u[2] * n[2];
       const ref = [u[0] - dn * n[0], u[1] - dn * n[1], u[2] - dn * n[2]];
       const plane = add("PLANE(''," + add("AXIS2_PLACEMENT_3D(''," + pt(P0) + ',' + dir(n) + ',' + dir(Math.hypot(...ref) > 1e-12 ? ref : Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0]) + ')') + ')');
@@ -1402,9 +1435,9 @@
     // Slivers where objects only just meet (edges far shorter than anything printable) are collapsed by Manifold
     // itself, which keeps the solid whole; welding them afterwards could tear it.
     let fin = total;
-    // (1e-5 inch, a quarter of a micron: well above what an STL's single-precision numbers can tell apart, so no two
-    // corners of the file land on one point)
-    try { const sm = total.simplify(1e-5); if (sm && !sm.isEmpty()) { fin = sm; garbage.push(sm); } } catch (_) { fin = total; }
+    // (4e-5 inch, about a micron: far below anything a printer or a machine makes, well above what a file's
+    // single-precision numbers can tell apart, so no two corners land on one point and no face is a speck)
+    try { const sm = total.simplify(4e-5); if (sm && !sm.isEmpty()) { fin = sm; garbage.push(sm); } } catch (_) { fin = total; }
     const out = fin.getMesh(), np = out.numProp, V = [], T = Array.from(out.triVerts);
     for (let i = 0; i < out.vertProperties.length; i += np) V.push(out.vertProperties[i], out.vertProperties[i + 1], out.vertProperties[i + 2]);
     garbage.forEach(g => { try { g.delete(); } catch (_) {} });
